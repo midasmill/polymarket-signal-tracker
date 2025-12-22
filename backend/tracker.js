@@ -16,7 +16,7 @@ if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID)
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const POLL_INTERVAL = 30 * 1000;
-const LOSING_STREAK_THRESHOLD = 3; // auto-pause after 3 consecutive losses
+const LOSING_STREAK_THRESHOLD = 3;
 
 // ---------------------------
 // Telegram helper
@@ -33,9 +33,17 @@ async function sendTelegram(text) {
 // Polymarket API
 // ---------------------------
 async function fetchWalletTrades(username, offset = 0, limit = 100) {
+  const url = `https://data-api.polymarket.com/trades?user=${username}&takerOnly=true&limit=${limit}&offset=${offset}`;
   try {
-    const url = `https://data-api.polymarket.com/trades?user=${username}&takerOnly=true&limit=${limit}&offset=${offset}`;
     const res = await fetch(url);
+
+    // Check content type
+    const contentType = res.headers.get("content-type") || "";
+    if (!contentType.includes("application/json")) {
+      console.error(`Non-JSON response for ${username} at offset ${offset}:`, await res.text());
+      return [];
+    }
+
     const data = await res.json();
     if (!Array.isArray(data)) return [];
     return data;
@@ -58,7 +66,7 @@ async function fetchMarket(marketId) {
 }
 
 // ---------------------------
-// Confidence helper
+// Confidence helpers
 // ---------------------------
 function getConfidenceEmoji(count) {
   if (count > 50) return "⭐⭐⭐⭐⭐";
@@ -74,7 +82,7 @@ function confidenceToNumber(conf) {
 }
 
 // ---------------------------
-// Count votes per market
+// Market vote counts
 // ---------------------------
 async function getMarketVoteCounts(marketId) {
   const { data: signals } = await supabase
@@ -85,13 +93,12 @@ async function getMarketVoteCounts(marketId) {
   if (!signals || signals.length === 0) return null;
 
   const walletVotes = {};
-
   for (const sig of signals) {
     walletVotes[sig.wallet_id] = walletVotes[sig.wallet_id] || {};
     walletVotes[sig.wallet_id][sig.side] = 1;
   }
 
-  let counts = {};
+  const counts = {};
   for (const v of Object.values(walletVotes)) {
     for (const side of Object.keys(v)) {
       counts[side] = (counts[side] || 0) + 1;
@@ -119,8 +126,7 @@ function getMajorityConfidence(counts) {
 // Track wallet trades
 // ---------------------------
 async function trackWallet(wallet) {
-  if (wallet.paused) return;
-  if (!wallet.polymarket_username) return;
+  if (wallet.paused || !wallet.polymarket_username) return;
 
   console.log("Fetching trades for wallet/user:", wallet.wallet_address);
 
@@ -131,8 +137,8 @@ async function trackWallet(wallet) {
   while (true) {
     const trades = await fetchWalletTrades(wallet.polymarket_username, offset, limit);
     if (!trades || trades.length === 0) break;
-    allTrades = allTrades.concat(trades);
-    if (trades.length < limit) break;
+    allTrades.push(...trades);
+    if (trades.length < limit) break; // stop when no more pages
     offset += limit;
   }
 
@@ -179,7 +185,7 @@ async function trackWallet(wallet) {
 }
 
 // ---------------------------
-// Send majority signals with confidence updates
+// Send majority signals with confidence
 // ---------------------------
 async function sendMajoritySignals() {
   const { data: signals } = await supabase

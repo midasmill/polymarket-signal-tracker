@@ -7,26 +7,20 @@ import fetch from "node-fetch";
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY)
   throw new Error("Supabase keys required");
-}
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 // ---------------------------
-// Helpers
+// Helper: fetch Polymarket user ID
 // ---------------------------
-function getUsernameFromProfileUrl(url) {
-  const match = url.match(/\/@([^\/?#]+)/);
-  return match ? match[1] : null;
-}
-
-async function getUserIdFromUsername(username) {
+async function fetchUserId(username) {
   try {
     const res = await fetch(`https://polymarket.com/api/users/${username}`);
     if (!res.ok) throw new Error(`Failed to fetch user ${username}`);
     const data = await res.json();
-    return data.id; // numeric Polymarket user ID
+    return data?.id || null;
   } catch (err) {
     console.error("Error fetching user ID:", err.message);
     return null;
@@ -34,50 +28,56 @@ async function getUserIdFromUsername(username) {
 }
 
 // ---------------------------
-// Main
+// Main function
 // ---------------------------
-async function updateWalletUserIds() {
-  // Fetch wallets missing user ID
-  const { data: wallets, error } = await supabase
-    .from("wallets")
-    .select("*")
-    .not("polymarket_profile_url", "is", null)
-    .is("polymarket_user_id", null);
+async function main() {
+  console.log("🚀 Filling Polymarket usernames and user IDs...");
 
+  const { data: wallets, error } = await supabase.from("wallets").select("*");
   if (error) {
     console.error("Error fetching wallets:", error);
     return;
   }
 
-  console.log(`Found ${wallets.length} wallets to update`);
-
   for (const wallet of wallets) {
-    const username = getUsernameFromProfileUrl(wallet.polymarket_profile_url);
-    if (!username) {
-      console.log(`Skipping wallet ${wallet.id}: cannot extract username`);
-      continue;
-    }
+    try {
+      if (!wallet.polymarket_profile_url) continue;
 
-    const userId = await getUserIdFromUsername(username);
-    if (!userId) {
-      console.log(`Skipping wallet ${wallet.id}: could not fetch user ID`);
-      continue;
-    }
+      // Extract username from URL, e.g., https://polymarket.com/@YLnas
+      const match = wallet.polymarket_profile_url.match(/\/@([A-Za-z0-9_-]+)/);
+      if (!match) {
+        console.log(`Skipping wallet ${wallet.id}: cannot parse username`);
+        continue;
+      }
 
-    const { error: updateError } = await supabase
-      .from("wallets")
-      .update({ polymarket_user_id: userId })
-      .eq("id", wallet.id);
+      const username = match[1];
+      const userId = await fetchUserId(username);
 
-    if (updateError) {
-      console.error(`Failed to update wallet ${wallet.id}:`, updateError);
-    } else {
-      console.log(`Wallet ${wallet.id} updated with user ID ${userId}`);
+      if (!userId) {
+        console.log(`Skipping wallet ${wallet.id}: could not fetch user ID`);
+        continue;
+      }
+
+      // Update wallet with username and user ID
+      const { error: updateErr } = await supabase
+        .from("wallets")
+        .update({
+          polymarket_username: username,
+          polymarket_user_id: userId,
+        })
+        .eq("id", wallet.id);
+
+      if (updateErr) {
+        console.error(`Error updating wallet ${wallet.id}:`, updateErr);
+      } else {
+        console.log(`✅ Updated wallet ${wallet.id}: username=${username}, user_id=${userId}`);
+      }
+    } catch (err) {
+      console.error("Unexpected error:", err);
     }
   }
 
-  console.log("✅ Update complete");
+  console.log("✅ Done filling usernames and user IDs.");
 }
 
-// Run
-updateWalletUserIds();
+main();

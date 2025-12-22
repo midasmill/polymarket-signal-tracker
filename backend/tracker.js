@@ -262,10 +262,29 @@ async function main() {
 
   setInterval(async () => {
     try {
-      const { data: wallets } = await supabase.from("wallets").select("*");
-      for (const wallet of wallets) {
-        await trackWallet(wallet);
-      }
+
+
+// -----
+const { data: wallets, error } = await supabase.from("wallets").select("*");
+
+console.log("WALLETS LOADED:", wallets?.length);
+console.log(
+  "WALLET ADDRESSES:",
+  wallets?.map(w => w.wallet_address)
+);
+
+if (error) {
+  console.error("Wallet fetch error:", error);
+  return;
+}
+
+for (const wallet of wallets) {
+  await trackWallet(wallet);
+}
+// -----
+      
+
+      
 
       await updatePendingOutcomes();
     } catch (e) {

@@ -29,14 +29,8 @@ async function sendTelegram(text) {
 // ---------------------------
 // Polymarket API
 // ---------------------------
-async function fetchWalletTrades(walletAddress) {
-  const res = await fetch(`https://polymarket.com/api/trades?user=${walletAddress}`);
-  return res.ok ? res.json() : [];
-}
-
-async function fetchUserTrades(userId) {
-  if (!userId) return [];
-  const res = await fetch(`https://polymarket.com/api/users/${userId}/trades`);
+async function fetchUserTrades(username) {
+  const res = await fetch(`https://polymarket.com/api/trades?user=${username}`);
   return res.ok ? res.json() : [];
 }
 
@@ -54,12 +48,11 @@ function getConfidenceEmoji(count) {
   if (count > 25) return "⭐⭐⭐";
   if (count > 15) return "⭐⭐";
   if (count > 5) return "⭐";
-  return "";
+  return "⭐";
 }
 
 function confidenceToNumber(conf) {
-  const mapping = { "⭐": 1, "⭐⭐": 2, "⭐⭐⭐": 3, "⭐⭐⭐⭐": 4, "⭐⭐⭐⭐⭐": 5 };
-  return mapping[conf] || 0;
+  return conf.length; // number of stars
 }
 
 // ---------------------------
@@ -73,17 +66,17 @@ async function getMarketVoteCounts(marketId) {
 
   if (!signals || signals.length === 0) return null;
 
-  const walletVotes = {}; // walletId -> { YES: 0|1, NO: 0|1 }
+  const usernameVotes = {}; // username -> { YES: 0|1, NO: 0|1 }
 
   for (const sig of signals) {
-    walletVotes[sig.wallet_id] = walletVotes[sig.wallet_id] || { YES: 0, NO: 0 };
-    walletVotes[sig.wallet_id][sig.side] = 1;
+    usernameVotes[sig.polymarket_username] = usernameVotes[sig.polymarket_username] || { YES: 0, NO: 0 };
+    usernameVotes[sig.polymarket_username][sig.side] = 1;
   }
 
   let yesVotes = 0;
   let noVotes = 0;
 
-  for (const v of Object.values(walletVotes)) {
+  for (const v of Object.values(usernameVotes)) {
     if (v.YES && v.NO) {
       yesVotes += 0.5;
       noVotes += 0.5;
@@ -105,25 +98,24 @@ function getMajoritySide(votes) {
 }
 
 function getMajorityConfidence(votes) {
-  if (!votes) return "";
+  if (!votes) return "⭐";
   const count = Math.max(votes.yesVotes, votes.noVotes);
   return getConfidenceEmoji(count);
 }
 
 // ---------------------------
-// Track wallet/user
+// Track wallet
 // ---------------------------
 async function trackWallet(wallet) {
   if (wallet.paused) return;
+  if (!wallet.polymarket_username) return;
 
-  console.log("Fetching trades for wallet/user:", wallet.wallet_address);
+  console.log("Fetching trades for wallet/user:", wallet.polymarket_username);
+  const trades = await fetchUserTrades(wallet.polymarket_username);
 
-  const trades = wallet.polymarket_user_id
-    ? await fetchUserTrades(wallet.polymarket_user_id)
-    : await fetchWalletTrades(wallet.wallet_address);
-
+  console.log("Trades returned:", trades?.length, trades?.[0]);
   if (!trades || trades.length === 0) {
-    console.log("NO TRADES for", wallet.wallet_address);
+    console.log("NO TRADES for", wallet.polymarket_username);
     return;
   }
 
@@ -141,6 +133,7 @@ async function trackWallet(wallet) {
 
     await supabase.from("signals").insert({
       wallet_id: wallet.id,
+      polymarket_username: wallet.polymarket_username,
       signal: trade.marketQuestion,
       side,
       market_id: trade.marketId,
@@ -164,7 +157,6 @@ async function sendMajoritySignals() {
     const votes = await getMarketVoteCounts(m.market_id);
     const majoritySide = getMajoritySide(votes);
     if (!majoritySide) continue; // tie, skip
-
     const confidence = getMajorityConfidence(votes);
 
     // Check last confidence sent
@@ -177,7 +169,7 @@ async function sendMajoritySignals() {
       .limit(1)
       .maybeSingle();
 
-    const lastSentNum = confidenceToNumber(last?.last_confidence_sent || "");
+    const lastSentNum = confidenceToNumber(last?.last_confidence_sent || "⭐");
     const currentNum = confidenceToNumber(confidence);
 
     if (currentNum > lastSentNum) {
@@ -274,23 +266,19 @@ async function updatePendingOutcomes() {
 async function main() {
   console.log("🚀 Polymarket tracker live (REAL DATA)");
 
-  // Initial fetch for all wallets
-  const { data: wallets } = await supabase.from("wallets").select("*");
-  console.log("WALLETS LOADED:", wallets?.length);
-  console.log("WALLET ADDRESSES:", wallets?.map(w => w.wallet_address));
-
-  for (const wallet of wallets) {
-    await trackWallet(wallet);
-  }
-
-  // Calculate confidence immediately after startup
-  await sendMajoritySignals();
-  await updateNotesFeed();
-
   setInterval(async () => {
     try {
-      const { data: wallets } = await supabase.from("wallets").select("*");
+      // Fetch all wallets
+      const { data: wallets, error } = await supabase.from("wallets").select("*");
+      if (error) {
+        console.error("Wallet fetch error:", error);
+        return;
+      }
 
+      console.log("WALLETS LOADED:", wallets?.length);
+      console.log("WALLET USERNAMES:", wallets?.map(w => w.polymarket_username));
+
+      // Track all wallets
       for (const wallet of wallets) {
         await trackWallet(wallet);
       }

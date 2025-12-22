@@ -16,7 +16,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const POLL_INTERVAL = 30 * 1000;
 
 // ---------------------------
-// Telegram
+// Telegram helper
 // ---------------------------
 async function sendTelegram(text) {
   await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
@@ -49,58 +49,59 @@ function getConfidenceEmoji(count) {
 }
 
 // ---------------------------
-// Track wallet
+// Track unresolved trades for a wallet
 // ---------------------------
-async function trackWallet(wallet) {
+async function trackUnresolvedWalletTrades(wallet) {
   if (wallet.paused) return;
 
   const trades = await fetchWalletTrades(wallet.wallet_address);
   if (!trades.length) return;
 
-  const latest = trades[0];
-  const side = latest.outcome === "Yes" ? "YES" : "NO";
+  for (const trade of trades) {
+    const side = trade.outcome === "Yes" ? "YES" : "NO";
 
-  // ---------------------------
-  // Aggregate signal per market+side
-  // ---------------------------
-  const { data: existingSignal } = await supabase
-    .from("signals")
-    .select("*")
-    .eq("market_id", latest.marketId)
-    .eq("side", side)
-    .maybeSingle();
-
-  if (existingSignal) {
-    // Increment wallet count
-    const newCount = (existingSignal.wallet_count || 1) + 1;
-    await supabase
+    // Check if market + side already exists
+    const { data: existingSignal } = await supabase
       .from("signals")
-      .update({ wallet_count: newCount })
-      .eq("id", existingSignal.id);
+      .select("*")
+      .eq("market_id", trade.marketId)
+      .eq("side", side)
+      .maybeSingle();
 
-    // Telegram confidence update
+    if (existingSignal) {
+      // If this wallet is new for this signal, increment wallet_count
+      if (!existingSignal.wallets?.includes(wallet.wallet_address)) {
+        const newCount = (existingSignal.wallet_count || 1) + 1;
+        const updatedWallets = [...(existingSignal.wallets || []), wallet.wallet_address];
+        await supabase
+          .from("signals")
+          .update({ wallet_count: newCount, wallets: updatedWallets })
+          .eq("id", existingSignal.id);
+
+        // Telegram confidence update
+        await sendTelegram(
+          `Confidence Update:\nMarket: ${trade.marketQuestion}\nPrediction: ${side}\nConfidence: ${getConfidenceEmoji(newCount)}`
+        );
+      }
+      continue; // Already tracked
+    }
+
+    // Insert new signal
+    await supabase.from("signals").insert({
+      signal: trade.marketQuestion,
+      side,
+      market_id: trade.marketId,
+      outcome: "Pending",
+      wallet_count: 1,
+      wallets: [wallet.wallet_address],
+      created_at: new Date(trade.timestamp)
+    });
+
+    // Telegram initial alert
     await sendTelegram(
-      `Confidence Update:\nMarket: ${latest.marketQuestion}\nPrediction: ${side}\nConfidence: ${getConfidenceEmoji(newCount)}`
+      `Signal Sent\nMarket: ${trade.marketQuestion}\nPrediction: ${side}\nOutcome: Pending\nConfidence: ⭐`
     );
-    return;
   }
-
-  // Insert new signal
-  await supabase.from("signals").insert({
-    signal: latest.marketQuestion,
-    side,
-    market_id: latest.marketId,
-    outcome: "Pending",
-    wallet_count: 1,
-    created_at: new Date(latest.timestamp)
-  });
-
-  // ---------------------------
-  // Telegram initial alert
-  // ---------------------------
-  await sendTelegram(
-    `Signal Sent\nMarket: ${latest.marketQuestion}\nPrediction: ${side}\nOutcome: Pending\nConfidence: ⭐`
-  );
 }
 
 // ---------------------------
@@ -132,14 +133,6 @@ async function updateNotesFeed() {
        </p>`
     );
   }
-
-  // Add summary line
-  const wins = signals.filter(s => s.outcome === "WIN").length;
-  const losses = signals.filter(s => s.outcome === "LOSS").length;
-  const winRate = ((wins / (wins + losses || 1)) * 100).toFixed(2);
-  const summaryLine = `<p>Summary: ${wins} WIN(s), ${losses} LOSS(es), Win Rate: ${winRate}%</p>`;
-
-  contentArray.unshift(summaryLine);
 
   const newContent = contentArray.join("");
   await supabase
@@ -191,9 +184,11 @@ async function main() {
     try {
       await updatePendingOutcomes();
 
+      // Fetch all wallets
       const { data: wallets } = await supabase.from("wallets").select("*");
+
       for (const wallet of wallets) {
-        await trackWallet(wallet);
+        await trackUnresolvedWalletTrades(wallet);
       }
 
       await updateNotesFeed();

@@ -1,139 +1,85 @@
 import { createClient } from "@supabase/supabase-js";
 import fetch from "node-fetch";
 
-/* ===========================
+/* =========================
    ENV
-=========================== */
+========================= */
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY)
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   throw new Error("Supabase keys required");
-if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID)
+}
+if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
   throw new Error("Telegram config required");
-
-const supabase = createClient(
-  SUPABASE_URL,
-  SUPABASE_SERVICE_ROLE_KEY
-);
-
-const POLL_INTERVAL = 30 * 1000;
-
-/* ===========================
-   TELEGRAM
-=========================== */
-async function sendTelegram(text) {
-  await fetch(
-    `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: TELEGRAM_CHAT_ID,
-        text
-      })
-    }
-  );
 }
 
-/* ===========================
-   POLYMARKET API
-=========================== */
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+const POLL_INTERVAL = 30 * 1000;
+const MAX_LOSING_STREAK = 3;
 
-// Fallback (wallet based – unreliable but kept)
+/* =========================
+   Telegram
+========================= */
+async function sendTelegram(text) {
+  await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: TELEGRAM_CHAT_ID,
+      text
+    })
+  });
+}
+
+/* =========================
+   Polymarket API
+========================= */
 async function fetchWalletTrades(wallet) {
-  const res = await fetch(
-    `https://polymarket.com/api/trades?user=${wallet}`
-  );
+  const res = await fetch(`https://polymarket.com/api/trades?user=${wallet}`);
   return res.ok ? res.json() : [];
 }
 
-// Preferred (user-based)
-async function fetchUserTrades(userId) {
-  const res = await fetch(
-    `https://polymarket.com/api/users/${userId}/trades?limit=50`
-  );
-  if (!res.ok) return [];
-  const json = await res.json();
-  return json?.trades || [];
-}
-
 async function fetchMarket(marketId) {
-  const res = await fetch(
-    `https://polymarket.com/api/markets/${marketId}`
-  );
+  const res = await fetch(`https://polymarket.com/api/markets/${marketId}`);
   return res.ok ? res.json() : null;
 }
 
-/* ===========================
-   USER RESOLUTION
-=========================== */
-async function resolveUserFromProfile(wallet) {
-  if (wallet.polymarket_user_id) return wallet;
-  if (!wallet.polymarket_profile_url) return wallet;
-
-  const username = wallet.polymarket_profile_url.split("@")[1];
-  if (!username) return wallet;
-
-  const res = await fetch(
-    `https://polymarket.com/api/users?username=${username}`
-  );
-
-  if (!res.ok) return wallet;
-
-  const json = await res.json();
-  const user = json?.users?.[0];
-  if (!user?.id) return wallet;
-
-  await supabase
-    .from("wallets")
-    .update({
-      polymarket_username: username,
-      polymarket_user_id: user.id
-    })
-    .eq("id", wallet.id);
-
-  return {
-    ...wallet,
-    polymarket_username: username,
-    polymarket_user_id: user.id
-  };
-}
-
-/* ===========================
-   CONFIDENCE HELPERS
-=========================== */
+/* =========================
+   Confidence helpers
+========================= */
 function getConfidenceEmoji(count) {
   if (count >= 10) return "⭐⭐⭐";
   if (count >= 5) return "⭐⭐";
   return "⭐";
 }
 
-function confidenceToNumber(c) {
-  if (c === "⭐") return 1;
-  if (c === "⭐⭐") return 2;
-  if (c === "⭐⭐⭐") return 3;
+function confidenceToNumber(conf) {
+  if (conf === "⭐") return 1;
+  if (conf === "⭐⭐") return 2;
+  if (conf === "⭐⭐⭐") return 3;
   return 0;
 }
 
-/* ===========================
-   MAJORITY LOGIC
-=========================== */
+/* =========================
+   Vote counting logic
+========================= */
 async function getMarketVoteCounts(marketId) {
-  const { data } = await supabase
+  const { data: signals } = await supabase
     .from("signals")
     .select("wallet_id, side")
-    .eq("market_id", marketId);
+    .eq("market_id", marketId)
+    .eq("outcome", "Pending");
 
-  if (!data || data.length === 0) return null;
+  if (!signals || signals.length === 0) return null;
 
   const walletVotes = {};
 
-  for (const s of data) {
-    walletVotes[s.wallet_id] ||= { YES: 0, NO: 0 };
-    walletVotes[s.wallet_id][s.side] = 1;
+  for (const sig of signals) {
+    walletVotes[sig.wallet_id] ||= { YES: 0, NO: 0 };
+    walletVotes[sig.wallet_id][sig.side] = 1;
   }
 
   let yesVotes = 0;
@@ -143,118 +89,147 @@ async function getMarketVoteCounts(marketId) {
     if (v.YES && v.NO) {
       yesVotes += 0.5;
       noVotes += 0.5;
-    } else if (v.YES) yesVotes += 1;
-    else if (v.NO) noVotes += 1;
+    } else if (v.YES) {
+      yesVotes += 1;
+    } else if (v.NO) {
+      noVotes += 1;
+    }
   }
 
   return { yesVotes, noVotes };
 }
 
-function getMajoritySide(v) {
-  if (!v) return null;
-  if (v.yesVotes > v.noVotes) return "YES";
-  if (v.noVotes > v.yesVotes) return "NO";
+function getMajoritySide(votes) {
+  if (!votes) return null;
+  if (votes.yesVotes > votes.noVotes) return "YES";
+  if (votes.noVotes > votes.yesVotes) return "NO";
   return null;
 }
 
-/* ===========================
-   TRACK WALLET
-=========================== */
+function getMajorityConfidence(votes) {
+  if (!votes) return "⭐";
+  const count = Math.max(votes.yesVotes, votes.noVotes);
+  return getConfidenceEmoji(count);
+}
+
+/* =========================
+   Track wallet trades
+========================= */
 async function trackWallet(wallet) {
   if (wallet.paused) return;
 
-  wallet = await resolveUserFromProfile(wallet);
+  console.log("Fetching trades for:", wallet.wallet_address);
+  const trades = await fetchWalletTrades(wallet.wallet_address);
 
-  let trades = [];
-
-  if (wallet.polymarket_user_id) {
-    console.log("Fetching USER trades:", wallet.polymarket_username);
-    trades = await fetchUserTrades(wallet.polymarket_user_id);
-  } else {
-    console.log("Fallback WALLET trades:", wallet.wallet_address);
-    trades = await fetchWalletTrades(wallet.wallet_address);
-  }
-
-  if (!trades.length) return;
+  if (!trades || trades.length === 0) return;
 
   for (const trade of trades) {
-    if (trade.marketResolved) continue;
-
-    const tradeId =
-      trade.id || trade.transactionHash;
-
     const { data: exists } = await supabase
       .from("signals")
       .select("id")
-      .eq("tx_hash", tradeId)
+      .eq("tx_hash", trade.transactionHash)
       .maybeSingle();
 
     if (exists) continue;
 
-    const side =
-      trade.outcome === "Yes" ? "YES" : "NO";
+    const side = trade.outcome === "Yes" ? "YES" : "NO";
 
     await supabase.from("signals").insert({
       wallet_id: wallet.id,
       signal: trade.marketQuestion,
       side,
       market_id: trade.marketId,
-      tx_hash: tradeId,
+      tx_hash: trade.transactionHash,
       outcome: "Pending",
       created_at: new Date(trade.timestamp)
     });
   }
 }
 
-/* ===========================
-   SEND CONFIDENCE UPDATES
-=========================== */
+/* =========================
+   Send majority confidence updates
+========================= */
 async function sendMajoritySignals() {
   const { data: markets } = await supabase
     .from("signals")
     .select("market_id")
     .group("market_id");
 
+  if (!markets) return;
+
   for (const m of markets) {
     const votes = await getMarketVoteCounts(m.market_id);
-    const side = getMajoritySide(votes);
-    if (!side) continue;
+    const majoritySide = getMajoritySide(votes);
+    if (!majoritySide) continue;
 
-    const count = Math.max(
-      votes.yesVotes,
-      votes.noVotes
-    );
-    const confidence = getConfidenceEmoji(count);
+    const confidence = getMajorityConfidence(votes);
 
     const { data: last } = await supabase
       .from("signals")
       .select("last_confidence_sent")
       .eq("market_id", m.market_id)
-      .eq("side", side)
+      .eq("side", majoritySide)
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle();
 
-    if (
-      confidenceToNumber(confidence) >
-      confidenceToNumber(last?.last_confidence_sent)
-    ) {
+    const prev = confidenceToNumber(last?.last_confidence_sent || "⭐");
+    const curr = confidenceToNumber(confidence);
+
+    if (curr > prev) {
       await supabase
         .from("signals")
         .update({ last_confidence_sent: confidence })
         .eq("market_id", m.market_id)
-        .eq("side", side);
+        .eq("side", majoritySide);
 
       await sendTelegram(
-        `Confidence Update:\nMarket: ${m.market_id}\nPrediction: ${side}\nConfidence: ${confidence}`
+        `Confidence Update:\nMarket: ${m.market_id}\nPrediction: ${majoritySide}\nConfidence: ${confidence}`
       );
     }
   }
 }
 
-/* ===========================
-   RESOLVE OUTCOMES
-=========================== */
+/* =========================
+   Notes feed
+========================= */
+async function updateNotesFeed() {
+  const { data: signals } = await supabase
+    .from("signals")
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(50);
+
+  if (!signals) return;
+
+  const content = [];
+
+  for (const sig of signals) {
+    const votes = await getMarketVoteCounts(sig.market_id);
+    const side = getMajoritySide(votes) || sig.side;
+    const confidence = getMajorityConfidence(votes);
+    const time = new Date(sig.created_at).toLocaleString("en-US");
+
+    content.push(`
+      <p>
+        Signal Sent: ${time}<br>
+        Market: ${sig.signal}<br>
+        Prediction: ${side}<br>
+        Outcome: ${sig.outcome}<br>
+        Confidence: ${confidence}
+      </p>
+    `);
+  }
+
+  await supabase
+    .from("notes")
+    .update({ content: content.join(""), public: true })
+    .eq("slug", "polymarket-millionaires");
+}
+
+/* =========================
+   Resolve outcomes + auto-pause
+========================= */
 async function updatePendingOutcomes() {
   const { data: pending } = await supabase
     .from("signals")
@@ -263,33 +238,57 @@ async function updatePendingOutcomes() {
 
   if (!pending?.length) return;
 
-  let updated = false;
-
   for (const sig of pending) {
     const market = await fetchMarket(sig.market_id);
     if (!market || !market.resolved) continue;
 
-    const winSide =
+    const winningSide =
       market.winningOutcome === "Yes" ? "YES" : "NO";
+
+    const isWin = sig.side === winningSide;
+    const result = isWin ? "WIN" : "LOSS";
 
     await supabase
       .from("signals")
       .update({
-        outcome:
-          sig.side === winSide ? "WIN" : "LOSS",
+        outcome: result,
         outcome_at: new Date()
       })
       .eq("id", sig.id);
 
-    updated = true;
+    const { data: wallet } = await supabase
+      .from("wallets")
+      .select("losing_streak, paused")
+      .eq("id", sig.wallet_id)
+      .single();
+
+    if (!wallet) continue;
+
+    const newStreak = isWin ? 0 : (wallet.losing_streak || 0) + 1;
+    const shouldPause = newStreak >= MAX_LOSING_STREAK;
+
+    await supabase
+      .from("wallets")
+      .update({
+        losing_streak: newStreak,
+        paused: shouldPause ? true : wallet.paused
+      })
+      .eq("id", sig.wallet_id);
+
+    if (shouldPause && !wallet.paused) {
+      await sendTelegram(
+        `Wallet auto-paused 🚫\nReason: ${newStreak} consecutive losses`
+      );
+    }
   }
 
-  if (updated) await sendMajoritySignals();
+  await sendMajoritySignals();
+  await updateNotesFeed();
 }
 
-/* ===========================
-   MAIN LOOP
-=========================== */
+/* =========================
+   Main loop
+========================= */
 async function main() {
   console.log("🚀 Polymarket tracker live (REAL DATA)");
 
@@ -301,13 +300,13 @@ async function main() {
 
       console.log("WALLETS LOADED:", wallets?.length);
 
-      for (const wallet of wallets) {
+      for (const wallet of wallets || []) {
         await trackWallet(wallet);
       }
 
       await updatePendingOutcomes();
-    } catch (e) {
-      console.error("Loop error:", e);
+    } catch (err) {
+      console.error("Loop error:", err);
     }
   }, POLL_INTERVAL);
 }

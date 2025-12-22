@@ -1,15 +1,12 @@
 {
-  "name": "polymarket-backend",
+  "name": "backend",
   "version": "1.0.0",
-  "description": "Node.js tracker for Polymarket wallet signals",
   "type": "module",
   "main": "tracker.js",
-  "scripts": {
-    "start": "node tracker.js"
-  },
   "dependencies": {
-    "axios": "^1.6.0",
-    "@supabase/supabase-js": "^2.10.0",
-    "dotenv": "^16.3.0"
+    "@supabase/supabase-js": "^2.89.0",
+    "axios": "^1.13.2",
+    "dotenv": "^16.6.1",
+    "graphql-request": "^6.1.0"
   }
 }

@@ -13,7 +13,6 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) throw new Error("Supabase keys 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) throw new Error("Telegram config required");
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-
 const POLL_INTERVAL = 30 * 1000;
 
 // ---------------------------
@@ -51,11 +50,15 @@ async function trackWallet(wallet) {
 
   const latest = trades[0];
 
-  // Prevent duplicates
+  // ---------------------------
+  // Prevent duplicates: only one pending per wallet + market
+  // ---------------------------
   const { data: existing } = await supabase
     .from("signals")
     .select("id")
-    .eq("tx_hash", latest.transactionHash)
+    .eq("wallet_id", wallet.id)
+    .eq("market_id", latest.marketId)
+    .eq("outcome", "Pending")
     .maybeSingle();
 
   if (existing) return;
@@ -74,8 +77,40 @@ async function trackWallet(wallet) {
 
   await supabase.from("signals").insert(signal);
 
+  // ---------------------------
+  // Update Notes feed
+  // ---------------------------
+  const { data: existingNotes } = await supabase
+    .from("notes")
+    .select("content")
+    .eq("slug", "polymarket-millionaires")
+    .single();
+
+  let contentArray = existingNotes?.content?.split("</p>").filter(Boolean) || [];
+
+  contentArray.unshift(
+    `<p>
+       Signal Sent: ${new Date(latest.timestamp).toLocaleString("en-US")}<br>
+       Side: ${side}<br>
+       Market: ${latest.marketQuestion}<br>
+       Outcome: Pending
+     </p>`
+  );
+
+  const MAX_SIGNALS = 50;
+  contentArray = contentArray.slice(0, MAX_SIGNALS);
+
+  const newContent = contentArray.map(c => c + "</p>").join("");
+
+  await supabase.from("notes")
+    .update({ content: newContent, public: true })
+    .eq("slug", "polymarket-millionaires");
+
+  // ---------------------------
+  // Telegram alert
+  // ---------------------------
   await sendTelegram(
-    `Signal Sent\nMarket: ${signal.signal}\nBuy: ${side}\nOutcome: Pending`
+    `Signal Sent\nMarket: ${latest.marketQuestion}\nSide: ${side}\nOutcome: Pending`
   );
 }
 
@@ -113,7 +148,9 @@ async function updatePendingOutcomes() {
 
   if (!resolvedAny) return;
 
-  // Summary
+  // ---------------------------
+  // Summary of all resolved signals
+  // ---------------------------
   const { data: summary } = await supabase
     .from("signals")
     .select("outcome")

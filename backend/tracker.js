@@ -109,8 +109,28 @@ function getMajorityConfidence(votes) {
 async function trackWallet(wallet) {
   if (wallet.paused) return;
 
-  const trades = await fetchWalletTrades(wallet.wallet_address);
-  if (!trades.length) return;
+
+
+// -------  
+console.log("Fetching trades for wallet:", wallet.wallet_address);
+
+const trades = await fetchWalletTrades(wallet.wallet_address);
+
+console.log(
+  "Trades returned:",
+  trades?.length,
+  trades?.[0]
+);
+
+if (!trades || trades.length === 0) {
+  console.log("NO TRADES for", wallet.wallet_address);
+  return;
+}
+// -------
+
+
+
+  
 
   for (const trade of trades) {
     // Prevent duplicate per tradeId

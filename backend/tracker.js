@@ -14,7 +14,7 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) throw new Error("Supabase keys 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) throw new Error("Telegram bot info required.");
 
 // ---------------------------
-// Supabase client
+// Supabase client (service role key bypasses RLS)
 // ---------------------------
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
@@ -82,7 +82,7 @@ async function trackWallet(wallet) {
   const result = generateSignal(positions);
   if (!result) return;
 
-  // Insert into Supabase
+  // Insert into signals table
   await supabase.from("signals").insert([{
     wallet_id: wallet.id,
     signal: result.signal,
@@ -90,30 +90,34 @@ async function trackWallet(wallet) {
     created_at: new Date().toISOString()
   }]);
 
-  console.log("Signal saved:", result.signal, "PnL:", result.pnl.toFixed(2));
-
   // Update losing streak
   let losingStreak = wallet.losing_streak || 0;
   if (result.pnl < 0) losingStreak += 1;
   else losingStreak = 0;
 
-  let paused = losingStreak >= 3; // auto-pause after 3 losses
+  const paused = losingStreak >= 3; // auto-pause after 3 losses
 
   await supabase.from("wallets").update({ losing_streak: losingStreak, paused }).eq("id", wallet.id);
 
-  // Send Telegram alert
-  await sendTelegram(`Signal: ${result.signal}\nPnL: ${result.pnl.toFixed(2)}\nWallet: ${wallet.wallet_address}`);
+  // Update notes content
+  const noteContent = `<p>Latest signal: ${result.signal} | PnL: ${result.pnl.toFixed(2)}</p>`;
+  await supabase.from("notes")
+    .update({ content: noteContent, public: true })
+    .eq("slug", "polymarket-millionaires");
+
+  // Telegram alert
+  await sendTelegram(`Signal: ${result.signal}\nPnL: ${result.pnl.toFixed(2)}`);
 }
 
 // ---------------------------
 // Main loop
 // ---------------------------
 async function main() {
-  console.log("🚀 Polymarket wallet tracker started with losing-streak auto-pause and Telegram alerts.");
+  console.log("🚀 Polymarket wallet tracker started with losing-streak auto-pause and Telegram updates.");
 
   setInterval(async () => {
     try {
-      // Get wallets dynamically from Supabase
+      // Get all wallets dynamically from Supabase
       const { data: wallets, error } = await supabase.from("wallets").select("*");
       if (error) {
         console.error("Error fetching wallets:", error);

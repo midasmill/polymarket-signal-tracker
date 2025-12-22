@@ -16,7 +16,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const POLL_INTERVAL = 30 * 1000;
 
 // ---------------------------
-// Telegram helper
+// Telegram
 // ---------------------------
 async function sendTelegram(text) {
   await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
@@ -48,59 +48,137 @@ function getConfidenceEmoji(count) {
   return "⭐";
 }
 
+function confidenceToNumber(conf) {
+  if (conf === "⭐") return 1;
+  if (conf === "⭐⭐") return 2;
+  if (conf === "⭐⭐⭐") return 3;
+  return 0;
+}
+
 // ---------------------------
-// Track unresolved trades for a wallet
+// Count votes per market
 // ---------------------------
-async function trackUnresolvedWalletTrades(wallet) {
+async function getMarketVoteCounts(marketId) {
+  const { data: signals } = await supabase
+    .from("signals")
+    .select("*")
+    .eq("market_id", marketId);
+
+  if (!signals || signals.length === 0) return null;
+
+  const walletVotes = {}; // walletId -> { YES: 0|1, NO: 0|1 }
+
+  for (const sig of signals) {
+    walletVotes[sig.wallet_id] = walletVotes[sig.wallet_id] || { YES: 0, NO: 0 };
+    walletVotes[sig.wallet_id][sig.side] = 1;
+  }
+
+  let yesVotes = 0;
+  let noVotes = 0;
+
+  for (const v of Object.values(walletVotes)) {
+    if (v.YES && v.NO) {
+      yesVotes += 0.5;
+      noVotes += 0.5;
+    } else if (v.YES) {
+      yesVotes += 1;
+    } else if (v.NO) {
+      noVotes += 1;
+    }
+  }
+
+  return { yesVotes, noVotes };
+}
+
+function getMajoritySide(votes) {
+  if (!votes) return null;
+  if (votes.yesVotes > votes.noVotes) return "YES";
+  if (votes.noVotes > votes.yesVotes) return "NO";
+  return null; // tie
+}
+
+function getMajorityConfidence(votes) {
+  if (!votes) return "⭐";
+  const count = Math.max(votes.yesVotes, votes.noVotes);
+  return getConfidenceEmoji(count);
+}
+
+// ---------------------------
+// Track wallet
+// ---------------------------
+async function trackWallet(wallet) {
   if (wallet.paused) return;
 
   const trades = await fetchWalletTrades(wallet.wallet_address);
   if (!trades.length) return;
 
   for (const trade of trades) {
-    const side = trade.outcome === "Yes" ? "YES" : "NO";
-
-    // Check if market + side already exists
-    const { data: existingSignal } = await supabase
+    // Prevent duplicate per tradeId
+    const { data: existing } = await supabase
       .from("signals")
-      .select("*")
-      .eq("market_id", trade.marketId)
-      .eq("side", side)
+      .select("id")
+      .eq("tx_hash", trade.transactionHash)
       .maybeSingle();
 
-    if (existingSignal) {
-      // If this wallet is new for this signal, increment wallet_count
-      if (!existingSignal.wallets?.includes(wallet.wallet_address)) {
-        const newCount = (existingSignal.wallet_count || 1) + 1;
-        const updatedWallets = [...(existingSignal.wallets || []), wallet.wallet_address];
-        await supabase
-          .from("signals")
-          .update({ wallet_count: newCount, wallets: updatedWallets })
-          .eq("id", existingSignal.id);
+    if (existing) continue;
 
-        // Telegram confidence update
-        await sendTelegram(
-          `Confidence Update:\nMarket: ${trade.marketQuestion}\nPrediction: ${side}\nConfidence: ${getConfidenceEmoji(newCount)}`
-        );
-      }
-      continue; // Already tracked
-    }
+    const side = trade.outcome === "Yes" ? "YES" : "NO";
 
-    // Insert new signal
     await supabase.from("signals").insert({
+      wallet_id: wallet.id,
       signal: trade.marketQuestion,
       side,
       market_id: trade.marketId,
+      tx_hash: trade.transactionHash,
       outcome: "Pending",
-      wallet_count: 1,
-      wallets: [wallet.wallet_address],
       created_at: new Date(trade.timestamp)
     });
+  }
+}
 
-    // Telegram initial alert
-    await sendTelegram(
-      `Signal Sent\nMarket: ${trade.marketQuestion}\nPrediction: ${side}\nOutcome: Pending\nConfidence: ⭐`
-    );
+// ---------------------------
+// Send majority signals with confidence updates
+// ---------------------------
+async function sendMajoritySignals() {
+  const { data: markets } = await supabase
+    .from("signals")
+    .select("market_id")
+    .group("market_id");
+
+  for (const m of markets) {
+    const votes = await getMarketVoteCounts(m.market_id);
+    const majoritySide = getMajoritySide(votes);
+
+    if (!majoritySide) continue; // tie, skip
+
+    const confidence = getMajorityConfidence(votes);
+
+    // Check last confidence sent
+    const { data: last } = await supabase
+      .from("signals")
+      .select("last_confidence_sent")
+      .eq("market_id", m.market_id)
+      .eq("side", majoritySide)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    const lastSentNum = confidenceToNumber(last?.last_confidence_sent || "⭐");
+    const currentNum = confidenceToNumber(confidence);
+
+    if (currentNum > lastSentNum) {
+      // Update last_confidence_sent for all signals with this market + side
+      await supabase
+        .from("signals")
+        .update({ last_confidence_sent: confidence })
+        .eq("market_id", m.market_id)
+        .eq("side", majoritySide);
+
+      // Send Telegram update
+      await sendTelegram(
+        `Confidence Update:\nMarket: ${m.market_id}\nPrediction: ${majoritySide}\nConfidence: ${confidence}`
+      );
+    }
   }
 }
 
@@ -119,7 +197,9 @@ async function updateNotesFeed() {
   const contentArray = [];
 
   for (const sig of signals.slice(0, MAX_SIGNALS)) {
-    const confidence = getConfidenceEmoji(sig.wallet_count || 1);
+    const votes = await getMarketVoteCounts(sig.market_id);
+    const majoritySide = getMajoritySide(votes) || sig.side;
+    const confidence = getMajorityConfidence(votes);
     const outcomeText = sig.outcome || "Pending";
     const timestamp = new Date(sig.created_at).toLocaleString("en-US");
 
@@ -127,17 +207,16 @@ async function updateNotesFeed() {
       `<p>
          Signal Sent: ${timestamp}<br>
          Market: ${sig.signal}<br>
-         Prediction: ${sig.side}<br>
+         Prediction: ${majoritySide}<br>
          Outcome: ${outcomeText}<br>
          Confidence: ${confidence}
        </p>`
     );
   }
 
-  const newContent = contentArray.join("");
   await supabase
     .from("notes")
-    .update({ content: newContent, public: true })
+    .update({ content: contentArray.join(""), public: true })
     .eq("slug", "polymarket-millionaires");
 }
 
@@ -171,6 +250,7 @@ async function updatePendingOutcomes() {
 
   if (resolvedAny) {
     await updateNotesFeed();
+    await sendMajoritySignals();
   }
 }
 
@@ -182,16 +262,12 @@ async function main() {
 
   setInterval(async () => {
     try {
-      await updatePendingOutcomes();
-
-      // Fetch all wallets
       const { data: wallets } = await supabase.from("wallets").select("*");
-
       for (const wallet of wallets) {
-        await trackUnresolvedWalletTrades(wallet);
+        await trackWallet(wallet);
       }
 
-      await updateNotesFeed();
+      await updatePendingOutcomes();
     } catch (e) {
       console.error("Loop error:", e);
     }

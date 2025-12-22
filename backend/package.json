@@ -2,6 +2,7 @@
   "name": "polymarket-backend",
   "version": "1.0.0",
   "description": "Node.js tracker for Polymarket wallet signals",
+  "type": "module",
   "main": "tracker.js",
   "scripts": {
     "start": "node tracker.js"

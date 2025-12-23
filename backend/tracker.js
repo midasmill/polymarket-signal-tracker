@@ -1,6 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import fetch from "node-fetch";
 import cron from "node-cron";
+import http from "http";
 
 /* ===========================
    ENV
@@ -234,7 +235,6 @@ async function trackWallet(wallet) {
 
   await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
 }
-
 /* ===========================
    Format Signal
 =========================== */
@@ -396,29 +396,57 @@ async function updatePreSignals() {
 }
 
 /* ===========================
-   Leaderboard for PNL > $10,000
+   Fetch new leaderboard wallets from Polymarket
 =========================== */
-async function updateLeaderboard() {
-  const { data: topWallets } = await supabase
-    .from("wallets")
-    .select("*")
-    .gte("pnl", 10000)
-    .order("pnl", { ascending: false });
+async function fetchLeaderboardWallets() {
+  const timePeriods = ["DAY", "WEEK", "MONTH", "ALL"];
+  for (const period of timePeriods) {
+    let offset = 0;
+    const limit = 50;
 
-  if (!topWallets?.length) return;
+    while (true) {
+      const url = `https://data-api.polymarket.com/leaderboard?timePeriod=${period}&limit=${limit}&offset=${offset}`;
+      let data;
+      try {
+        data = await fetchWithRetry(url, {
+          headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
+        });
+      } catch (err) {
+        console.error("Leaderboard fetch error:", err.message);
+        break;
+      }
 
-  let leaderboardText = "💰 Polymarket Millionaires Leaderboard 💰\n\n";
-  topWallets.forEach((w, idx) => {
-    leaderboardText += `${idx + 1}. Wallet ${w.id} — PNL: $${w.pnl}\n`;
-  });
+      if (!data?.length) break;
 
-  await sendTelegram(toBlockquote(leaderboardText), true);
-  await supabase
-    .from("notes")
-    .update({ content: toBlockquote(leaderboardText), public: true })
-    .eq("slug", "polymarket-millionaires-leaderboard");
+      for (const user of data) {
+        // Filter: positive pnl and volume < 6x pnl
+        if (user.pnl > 0 && user.volume < user.pnl * 6) {
+          try {
+            // Check if already in wallets
+            const { data: existing } = await supabase
+              .from("wallets")
+              .select("id")
+              .eq("polymarket_proxy_wallet", user.proxyWallet)
+              .maybeSingle();
+
+            if (!existing) {
+              await supabase.from("wallets").insert({
+                polymarket_proxy_wallet: user.proxyWallet,
+                polymarket_username: user.username,
+              });
+              console.log(`Added new wallet: ${user.username} (${user.proxyWallet})`);
+            }
+          } catch (err) {
+            console.error("Error adding wallet:", err.message);
+          }
+        }
+      }
+
+      if (data.length < limit) break;
+      offset += limit;
+    }
+  }
 }
-
 /* ===========================
    Daily Summary + Leaderboard
 =========================== */
@@ -454,15 +482,16 @@ async function sendDailySummary() {
     .update({ content: toBlockquote(summaryText), public: true })
     .eq("slug", "polymarket-millionaires");
 
-  // Update leaderboard as part of daily summary
+  // Update leaderboard and fetch new wallets
   await updateLeaderboard();
+  await fetchLeaderboardWallets();
 }
 
 /* ===========================
    Cron daily at 7am ET
 =========================== */
 cron.schedule("0 7 * * *", () => {
-  console.log("Sending daily summary + leaderboard...");
+  console.log("Running daily summary + leaderboard + new wallets fetch...");
   sendDailySummary();
 }, { timezone: TIMEZONE });
 
@@ -471,6 +500,9 @@ cron.schedule("0 7 * * *", () => {
 =========================== */
 async function main() {
   console.log("🚀 Polymarket tracker live");
+
+  // Fetch leaderboard wallets immediately on deploy
+  await fetchLeaderboardWallets();
 
   setInterval(async () => {
     try {
@@ -481,7 +513,7 @@ async function main() {
 
       await Promise.all(wallets.map(trackWallet));
       await updatePendingOutcomes();
-      await updatePreSignals(); // <-- added pre-signals update here
+      await updatePreSignals();
     } catch (e) {
       console.error("Loop error:", e);
       await sendTelegram(`Tracker loop error: ${e.message}`);
@@ -500,8 +532,7 @@ const PORT = process.env.PORT || 3000;
 
 http.createServer((req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain" });
-  res.end("Tracker running\n");
+  res.end("Polymarket tracker running\n");
 }).listen(PORT, () => {
-  console.log(`Tracker is listening on port ${PORT}`);
+  console.log(`Tracker listening on port ${PORT}`);
 });
-

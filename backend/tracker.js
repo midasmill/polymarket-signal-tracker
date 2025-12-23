@@ -490,3 +490,18 @@ async function main() {
 }
 
 main();
+
+/* ===========================
+   Keep Render happy by binding to a port
+=========================== */
+import http from "http";
+
+const PORT = process.env.PORT || 3000;
+
+http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("Tracker running\n");
+}).listen(PORT, () => {
+  console.log(`Tracker is listening on port ${PORT}`);
+});
+

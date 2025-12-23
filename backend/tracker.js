@@ -1,7 +1,8 @@
 import { createClient } from "@supabase/supabase-js";
 import fetch from "node-fetch";
 import cron from "node-cron";
-import http from "http";
+import http from "http"; // <- only here, remove any other import
+
 
 /* ===========================
    ENV
@@ -526,8 +527,6 @@ main();
 /* ===========================
    Keep Render happy by binding to a port
 =========================== */
-import http from "http";
-
 const PORT = process.env.PORT || 3000;
 
 http.createServer((req, res) => {

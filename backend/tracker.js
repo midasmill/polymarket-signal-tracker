@@ -31,6 +31,16 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) throw new Error("Supabase keys 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 /* ===========================
+   Markdown helper
+=========================== */
+function toBlockquote(text) {
+  return text
+    .split("\n")
+    .map(line => `> ${line}`)
+    .join("\n");
+}
+
+/* ===========================
    Telegram helper
 =========================== */
 async function sendTelegram(text) {
@@ -135,8 +145,7 @@ function getMajoritySide(counts) {
   if (!counts) return null;
   const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
   if (entries.length < 1) return null;
-  // detect market tie
-  if (entries.length > 1 && entries[0][1] === entries[1][1]) return null;
+  if (entries.length > 1 && entries[0][1] === entries[1][1]) return null; // tie
   return entries[0][0];
 }
 
@@ -160,7 +169,6 @@ async function trackWallet(wallet) {
   for (const trade of trades) {
     if (trade.proxyWallet && trade.proxyWallet.toLowerCase() !== wallet.polymarket_proxy_wallet.toLowerCase()) continue;
 
-    // robust duplicate check on market_id + wallet_id + tx_hash
     const { data: existing } = await supabase
       .from("signals")
       .select("id")
@@ -241,12 +249,15 @@ async function sendResultNotes(sig, result) {
   const confidence = getMajorityConfidence(counts);
   const emoji = RESULT_EMOJIS[result] || "⚪";
   const eventUrl = `https://polymarket.com/events/${sig.slug}`;
-  const noteText = `Result Received: ${new Date().toLocaleString()}\n` +
-                   `Market Event: [${sig.signal}](${eventUrl})\n` +
-                   `Prediction: ${sig.side}\n` +
-                   `Confidence: ${confidence}\n` +
-                   `Outcome: ${sig.side}\n` +
-                   `Result: ${result} ${emoji}`;
+
+  const rawNoteText = `Result Received: ${new Date().toLocaleString()}
+Market Event: [${sig.signal}](${eventUrl})
+Prediction: ${sig.side}
+Confidence: ${confidence}
+Outcome: ${sig.side}
+Result: ${result} ${emoji}`;
+
+  const noteText = toBlockquote(rawNoteText);
 
   await sendTelegram(noteText);
 
@@ -273,7 +284,7 @@ async function sendMajoritySignals() {
   for (const { market_id } of markets) {
     const counts = await getMarketVoteCounts(market_id);
     const side = getMajoritySide(counts);
-    if (!side) continue; // skip tie
+    if (!side) continue;
 
     const confidence = getMajorityConfidence(counts);
     if (!confidence) continue;
@@ -286,11 +297,14 @@ async function sendMajoritySignals() {
 
       const eventUrl = `https://polymarket.com/events/${sig.slug}`;
       const emoji = RESULT_EMOJIS[sig.outcome] || "⚪";
-      const noteText = `Signal Sent: ${new Date().toLocaleString()}\n` +
-                       `Market Event: [${sig.signal}](${eventUrl})\n` +
-                       `Prediction: ${sig.side}\n` +
-                       `Confidence: ${confidence}\n` +
-                       `Outcome: ${sig.outcome || "Pending"} ${emoji}`;
+
+      const rawNoteText = `Signal Sent: ${new Date().toLocaleString()}
+Market Event: [${sig.signal}](${eventUrl})
+Prediction: ${sig.side}
+Confidence: ${confidence}
+Outcome: ${sig.outcome || "Pending"} ${emoji}`;
+
+      const noteText = toBlockquote(rawNoteText);
 
       await sendTelegram(noteText);
 
@@ -351,9 +365,8 @@ async function sendDailySummary() {
     summaryText += `${s.signal} - ${s.side} - Pending ⚪\n`;
   });
 
-  await sendTelegram(summaryText);
-
-  await supabase.from("notes").update({ content: summaryText, public: true }).eq("slug", "polymarket-millionaires");
+  await sendTelegram(toBlockquote(summaryText));
+  await supabase.from("notes").update({ content: toBlockquote(summaryText), public: true }).eq("slug", "polymarket-millionaires");
 }
 
 // Cron daily at 7am ET
@@ -375,9 +388,7 @@ async function main() {
 
       console.log("Wallets loaded:", wallets.length);
 
-      // parallel tracking
       await Promise.all(wallets.map(trackWallet));
-
       await updatePendingOutcomes();
     } catch (e) {
       console.error("Loop error:", e);

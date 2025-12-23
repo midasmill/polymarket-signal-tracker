@@ -112,27 +112,18 @@ function getConfidenceEmoji(count) {
 }
 
 async function getMarketVoteCounts(marketId) {
-  // Fetch all signals for this market
-  const { data: signals } = await supabase.from("signals").select("*").eq("market_id", marketId);
-  if (!signals?.length) return null;
+  const { data: votes } = await supabase.from("signals").select("*").eq("market_id", marketId);
+  if (!votes?.length) return null;
 
-  // Fetch all signal_wallets for these signals
-  const signalIds = signals.map(s => s.id);
-  const { data: signalWallets } = await supabase.from("signal_wallets").select("*").in("signal_id", signalIds);
-  if (!signalWallets?.length) return null;
-
-  // Count per wallet
   const perWallet = {};
-  for (const sw of signalWallets) {
-    const sig = signals.find(s => s.id === sw.signal_id);
-    if (!sig) continue;
-    perWallet[sw.wallet_id] ??= {};
-    perWallet[sw.wallet_id][sig.side] = (perWallet[sw.wallet_id][sig.side] || 0) + 1;
+  for (const v of votes) {
+    perWallet[v.wallet_id] ??= {};
+    perWallet[v.wallet_id][v.side] = (perWallet[v.wallet_id][v.side] || 0) + 1;
   }
 
   const counts = {};
-  for (const votes of Object.values(perWallet)) {
-    const sorted = Object.entries(votes).sort((a, b) => b[1] - a[1]);
+  for (const walletVotes of Object.values(perWallet)) {
+    const sorted = Object.entries(walletVotes).sort((a, b) => b[1] - a[1]);
     if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) continue; // tie
     counts[sorted[0][0]] = (counts[sorted[0][0]] || 0) + 1;
   }
@@ -184,69 +175,226 @@ async function trackWallet(wallet) {
   for (const trade of trades) {
     if (trade.proxyWallet && trade.proxyWallet.toLowerCase() !== wallet.polymarket_proxy_wallet.toLowerCase()) continue;
 
-    // Check existing signal_wallet
     const { data: existing } = await supabase
       .from("signal_wallets")
       .select("*")
       .eq("wallet_id", wallet.id)
-      .eq("tx_hash", trade.transactionHash);
+      .eq("tx_hash", trade.transactionHash)
+      .maybeSingle();
 
-    if (existing?.length) continue;
+    if (existing) continue;
 
-    // Insert signal if not exists
+    const { data: signalData } = await supabase
+      .from("signals")
+      .select("*")
+      .eq("market_id", trade.conditionId)
+      .maybeSingle();
+
     let signalId;
-    const { data: signalData } = await supabase.from("signals").select("id").eq("market_id", trade.conditionId).maybeSingle();
     if (!signalData) {
-      try {
-        const { data: newSignal } = await supabase
-          .from("signals")
-          .insert({
-            wallet_count: 1,
-            market_id: trade.conditionId,
-            market_name: trade.title,
-            slug: trade.slug,
-            signal: trade.title,
-            side: String(trade.outcome).toUpperCase(),
-            outcome: "Pending",
-            created_at: new Date(trade.timestamp * 1000),
-          })
-          .select("id")
-          .single();
-
-        if (!newSignal || !newSignal.id) {
-          console.error("Failed to insert signal for trade", trade);
-          continue;
-        }
-        signalId = newSignal.id;
-      } catch (err) {
-        console.error("Signal insert error:", err.message);
-        continue;
-      }
+      const { data: newSignal } = await supabase
+        .from("signals")
+        .insert({
+          wallet_count: 1,
+          market_id: trade.conditionId,
+          market_name: trade.title,
+          slug: trade.slug,
+          signal: trade.title,
+          side: String(trade.outcome).toUpperCase(),
+          outcome: "Pending",
+          created_at: new Date(trade.timestamp * 1000),
+        })
+        .select("id")
+        .single();
+      signalId = newSignal.id;
     } else {
       signalId = signalData.id;
     }
 
-    // Insert signal_wallet
-    try {
-      await supabase.from("signal_wallets").insert({
-        signal_id: signalId,
-        wallet_id: wallet.id,
-        tx_hash: trade.transactionHash,
-        wallet_count: 1,
-      });
-      insertedCount++;
-    } catch (err) {
-      console.error("Signal wallet insert error:", err.message);
-    }
+    await supabase.from("signal_wallets").insert({
+      signal_id: signalId,
+      wallet_id: wallet.id,
+      tx_hash: trade.transactionHash,
+      wallet_count: 1,
+    });
+
+    insertedCount++;
   }
 
   if (insertedCount > 0) console.log(`Inserted ${insertedCount} new trades for wallet ${wallet.id}`);
-
   await supabase.from("wallets").update({ last_checked: new Date(), last_fetch_timestamp: new Date() }).eq("id", wallet.id);
 }
 
 /* ===========================
-   Main async loop
+   Resolve outcomes & losing streaks
+=========================== */
+async function updatePendingOutcomes() {
+  const { data: pending } = await supabase.from("signals").select("*").eq("outcome", "Pending");
+  if (!pending?.length) return;
+
+  const marketIds = [...new Set(pending.map(s => s.market_id))];
+  const markets = await Promise.all(marketIds.map(id => fetchMarket(id)));
+  const marketMap = Object.fromEntries(markets.map(m => [m?.id, m]));
+
+  for (const sig of pending) {
+    try {
+      const market = marketMap[sig.market_id];
+      if (!market || !market.resolved) continue;
+
+      const winningSide = String(market.winningOutcome || "").toUpperCase();
+      if (!winningSide) continue;
+
+      const result = sig.side === winningSide ? "WIN" : (market.cancelled ? "PUSH" : "LOSS");
+      await supabase.from("signals").update({ outcome: result, outcome_at: new Date() }).eq("id", sig.id);
+
+      if (sig.wallet_id) {
+        const { data: wallet } = await supabase.from("wallets").select("*").eq("id", sig.wallet_id).single();
+        if (result === "LOSS") {
+          const streak = (wallet.losing_streak || 0) + 1;
+          await supabase.from("wallets").update({ losing_streak: streak }).eq("id", wallet.id);
+          if (streak >= LOSING_STREAK_THRESHOLD) {
+            await supabase.from("wallets").update({ paused: true }).eq("id", wallet.id);
+            await sendTelegram(`Wallet paused due to losing streak:\nWallet ID: ${wallet.id}\nLosses: ${streak}`);
+          }
+        }
+      }
+
+      await sendResultNotes(sig, result);
+    } catch (err) {
+      console.error("Error resolving signal:", err.message);
+    }
+  }
+
+  await sendMajoritySignals();
+}
+
+/* ===========================
+   Send notes & signals
+=========================== */
+async function sendResultNotes(sig, result) {
+  const counts = await getMarketVoteCounts(sig.market_id);
+  const confidence = getMajorityConfidence(counts);
+  const emoji = RESULT_EMOJIS[result] || "⚪";
+  const eventUrl = `https://polymarket.com/events/${sig.slug}`;
+
+  const rawNoteText = `Result Received: ${new Date().toLocaleString()}
+Market Event: [${escapeMarkdown(sig.signal)}](${escapeMarkdown(eventUrl)})
+Prediction: ${escapeMarkdown(sig.side)}
+Confidence: ${confidence}
+Outcome: ${escapeMarkdown(sig.side)}
+Result: ${result} ${emoji}`;
+
+  const noteText = toBlockquote(rawNoteText);
+
+  await sendTelegram(noteText);
+  await updateNotes(noteText, sig.signal);
+}
+
+async function sendMajoritySignals() {
+  const { data: markets } = await supabase.from("signals").select("market_id", { distinct: true });
+  if (!markets) return;
+
+  for (const { market_id } of markets) {
+    try {
+      const counts = await getMarketVoteCounts(market_id);
+      const side = getMajoritySide(counts);
+      if (!side) continue;
+
+      const confidence = getMajorityConfidence(counts);
+      if (!confidence) continue;
+
+      const { data: signals } = await supabase
+        .from("signals")
+        .select("*")
+        .eq("market_id", market_id)
+        .eq("side", side);
+
+      if (!signals) continue;
+
+      for (const sig of signals) {
+        if (!FORCE_SEND && sig.signal_sent_at) continue;
+
+        const eventUrl = `https://polymarket.com/events/${sig.slug}`;
+        const emoji = RESULT_EMOJIS[sig.outcome] || "⚪";
+
+        const rawNoteText = `Signal Sent: ${new Date().toLocaleString()}
+Market Event: [${escapeMarkdown(sig.signal)}](${escapeMarkdown(eventUrl)})
+Prediction: ${escapeMarkdown(sig.side)}
+Confidence: ${confidence}
+Outcome: ${sig.outcome || "Pending"} ${emoji}`;
+
+        const noteText = toBlockquote(rawNoteText);
+
+        await sendTelegram(noteText);
+        await updateNotes(noteText, sig.signal);
+
+        await supabase.from("signals").update({ signal_sent_at: new Date() }).eq("id", sig.id);
+      }
+    } catch (err) {
+      console.error("Error sending majority signals:", err.message);
+    }
+  }
+}
+
+/* ===========================
+   Daily Summary
+=========================== */
+async function sendDailySummary() {
+  const now = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(now.getDate() - 1);
+
+  const startYesterday = new Date(yesterday);
+  startYesterday.setHours(0, 0, 0, 0);
+  const endYesterday = new Date(yesterday);
+  endYesterday.setHours(23, 59, 59, 999);
+
+  const { data: allSignals } = await supabase.from("signals").select("*");
+  const allWins = allSignals.filter(s => s.outcome === "WIN").length;
+  const allLosses = allSignals.filter(s => s.outcome === "LOSS").length;
+
+  const { data: ySignals } = await supabase
+    .from("signals")
+    .select("*")
+    .gte("created_at", startYesterday.toISOString())
+    .lte("created_at", endYesterday.toISOString());
+
+  const yWins = ySignals.filter(s => s.outcome === "WIN").length;
+  const yLosses = ySignals.filter(s => s.outcome === "LOSS").length;
+
+  const pendingSignals = allSignals.filter(s => s.outcome === "Pending");
+
+  let summaryText = `📊 DAILY SUMMARY (${now.toLocaleDateString()})\n`;
+  summaryText += `All-time (W-L): ${allWins}-${allLosses}\n`;
+  summaryText += `Yesterday (${yesterday.toLocaleDateString()}) (W-L): ${yWins}-${yLosses}\n`;
+  summaryText += `Pending: ${pendingSignals.length}\n\n`;
+
+  summaryText += `Yesterday's results:\n`;
+  ySignals.forEach(s => {
+    const emoji = RESULT_EMOJIS[s.outcome] || "⚪";
+    summaryText += `${s.signal} - ${s.side} - ${s.outcome || "Pending"} ${emoji}\n`;
+  });
+
+  summaryText += `\nPending picks:\n`;
+  pendingSignals.forEach(s => {
+    summaryText += `${s.signal} - ${s.side} - Pending ⚪\n`;
+  });
+
+  const msg = toBlockquote(summaryText);
+  await sendTelegram(msg);
+  await supabase.from("notes").update({ content: msg, public: true }).eq("slug", "polymarket-millionaires");
+}
+
+/* ===========================
+   Cron for daily summary
+=========================== */
+cron.schedule("0 7 * * *", () => {
+  console.log("Sending daily summary...");
+  sendDailySummary();
+}, { timezone: TIMEZONE });
+
+/* ===========================
+   Main loop with auto-restart
 =========================== */
 async function mainLoop() {
   console.log("🚀 Polymarket tracker live");
@@ -257,7 +405,7 @@ async function mainLoop() {
       const { data: wallets } = await supabase.from("wallets").select("*");
       if (wallets?.length) {
         await Promise.all(wallets.map(trackWallet));
-        // You can also call updatePendingOutcomes here
+        await updatePendingOutcomes();
       }
     } catch (err) {
       console.error("Tracker loop error:", err);
@@ -270,4 +418,20 @@ async function mainLoop() {
   }
 }
 
-mainLoop();
+async function startTracker() {
+  let attempt = 0;
+  while (true) {
+    try {
+      await mainLoop();
+      break;
+    } catch (err) {
+      attempt++;
+      const waitTime = Math.min(1000 * 2 ** attempt, 60000);
+      console.error(`Tracker crashed, restarting in ${waitTime / 1000}s:`, err);
+      await sendTelegram(`Tracker crashed, restarting in ${waitTime / 1000}s: ${err.message}`);
+      await new Promise(r => setTimeout(r, waitTime));
+    }
+  }
+}
+
+startTracker();

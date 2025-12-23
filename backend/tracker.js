@@ -13,13 +13,17 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   throw new Error("Supabase keys required");
 }
 
+if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+  console.warn("Telegram config missing. Alerts disabled.");
+}
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 const POLL_INTERVAL = 30 * 1000;
 const LOSING_STREAK_THRESHOLD = 3;
 
 /* ===========================
-   Telegram
+   Telegram Helper
 =========================== */
 async function sendTelegram(text) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
@@ -27,43 +31,30 @@ async function sendTelegram(text) {
   await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: TELEGRAM_CHAT_ID,
-      text
-    })
+    body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text })
   });
 }
 
 /* ===========================
    Polymarket API
 =========================== */
-async function fetchLatestTrades(user) {
-  const url = `https://data-api.polymarket.com/trades?limit=100&takerOnly=true&user=${user}`;
-
-  const res = await fetch(url, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      Accept: "application/json"
-    }
-  });
-
-  if (!res.ok) {
-    console.error("Trade fetch failed:", res.status);
-    return null;
-  }
-
-  const contentType = res.headers.get("content-type") || "";
-  if (!contentType.includes("application/json")) {
-    console.error("Non-JSON response (Cloudflare block likely)");
-    return null;
-  }
-
+async function fetchWalletTrades(proxyWallet, offset = 0, limit = 100) {
+  const url = `https://data-api.polymarket.com/trades?user=${proxyWallet}&takerOnly=true&limit=${limit}&offset=${offset}`;
   try {
+    const res = await fetch(url, {
+      headers: { "Accept": "application/json", "User-Agent": "Mozilla/5.0" }
+    });
+    if (!res.ok) return [];
+    const contentType = res.headers.get("content-type") || "";
+    if (!contentType.includes("application/json")) {
+      console.error(`Non-JSON response for ${proxyWallet}: Cloudflare block?`);
+      return [];
+    }
     const data = await res.json();
-    return Array.isArray(data) ? data : null;
-  } catch {
-    return null;
+    return Array.isArray(data) ? data : [];
+  } catch (err) {
+    console.error(`Error fetching trades for ${proxyWallet}:`, err.message);
+    return [];
   }
 }
 
@@ -71,8 +62,10 @@ async function fetchMarket(marketId) {
   try {
     const res = await fetch(`https://polymarket.com/api/markets/${marketId}`);
     if (!res.ok) return null;
-    return await res.json();
-  } catch {
+    const data = await res.json();
+    return data || null;
+  } catch (err) {
+    console.error(`Error fetching market ${marketId}:`, err.message);
     return null;
   }
 }
@@ -99,30 +92,29 @@ function confidenceToNumber(conf) {
 async function getMarketVoteCounts(marketId) {
   const { data: signals } = await supabase
     .from("signals")
-    .select("wallet_id, side")
+    .select("wallet_id, outcome_id")
     .eq("market_id", marketId);
 
   if (!signals || signals.length === 0) return null;
 
   const perWallet = {};
-
-  for (const s of signals) {
-    perWallet[s.wallet_id] ??= {};
-    perWallet[s.wallet_id][s.side] = 1;
+  for (const sig of signals) {
+    perWallet[sig.wallet_id] ??= {};
+    perWallet[sig.wallet_id][sig.outcome_id] = 1;
   }
 
   const counts = {};
   for (const votes of Object.values(perWallet)) {
-    const sides = Object.keys(votes);
-    if (sides.length !== 1) continue; // conflicted wallet → ignore
-    const side = sides[0];
-    counts[side] = (counts[side] || 0) + 1;
+    const outcomes = Object.keys(votes);
+    if (outcomes.length !== 1) continue; // conflicted wallet → ignore
+    const outcome = outcomes[0];
+    counts[outcome] = (counts[outcome] || 0) + 1;
   }
 
   return counts;
 }
 
-function getMajoritySide(counts) {
+function getMajorityOutcome(counts) {
   if (!counts) return null;
   const entries = Object.entries(counts);
   if (!entries.length) return null;
@@ -140,56 +132,53 @@ function getMajorityConfidence(counts) {
    Track Wallet Trades
 =========================== */
 async function trackWallet(wallet) {
-  if (wallet.paused) return;
-  if (!wallet.polymarket_proxy_wallet) return;
+  if (wallet.paused || !wallet.polymarket_proxy_wallet) return;
 
-  console.log("Fetching trades for proxy wallet:", wallet.polymarket_proxy_wallet);
+  console.log("Fetching trades for wallet:", wallet.polymarket_proxy_wallet);
 
-  const trades = await fetchLatestTrades(wallet.polymarket_proxy_wallet);
-  if (!trades || trades.length === 0) return;
+  let offset = 0;
+  const limit = 100;
+  const allTrades = [];
 
-  for (const trade of trades) {
-    if (
-      trade.proxyWallet &&
-      trade.proxyWallet.toLowerCase() !==
-        wallet.polymarket_proxy_wallet.toLowerCase()
-    ) {
-      continue;
-    }
+  while (true) {
+    const trades = await fetchWalletTrades(wallet.polymarket_proxy_wallet, offset, limit);
+    if (!trades || trades.length === 0) break;
 
+    allTrades.push(...trades);
+    if (trades.length < limit) break;
+    offset += limit;
+  }
+
+  if (!allTrades.length) return;
+
+  for (const trade of allTrades) {
     const { data: existing } = await supabase
       .from("signals")
       .select("id")
       .eq("tx_hash", trade.transactionHash)
       .maybeSingle();
 
-    if (existing) {
-      console.log("Reached known tx, stopping");
-      break;
-    }
+    if (existing) continue;
 
-    const side = String(trade.outcome).toUpperCase();
+    // Determine side / outcome
+    let side = trade.outcome?.toUpperCase() || trade.side?.toUpperCase() || "UNKNOWN";
+    let outcome_id = trade.outcome || trade.side || "UNKNOWN";
 
-    const { error } = await supabase.from("signals").insert({
+    await supabase.from("signals").insert({
       wallet_id: wallet.id,
       signal: trade.title,
       market_name: trade.title,
       market_id: trade.conditionId,
       side,
+      outcome_id,
       tx_hash: trade.transactionHash,
       outcome: "Pending",
       created_at: new Date(trade.timestamp * 1000),
       wallet_count: 1,
       wallet_set: [String(wallet.id)],
-      tx_hashes: [trade.transactionHash]
+      tx_hashes: [trade.transactionHash],
+      last_confidence_sent: ""
     });
-
-    if (error) {
-      console.error("INSERT ERROR:", error);
-      return;
-    }
-
-    console.log("Inserted trade:", trade.transactionHash);
   }
 
   await supabase
@@ -260,6 +249,7 @@ async function updatePendingOutcomes() {
 
   if (resolvedAny) {
     await sendMajoritySignals();
+    await updateNotesFeed();
   }
 }
 
@@ -275,16 +265,74 @@ async function sendMajoritySignals() {
 
   for (const { market_id } of markets) {
     const counts = await getMarketVoteCounts(market_id);
-    const side = getMajoritySide(counts);
-    if (!side) continue;
+    const majorityOutcome = getMajorityOutcome(counts);
+    if (!majorityOutcome) continue;
 
     const confidence = getMajorityConfidence(counts);
     if (!confidence) continue;
 
-    await sendTelegram(
-      `Market Signal Update:\nMarket: ${market_id}\nPrediction: ${side}\nConfidence: ${confidence}`
+    const { data: last } = await supabase
+      .from("signals")
+      .select("last_confidence_sent")
+      .eq("market_id", market_id)
+      .eq("outcome_id", majorityOutcome)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    const lastNum = confidenceToNumber(last?.last_confidence_sent || "");
+    const currentNum = confidenceToNumber(confidence);
+
+    if (currentNum > lastNum) {
+      await supabase
+        .from("signals")
+        .update({ last_confidence_sent: confidence })
+        .eq("market_id", market_id)
+        .eq("outcome_id", majorityOutcome);
+
+      await sendTelegram(
+        `Market Signal Update:\nMarket: ${market_id}\nPrediction: ${majorityOutcome}\nConfidence: ${confidence}`
+      );
+    }
+  }
+}
+
+/* ===========================
+   Update Notes Feed
+=========================== */
+async function updateNotesFeed() {
+  const { data: signals } = await supabase
+    .from("signals")
+    .select("*")
+    .order("created_at", { ascending: false });
+
+  if (!signals) return;
+
+  const MAX_SIGNALS = 50;
+  const contentArray = [];
+
+  for (const sig of signals.slice(0, MAX_SIGNALS)) {
+    const counts = await getMarketVoteCounts(sig.market_id);
+    const majorityOutcome = getMajorityOutcome(counts) || sig.outcome_id;
+    const confidence = getMajorityConfidence(counts);
+    const outcomeText = sig.outcome || "Pending";
+    const timestamp = new Date(sig.created_at).toLocaleString("en-US");
+
+    contentArray.push(
+      `<p>
+         Signal Sent: ${timestamp}<br>
+         Market: ${sig.signal}<br>
+         Prediction: ${majorityOutcome}<br>
+         Outcome: ${outcomeText}<br>
+         Confidence: ${confidence}
+       </p>`
     );
   }
+
+  await supabase
+    .from("notes")
+    .update({ content: contentArray.join(""), public: true })
+    .eq("slug", "polymarket-millionaires");
 }
 
 /* ===========================

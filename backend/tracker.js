@@ -23,7 +23,6 @@ const FORCE_SEND = true; // test mode: sends all eligible signals
 =========================== */
 async function sendTelegram(text) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
-  console.log("Sending Telegram message:", text);
   await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -82,7 +81,7 @@ function confidenceToNumber(conf) {
 }
 
 /* ===========================
-   Market vote counts
+   Market vote counts (fixed wallet majority logic)
 =========================== */
 async function getMarketVoteCounts(marketId) {
   const { data: signals } = await supabase
@@ -93,16 +92,20 @@ async function getMarketVoteCounts(marketId) {
   if (!signals || signals.length === 0) return null;
 
   const perWallet = {};
+
+  // Group votes by wallet
   for (const s of signals) {
     perWallet[s.wallet_id] ??= {};
-    perWallet[s.wallet_id][s.side] = 1;
+    perWallet[s.wallet_id][s.side] = (perWallet[s.wallet_id][s.side] || 0) + 1;
   }
 
   const counts = {};
+
+  // Take majority vote per wallet
   for (const votes of Object.values(perWallet)) {
-    const sides = Object.keys(votes);
-    if (sides.length !== 1) continue; // conflicting wallet → ignore
-    const side = sides[0];
+    const sides = Object.entries(votes); // [[side, count], ...]
+    sides.sort((a, b) => b[1] - a[1]);   // sort descending by vote count
+    const side = sides[0][0];            // majority side
     counts[side] = (counts[side] || 0) + 1;
   }
 
@@ -180,55 +183,93 @@ async function updatePendingOutcomes() {
 
   for (const sig of pending) {
     const market = await fetchMarket(sig.market_id);
-    const isResolved = market?.resolved || false;
-    const winningSide = market?.winningOutcome ? String(market.winningOutcome).toUpperCase() : null;
+    if (!market || !market.resolved) continue;
 
-    let result = null;
-    if (isResolved && winningSide) {
-      result = sig.side === winningSide ? "WIN" : "LOSS";
-      await supabase.from("signals").update({ outcome: result, outcome_at: new Date() }).eq("id", sig.id);
+    const winningSide = String(market.winningOutcome || "").toUpperCase();
+    if (!winningSide) continue;
 
-      const { data: wallet } = await supabase.from("wallets").select("*").eq("id", sig.wallet_id).single();
-      if (result === "LOSS") {
-        const streak = (wallet.losing_streak || 0) + 1;
-        await supabase.from("wallets").update({ losing_streak: streak }).eq("id", wallet.id);
-        if (streak >= LOSING_STREAK_THRESHOLD) {
-          await supabase.from("wallets").update({ paused: true }).eq("id", wallet.id);
-          await sendTelegram(`Wallet paused due to losing streak:\nWallet ID: ${wallet.id}\nLosses: ${streak}`);
-        }
+    const result = sig.side === winningSide ? "WIN" : "LOSS";
+
+    await supabase
+      .from("signals")
+      .update({ outcome: result, outcome_at: new Date() })
+      .eq("id", sig.id);
+
+    const { data: wallet } = await supabase.from("wallets").select("*").eq("id", sig.wallet_id).single();
+
+    if (result === "LOSS") {
+      const streak = (wallet.losing_streak || 0) + 1;
+      await supabase.from("wallets").update({ losing_streak: streak }).eq("id", wallet.id);
+      if (streak >= LOSING_STREAK_THRESHOLD) {
+        await supabase.from("wallets").update({ paused: true }).eq("id", wallet.id);
+        await sendTelegram(`Wallet paused due to losing streak:\nWallet ID: ${wallet.id}\nLosses: ${streak}`);
       }
-
-      resolvedAny = true;
     }
 
-    // Send signals even if outcome is still Pending (force send)
+    resolvedAny = true;
+
+    // send Notes/Telegram for resolved signal
     const counts = await getMarketVoteCounts(sig.market_id);
-    const majoritySide = getMajoritySide(counts);
     const confidence = getMajorityConfidence(counts);
-    if (!majoritySide || !confidence) continue;
 
-    const noteText = `Signal Sent: ${new Date().toLocaleString()}\nMarket Event: ${sig.signal}\nPrediction: ${sig.side}\nConfidence: ${confidence}\nOutcome: ${result || "Pending"}\n`;
+    const noteText = `Result Received: ${new Date().toLocaleString()}\nMarket Event: ${sig.signal}\nPrediction: ${sig.side}\nConfidence: ${confidence}\nOutcome: ${winningSide}\nResult: ${result}\n`;
 
-    console.log("Sending signal:", noteText);
-
-    // Telegram
     await sendTelegram(noteText);
 
-    // Notes page (plain text)
-    const { data: notes } = await supabase
-      .from("notes")
-      .select("id, content")
-      .eq("slug", "polymarket-millionaires")
-      .maybeSingle();
-    const newContent = notes ? notes.content + "\n" + noteText : noteText;
+    // update Notes page as plain text
+    const { data: notes } = await supabase.from("notes").select("id, content").eq("slug", "polymarket-millionaires").maybeSingle();
+    const newContent = notes ? notes.content + `\n${noteText}` : noteText;
     await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", "polymarket-millionaires");
-
-    // mark as sent
-    await supabase.from("signals").update({ signal_sent_at: new Date() }).eq("id", sig.id);
   }
 
   if (resolvedAny) {
-    console.log("Resolved some Pending outcomes.");
+    await sendMajoritySignals();
+  }
+}
+
+/* ===========================
+   Send majority signals
+=========================== */
+async function sendMajoritySignals() {
+  const { data: markets } = await supabase.from("signals").select("market_id", { distinct: true });
+  if (!markets) return;
+
+  for (const { market_id } of markets) {
+    const counts = await getMarketVoteCounts(market_id);
+    const side = getMajoritySide(counts);
+    if (!side) continue;
+
+    const confidence = getMajorityConfidence(counts);
+    if (!confidence) continue;
+
+    const { data: signals } = await supabase
+      .from("signals")
+      .select("*")
+      .eq("market_id", market_id)
+      .eq("side", side);
+
+    if (!signals) continue;
+
+    for (const sig of signals) {
+      if (!FORCE_SEND && sig.signal_sent_at) continue;
+
+      const noteText = `Signal Sent: ${new Date().toLocaleString()}\nMarket Event: ${sig.signal}\nPrediction: ${sig.side}\nConfidence: ${confidence}\n`;
+
+      // Telegram
+      await sendTelegram(noteText);
+
+      // Notes page as plain text
+      const { data: notes } = await supabase
+        .from("notes")
+        .select("id, content")
+        .eq("slug", "polymarket-millionaires")
+        .maybeSingle();
+      const newContent = notes ? notes.content + `\n${noteText}` : noteText;
+      await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", "polymarket-millionaires");
+
+      // mark as sent
+      await supabase.from("signals").update({ signal_sent_at: new Date() }).eq("id", sig.id);
+    }
   }
 }
 

@@ -9,7 +9,7 @@ import { utcToZonedTime } from "date-fns-tz";
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const TELEGRAM_CHAT_ID = "-4911183253"; // Group chat ID
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) throw new Error("Supabase keys required");
 
@@ -21,7 +21,7 @@ const MIN_WALLETS_FOR_SIGNAL = 2; // production mode threshold
 const FORCE_SEND = true; // send all eligible signals
 
 const TIMEZONE = "America/New_York";
-const RESULT_EMOJIS = { WIN: "✅", LOSS: "❌" };
+const RESULT_EMOJIS = { WIN: "✅", LOSS: "❌", Pending: "⚪" };
 
 /* ===========================
    Telegram helper
@@ -49,6 +49,8 @@ async function fetchLatestTrades(user) {
       },
     });
     if (!res.ok) return null;
+    const contentType = res.headers.get("content-type") || "";
+    if (!contentType.includes("application/json")) return null;
     const data = await res.json();
     return Array.isArray(data) ? data : null;
   } catch (err) {
@@ -205,7 +207,7 @@ async function updatePendingOutcomes() {
 
     const counts = await getMarketVoteCounts(sig.market_id);
     const confidence = getMajorityConfidence(counts);
-    const emoji = RESULT_EMOJIS[result] || "";
+    const emoji = RESULT_EMOJIS[result] || "⚪";
     const eventUrl = `https://polymarket.com/events/${sig.slug}`;
 
     const noteText = `Result Received: ${new Date().toLocaleString()}\n` +
@@ -217,6 +219,7 @@ async function updatePendingOutcomes() {
 
     await sendTelegram(noteText);
 
+    // Replace content for this signal in Notes page (no duplicates)
     const { data: notes } = await supabase.from("notes").select("id, content").eq("slug", "polymarket-millionaires").maybeSingle();
     let newContent = notes ? notes.content : "";
     const regex = new RegExp(`.*\\[${sig.signal}\\]\\(.*\\).*`, "g");
@@ -260,11 +263,12 @@ async function sendMajoritySignals() {
       if (!FORCE_SEND && sig.signal_sent_at) continue;
 
       const eventUrl = `https://polymarket.com/events/${sig.slug}`;
+      const emoji = RESULT_EMOJIS[sig.outcome] || "⚪";
       const noteText = `Signal Sent: ${new Date().toLocaleString()}\n` +
                        `Market Event: [${sig.signal}](${eventUrl})\n` +
                        `Prediction: ${sig.side}\n` +
                        `Confidence: ${confidence}\n` +
-                       `Outcome: ${sig.outcome || "Pending"}`;
+                       `Outcome: ${sig.outcome || "Pending"} ${emoji}`;
 
       await sendTelegram(noteText);
 
@@ -319,18 +323,19 @@ async function sendDailySummary() {
 
   summaryText += `Yesterday's results:\n`;
   ySignals.forEach(s => {
-    const emoji = RESULT_EMOJIS[s.outcome] || "";
+    const emoji = RESULT_EMOJIS[s.outcome] || "⚪";
     summaryText += `${s.signal} - ${s.side} - ${s.outcome || "Pending"} ${emoji}\n`;
   });
 
   summaryText += `\nPending picks:\n`;
   pendingSignals.forEach(s => {
-    summaryText += `${s.signal} - ${s.side} - Pending\n`;
+    summaryText += `${s.signal} - ${s.side} - Pending ⚪\n`;
   });
 
   await sendTelegram(summaryText);
 
-  const newContent = summaryText; // overwrite previous Notes content
+  const { data: notes } = await supabase.from("notes").select("id, content").eq("slug", "polymarket-millionaires").maybeSingle();
+  const newContent = summaryText; // overwrite previous content
   await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", "polymarket-millionaires");
 }
 

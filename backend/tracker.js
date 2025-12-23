@@ -401,7 +401,7 @@ async function updatePreSignals() {
    Fetch new leaderboard wallets from Polymarket
 =========================== */
 async function fetchLeaderboard(timePeriod) {
-  const url = `https://data-api.polymarket.com/v1/leaderboard?category=OVERALL&timePeriod=${timePeriod}&orderBy=PNL&limit=300`;
+  const url = `https://data-api.polymarket.com/v1/leaderboard?category=OVERALL&timePeriod=${timePeriod}&orderBy=PNL&limit=100`;
   const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const json = await res.json();
@@ -420,8 +420,8 @@ async function fetchAndInsertLeaderboardWallets() {
 
       for (const entry of data) {
         if (!entry.proxyWallet) continue;
-        if (entry.pnl < 5000) continue; // PnL filter
-        if (entry.volume >= entry.pnl * 6) continue; // Volume filter
+        if (entry.pnl < 1000) continue; // PnL filter
+        if (entry.volume >= entry.pnl * 8) continue; // Volume filter
 
         const { data: exists } = await supabase
           .from("wallets")

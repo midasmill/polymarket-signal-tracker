@@ -34,10 +34,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
    Helpers
 =========================== */
 function toBlockquote(text) {
-  return text
-    .split("\n")
-    .map(line => `> ${line}`)
-    .join("\n");
+  return text.split("\n").map(line => `> ${line}`).join("\n");
 }
 
 function escapeMarkdown(text) {
@@ -59,7 +56,7 @@ async function sendTelegram(text) {
 }
 
 /* ===========================
-   Polymarket API + cache + retry
+   Polymarket API + cache
 =========================== */
 const marketCache = new Map();
 const MARKET_CACHE_TTL = 1000 * 60 * 60; // 1 hour
@@ -80,7 +77,6 @@ async function fetchWithRetry(url, options = {}, retries = 3, delay = 1000) {
 async function fetchLatestTrades(wallet) {
   const lastFetch = wallet.last_fetch_timestamp || 0;
   const url = `https://data-api.polymarket.com/trades?limit=100&takerOnly=true&user=${wallet.polymarket_proxy_wallet}&since=${Math.floor(new Date(lastFetch).getTime() / 1000)}`;
-
   try {
     const data = await fetchWithRetry(url, {
       headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
@@ -116,13 +112,19 @@ function getConfidenceEmoji(count) {
 }
 
 async function getMarketVoteCounts(marketId) {
-  const { data: signals } = await supabase.from("signals").select("wallet_id, side").eq("market_id", marketId);
-  if (!signals?.length) return null;
+  const { data: votes } = await supabase
+    .from("signal_wallets as sw")
+    .select("wallets.id as wallet_id, signals.side")
+    .join("signals", "signals.id", "sw.signal_id")
+    .join("wallets", "wallets.id", "sw.wallet_id")
+    .eq("signals.market_id", marketId);
+
+  if (!votes?.length) return null;
 
   const perWallet = {};
-  for (const s of signals) {
-    perWallet[s.wallet_id] ??= {};
-    perWallet[s.wallet_id][s.side] = (perWallet[s.wallet_id][s.side] || 0) + 1;
+  for (const v of votes) {
+    perWallet[v.wallet_id] ??= {};
+    perWallet[v.wallet_id][v.side] = (perWallet[v.wallet_id][v.side] || 0) + 1;
   }
 
   const counts = {};
@@ -138,7 +140,7 @@ async function getMarketVoteCounts(marketId) {
 function getMajoritySide(counts) {
   if (!counts) return null;
   const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
-  if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) return null; // tie
+  if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) return null;
   return sorted[0][0];
 }
 
@@ -148,10 +150,15 @@ function getMajorityConfidence(counts) {
 }
 
 /* ===========================
-   Notes helper (refactored)
+   Notes helper
 =========================== */
 async function updateNotes(noteText, sigSignal) {
-  const { data: notes } = await supabase.from("notes").select("id, content").eq("slug", "polymarket-millionaires").maybeSingle();
+  const { data: notes } = await supabase
+    .from("notes")
+    .select("id, content")
+    .eq("slug", "polymarket-millionaires")
+    .maybeSingle();
+
   let content = notes?.content || "";
   const safeSignal = escapeMarkdown(sigSignal);
   const regex = new RegExp(`.*\\[${safeSignal}\\]\\(.*\\).*`, "g");
@@ -175,28 +182,49 @@ async function trackWallet(wallet) {
     if (trade.proxyWallet && trade.proxyWallet.toLowerCase() !== wallet.polymarket_proxy_wallet.toLowerCase()) continue;
 
     const { data: existing } = await supabase
-      .from("signals")
+      .from("signal_wallets")
       .select("id")
-      .eq("market_id", trade.conditionId)
-      .eq("wallet_id", wallet.id)
-      .eq("tx_hash", trade.transactionHash)
+      .join("signals", "signals.id", "signal_wallets.signal_id")
+      .eq("signals.market_id", trade.conditionId)
+      .eq("signal_wallets.wallet_id", wallet.id)
+      .eq("signal_wallets.tx_hash", trade.transactionHash)
       .maybeSingle();
 
     if (existing) continue;
 
-    await supabase.from("signals").insert({
+    // Insert signal if not exists
+    const { data: signalData } = await supabase
+      .from("signals")
+      .select("id")
+      .eq("market_id", trade.conditionId)
+      .maybeSingle();
+
+    let signalId;
+    if (!signalData) {
+      const { data: newSignal } = await supabase
+        .from("signals")
+        .insert({
+          wallet_count: 1,
+          market_id: trade.conditionId,
+          market_name: trade.title,
+          slug: trade.slug,
+          signal: trade.title,
+          side: String(trade.outcome).toUpperCase(),
+          outcome: "Pending",
+          created_at: new Date(trade.timestamp * 1000),
+        })
+        .select("id")
+        .single();
+      signalId = newSignal.id;
+    } else {
+      signalId = signalData.id;
+    }
+
+    await supabase.from("signal_wallets").insert({
+      signal_id: signalId,
       wallet_id: wallet.id,
-      signal: trade.title,
-      market_name: trade.title,
-      market_id: trade.conditionId,
-      slug: trade.slug,
-      side: String(trade.outcome).toUpperCase(),
       tx_hash: trade.transactionHash,
-      outcome: "Pending",
-      created_at: new Date(trade.timestamp * 1000),
       wallet_count: 1,
-      wallet_set: [String(wallet.id)],
-      tx_hashes: [trade.transactionHash],
     });
 
     insertedCount++;
@@ -204,7 +232,6 @@ async function trackWallet(wallet) {
 
   if (insertedCount > 0) console.log(`Inserted ${insertedCount} new trades for wallet ${wallet.id}`);
 
-  // update last fetch timestamp
   await supabase.from("wallets").update({ last_checked: new Date(), last_fetch_timestamp: new Date() }).eq("id", wallet.id);
 }
 
@@ -284,7 +311,12 @@ async function sendMajoritySignals() {
       const confidence = getMajorityConfidence(counts);
       if (!confidence) continue;
 
-      const { data: signals } = await supabase.from("signals").select("*").eq("market_id", market_id).eq("side", side);
+      const { data: signals } = await supabase
+        .from("signals")
+        .select("*")
+        .eq("market_id", market_id)
+        .eq("side", side);
+
       if (!signals) continue;
 
       for (const sig of signals) {

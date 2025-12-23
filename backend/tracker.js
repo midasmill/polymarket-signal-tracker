@@ -26,7 +26,9 @@ const CONFIDENCE_THRESHOLDS = {
 
 const RESULT_EMOJIS = { WIN: "✅", LOSS: "❌", Pending: "⚪" };
 
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) throw new Error("Supabase keys required");
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  throw new Error("Supabase keys required");
+}
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
@@ -51,7 +53,11 @@ async function sendTelegram(text, useBlockquote = false) {
     await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text, parse_mode: "Markdown" }),
+      body: JSON.stringify({
+        chat_id: TELEGRAM_CHAT_ID,
+        text,
+        parse_mode: "Markdown",
+      }),
     });
   } catch (err) {
     console.error("Telegram send failed:", err.message);
@@ -70,8 +76,11 @@ async function fetchWithRetry(url, options = {}, retries = 3, delay = 1000) {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return await res.json();
     } catch (err) {
-      if (i < retries - 1) await new Promise(r => setTimeout(r, delay));
-      else throw err;
+      if (i < retries - 1) {
+        await new Promise(r => setTimeout(r, delay));
+      } else {
+        throw err;
+      }
     }
   }
 }
@@ -80,7 +89,10 @@ async function fetchLatestTrades(user) {
   const url = `https://data-api.polymarket.com/trades?limit=100&takerOnly=true&user=${user}`;
   try {
     const data = await fetchWithRetry(url, {
-      headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+        Accept: "application/json",
+      },
     });
     return Array.isArray(data) ? data : [];
   } catch (err) {
@@ -105,8 +117,12 @@ async function fetchMarket(marketId) {
    Confidence helpers
 =========================== */
 function getConfidenceEmoji(count) {
-  const entries = Object.entries(CONFIDENCE_THRESHOLDS).sort(([, a], [, b]) => b - a);
-  for (const [emoji, threshold] of entries) if (count >= threshold) return emoji;
+  const entries = Object.entries(CONFIDENCE_THRESHOLDS).sort(
+    ([, a], [, b]) => b - a
+  );
+  for (const [emoji, threshold] of entries) {
+    if (count >= threshold) return emoji;
+  }
   return "";
 }
 
@@ -114,13 +130,18 @@ function getConfidenceEmoji(count) {
    Market vote counts
 =========================== */
 async function getMarketVoteCounts(marketId) {
-  const { data: signals } = await supabase.from("signals").select("wallet_id, side").eq("market_id", marketId);
+  const { data: signals } = await supabase
+    .from("signals")
+    .select("wallet_id, side")
+    .eq("market_id", marketId);
+
   if (!signals || !signals.length) return null;
 
   const perWallet = {};
   for (const s of signals) {
     perWallet[s.wallet_id] ??= {};
-    perWallet[s.wallet_id][s.side] = (perWallet[s.wallet_id][s.side] || 0) + 1;
+    perWallet[s.wallet_id][s.side] =
+      (perWallet[s.wallet_id][s.side] || 0) + 1;
   }
 
   const counts = {};
@@ -149,15 +170,64 @@ function getMajorityConfidence(counts) {
    Track Wallet Trades
 =========================== */
 async function trackWallet(wallet) {
-  if (wallet.paused || !wallet.polymarket_proxy_wallet) return;
+  if (wallet.paused) return; // CHANGED: removed proxy-only early return
 
-  console.log("Fetching trades for proxy wallet:", wallet.polymarket_proxy_wallet);
-  const trades = await fetchLatestTrades(wallet.polymarket_proxy_wallet);
-  if (!trades.length) return;
+  let trades = [];
+  let identityUsed = null;
+
+  // NEW: try proxy wallet first
+  if (wallet.polymarket_proxy_wallet) {
+    console.log(
+      `Wallet ${wallet.id}: trying proxy wallet ${wallet.polymarket_proxy_wallet}`
+    );
+    trades = await fetchLatestTrades(wallet.polymarket_proxy_wallet);
+    if (trades.length > 0) {
+      identityUsed = "proxy";
+    }
+  }
+
+  // NEW: fallback to username
+  if (
+    trades.length === 0 &&
+    wallet.polymarket_username
+  ) {
+    console.log(
+      `Wallet ${wallet.id}: proxy empty, trying username ${wallet.polymarket_username}`
+    );
+    trades = await fetchLatestTrades(wallet.polymarket_username);
+    if (trades.length > 0) {
+      identityUsed = "username";
+    }
+  }
+
+  // NEW: explicit skip logging
+  if (trades.length === 0) {
+    console.log(
+      `Wallet ${wallet.id}: skipped (no trades via proxy or username)`
+    );
+    await supabase
+      .from("wallets")
+      .update({ last_checked: new Date() })
+      .eq("id", wallet.id);
+    return;
+  }
+
+  console.log(
+    `Wallet ${wallet.id}: ${trades.length} trades found using ${identityUsed}`
+  );
 
   let insertedCount = 0;
+
   for (const trade of trades) {
-    if (trade.proxyWallet && trade.proxyWallet.toLowerCase() !== wallet.polymarket_proxy_wallet.toLowerCase()) continue;
+    // Keep original proxyWallet guard only when proxy was used
+    if (
+      identityUsed === "proxy" &&
+      trade.proxyWallet &&
+      trade.proxyWallet.toLowerCase() !==
+        wallet.polymarket_proxy_wallet.toLowerCase()
+    ) {
+      continue;
+    }
 
     const { data: existing } = await supabase
       .from("signals")
@@ -174,7 +244,6 @@ async function trackWallet(wallet) {
       signal: trade.title,
       market_name: trade.title,
       market_id: trade.conditionId,
-      slug: trade.slug,
       side: String(trade.outcome).toUpperCase(),
       tx_hash: trade.transactionHash,
       outcome: "Pending",
@@ -187,15 +256,23 @@ async function trackWallet(wallet) {
     insertedCount++;
   }
 
-  if (insertedCount > 0) console.log(`Inserted ${insertedCount} new trades for wallet ${wallet.id}`);
-  await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
+  if (insertedCount > 0) {
+    console.log(
+      `Inserted ${insertedCount} new trades for wallet ${wallet.id}`
+    );
+  }
+
+  await supabase
+    .from("wallets")
+    .update({ last_checked: new Date() })
+    .eq("id", wallet.id);
 }
 
 /* ===========================
    Format Signal for Telegram/Notes
 =========================== */
 function formatSignal(sig, confidence, emoji, eventType = "Signal Sent") {
-  const eventUrl = `https://polymarket.com/events/${sig.slug}`;
+  const eventUrl = `https://polymarket.com/events/${sig.market_id}`;
   return `${eventType}: ${new Date().toLocaleString()}
 Market Event: [${sig.signal}](${eventUrl})
 Prediction: ${sig.side}
@@ -214,24 +291,40 @@ async function sendResultNotes(sig, result) {
 
   const text = formatSignal(sig, confidence, emoji, "Result Received");
 
-  await sendTelegram(text); // Telegram message (no blockquote)
+  await sendTelegram(text);
 
   const noteText = toBlockquote(text);
-  const { data: notes } = await supabase.from("notes").select("id, content").eq("slug", "polymarket-millionaires").maybeSingle();
+  const { data: notes } = await supabase
+    .from("notes")
+    .select("id, content")
+    .eq("slug", "polymarket-millionaires")
+    .maybeSingle();
+
   let newContent = notes?.content || "";
   const safeSignal = sig.signal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const regex = new RegExp(`.*\\[${safeSignal}\\]\\(.*\\).*`, "g");
-  if (regex.test(newContent)) newContent = newContent.replace(regex, noteText);
-  else newContent += newContent ? `\n\n${noteText}` : noteText;
 
-  await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", "polymarket-millionaires");
+  if (regex.test(newContent)) {
+    newContent = newContent.replace(regex, noteText);
+  } else {
+    newContent += newContent ? `\n\n${noteText}` : noteText;
+  }
+
+  await supabase
+    .from("notes")
+    .update({ content: newContent, public: true })
+    .eq("slug", "polymarket-millionaires");
 }
 
 /* ===========================
    Resolve outcomes & losing streaks
 =========================== */
 async function updatePendingOutcomes() {
-  const { data: pending } = await supabase.from("signals").select("*").eq("outcome", "Pending");
+  const { data: pending } = await supabase
+    .from("signals")
+    .select("*")
+    .eq("outcome", "Pending");
+
   if (!pending?.length) return;
 
   const marketIds = [...new Set(pending.map(s => s.market_id))];
@@ -239,6 +332,7 @@ async function updatePendingOutcomes() {
   const marketMap = Object.fromEntries(markets.map(m => [m?.id, m]));
 
   let resolvedAny = false;
+
   for (const sig of pending) {
     const market = marketMap[sig.market_id];
     if (!market || !market.resolved) continue;
@@ -246,17 +340,40 @@ async function updatePendingOutcomes() {
     const winningSide = String(market.winningOutcome || "").toUpperCase();
     if (!winningSide) continue;
 
-    const result = sig.side === winningSide ? "WIN" : (market.cancelled ? "PUSH" : "LOSS");
+    const result =
+      sig.side === winningSide
+        ? "WIN"
+        : market.cancelled
+        ? "PUSH"
+        : "LOSS";
 
-    await supabase.from("signals").update({ outcome: result, outcome_at: new Date() }).eq("id", sig.id);
+    await supabase
+      .from("signals")
+      .update({ outcome: result, outcome_at: new Date() })
+      .eq("id", sig.id);
 
-    const { data: wallet } = await supabase.from("wallets").select("*").eq("id", sig.wallet_id).single();
+    const { data: wallet } = await supabase
+      .from("wallets")
+      .select("*")
+      .eq("id", sig.wallet_id)
+      .single();
+
     if (result === "LOSS") {
       const streak = (wallet.losing_streak || 0) + 1;
-      await supabase.from("wallets").update({ losing_streak: streak }).eq("id", wallet.id);
+      await supabase
+        .from("wallets")
+        .update({ losing_streak: streak })
+        .eq("id", wallet.id);
+
       if (streak >= LOSING_STREAK_THRESHOLD) {
-        await supabase.from("wallets").update({ paused: true }).eq("id", wallet.id);
-        await sendTelegram(`Wallet paused due to losing streak:\nWallet ID: ${wallet.id}\nLosses: ${streak}`);
+        await supabase
+          .from("wallets")
+          .update({ paused: true })
+          .eq("id", wallet.id);
+
+        await sendTelegram(
+          `Wallet paused due to losing streak:\nWallet ID: ${wallet.id}\nLosses: ${streak}`
+        );
       }
     }
 
@@ -271,7 +388,10 @@ async function updatePendingOutcomes() {
    Send majority signals
 =========================== */
 async function sendMajoritySignals() {
-  const { data: markets } = await supabase.from("signals").select("market_id", { distinct: true });
+  const { data: markets } = await supabase
+    .from("signals")
+    .select("market_id", { distinct: true });
+
   if (!markets) return;
 
   for (const { market_id } of markets) {
@@ -282,7 +402,12 @@ async function sendMajoritySignals() {
     const confidence = getMajorityConfidence(counts);
     if (!confidence) continue;
 
-    const { data: signals } = await supabase.from("signals").select("*").eq("market_id", market_id).eq("side", side);
+    const { data: signals } = await supabase
+      .from("signals")
+      .select("*")
+      .eq("market_id", market_id)
+      .eq("side", side);
+
     if (!signals) continue;
 
     for (const sig of signals) {
@@ -294,15 +419,31 @@ async function sendMajoritySignals() {
       await sendTelegram(text);
 
       const noteText = toBlockquote(text);
-      const { data: notes } = await supabase.from("notes").select("id, content").eq("slug", "polymarket-millionaires").maybeSingle();
+      const { data: notes } = await supabase
+        .from("notes")
+        .select("id, content")
+        .eq("slug", "polymarket-millionaires")
+        .maybeSingle();
+
       let newContent = notes?.content || "";
       const safeSignal = sig.signal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const regex = new RegExp(`.*\\[${safeSignal}\\]\\(.*\\).*`, "g");
-      if (regex.test(newContent)) newContent = newContent.replace(regex, noteText);
-      else newContent += newContent ? `\n\n${noteText}` : noteText;
 
-      await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", "polymarket-millionaires");
-      await supabase.from("signals").update({ signal_sent_at: new Date() }).eq("id", sig.id);
+      if (regex.test(newContent)) {
+        newContent = newContent.replace(regex, noteText);
+      } else {
+        newContent += newContent ? `\n\n${noteText}` : noteText;
+      }
+
+      await supabase
+        .from("notes")
+        .update({ content: newContent, public: true })
+        .eq("slug", "polymarket-millionaires");
+
+      await supabase
+        .from("signals")
+        .update({ signal_sent_at: new Date() })
+        .eq("id", sig.id);
     }
   }
 }
@@ -329,24 +470,45 @@ async function sendDailySummary() {
 
   let summaryText = `Yesterday's results:\n`;
 
-  if (!ySignals || ySignals.length === 0) summaryText += `0 predictions yesterday.\n`;
-  else ySignals.forEach(s => summaryText += `${s.signal} - ${s.side} - ${s.outcome || "Pending"} ${RESULT_EMOJIS[s.outcome] || "⚪"}\n`);
+  if (!ySignals || ySignals.length === 0) {
+    summaryText += `0 predictions yesterday.\n`;
+  } else {
+    ySignals.forEach(s => {
+      summaryText += `${s.signal} - ${s.side} - ${s.outcome || "Pending"} ${
+        RESULT_EMOJIS[s.outcome] || "⚪"
+      }\n`;
+    });
+  }
 
   summaryText += `\nPending picks:\n`;
-  if (!pendingSignals || pendingSignals.length === 0) summaryText += `0 predictions pending ⚪\n`;
-  else pendingSignals.forEach(s => summaryText += `${s.signal} - ${s.side} - Pending ⚪\n`);
+
+  if (!pendingSignals || pendingSignals.length === 0) {
+    summaryText += `0 predictions pending ⚪\n`;
+  } else {
+    pendingSignals.forEach(s => {
+      summaryText += `${s.signal} - ${s.side} - Pending ⚪\n`;
+    });
+  }
 
   await sendTelegram(toBlockquote(summaryText), true);
-  await supabase.from("notes").update({ content: toBlockquote(summaryText), public: true }).eq("slug", "polymarket-millionaires");
+
+  await supabase
+    .from("notes")
+    .update({ content: toBlockquote(summaryText), public: true })
+    .eq("slug", "polymarket-millionaires");
 }
 
 /* ===========================
    Cron daily at 7am ET
 =========================== */
-cron.schedule("0 7 * * *", () => {
-  console.log("Sending daily summary...");
-  sendDailySummary();
-}, { timezone: TIMEZONE });
+cron.schedule(
+  "0 7 * * *",
+  () => {
+    console.log("Sending daily summary...");
+    sendDailySummary();
+  },
+  { timezone: TIMEZONE }
+);
 
 /* ===========================
    Main Loop

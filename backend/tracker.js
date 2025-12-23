@@ -411,7 +411,7 @@ async function fetchAndInsertLeaderboardWallets() {
     let duplicates = 0;
 
     try {
-      const url = `https://data-api.polymarket.com/v1/leaderboard?category=OVERALL&timePeriod=${period}&orderBy=PNL&limit=300`;
+      const url = `https://data-api.polymarket.com/v1/leaderboard?category=OVERALL&timePeriod=${period}&orderBy=PNL&limit=50`;
       const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
@@ -423,7 +423,7 @@ async function fetchAndInsertLeaderboardWallets() {
         if (!entry.proxyWallet) continue;
 
         // PnL and volume filter
-        if (entry.pnl >= 1000 && entry.vol < 6 * entry.pnl) {
+        if (entry.pnl >= 100 && entry.vol < 6 * entry.pnl) {
           passed++;
 
           // Insert only if not already in wallets table

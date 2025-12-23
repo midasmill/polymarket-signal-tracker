@@ -9,7 +9,7 @@ import http from "http";
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_CHAT_ID = "-4911183253"; // Group chat ID
+const TELEGRAM_CHAT_ID = "-4911183253"; // Group chat
 const TIMEZONE = process.env.TIMEZONE || "America/New_York";
 
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || "30000", 10);
@@ -107,13 +107,7 @@ async function fetchMarket(marketId) {
   try {
     const market = await fetchWithRetry(`https://polymarket.com/api/markets/${marketId}`);
     if (market) marketCache.set(marketId, market);
-    return market;
-  } catch (err) {
-    console.error("Market fetch error:", err.message);
-    return null;
-  }
-}
-
+    ret
 /* ===========================
    Confidence helpers
 =========================== */
@@ -126,6 +120,7 @@ function getConfidenceEmoji(count) {
   }
   return "";
 }
+
 /* ===========================
    Market vote counts
 =========================== */
@@ -140,8 +135,7 @@ async function getMarketVoteCounts(marketId) {
   const perWallet = {};
   for (const s of signals) {
     perWallet[s.wallet_id] ??= {};
-    perWallet[s.wallet_id][s.side] =
-      (perWallet[s.wallet_id][s.side] || 0) + 1;
+    perWallet[s.wallet_id][s.side] = (perWallet[s.wallet_id][s.side] || 0) + 1;
   }
 
   const counts = {};
@@ -167,7 +161,7 @@ function getMajorityConfidence(counts) {
 }
 
 /* ===========================
-   Track Wallet Trades
+   Track Wallet Trades & Insert Signals
 =========================== */
 async function trackWallet(wallet) {
   if (wallet.paused) return;
@@ -175,12 +169,14 @@ async function trackWallet(wallet) {
   let trades = [];
   let identityUsed = null;
 
+  // Use proxy wallet first
   if (wallet.polymarket_proxy_wallet) {
     console.log(`Wallet ${wallet.id}: trying proxy wallet ${wallet.polymarket_proxy_wallet}`);
     trades = await fetchLatestTrades(wallet.polymarket_proxy_wallet);
     if (trades.length > 0) identityUsed = "proxy";
   }
 
+  // Fallback to username
   if (trades.length === 0 && wallet.polymarket_username) {
     console.log(`Wallet ${wallet.id}: proxy empty, trying username ${wallet.polymarket_username}`);
     trades = await fetchLatestTrades(wallet.polymarket_username);
@@ -197,12 +193,14 @@ async function trackWallet(wallet) {
 
   let insertedCount = 0;
   for (const trade of trades) {
+    // Ensure proxy match if using proxy
     if (identityUsed === "proxy" &&
         trade.proxyWallet &&
         trade.proxyWallet.toLowerCase() !== wallet.polymarket_proxy_wallet.toLowerCase()) {
       continue;
     }
 
+    // Check if trade already exists
     const { data: existing } = await supabase
       .from("signals")
       .select("id")
@@ -213,19 +211,19 @@ async function trackWallet(wallet) {
 
     if (existing) continue;
 
-    // Normalize side: Buy/SELL -> Up/Down or Yes/No
-    let side = String(trade.outcome).toUpperCase();
-    if (trade.side) {
-      if (trade.side.toUpperCase() === "BUY") side = "YES";
-      else if (trade.side.toUpperCase() === "SELL") side = "NO";
-    }
+    // Map Polymarket outcome to our signals
+    // "BUY" => "Yes/Up" ; "SELL" => "No/Down"
+    let side;
+    if (trade.side?.toUpperCase() === "BUY") side = "UP"; 
+    else if (trade.side?.toUpperCase() === "SELL") side = "DOWN";
+    else side = trade.outcome?.toUpperCase() || "PENDING";
 
     await supabase.from("signals").insert({
       wallet_id: wallet.id,
       signal: trade.title,
       market_name: trade.title,
       market_id: trade.conditionId,
-      side,
+      side: side,
       tx_hash: trade.transactionHash,
       outcome: "Pending",
       created_at: new Date(trade.timestamp * 1000),
@@ -243,7 +241,7 @@ async function trackWallet(wallet) {
 }
 
 /* ===========================
-   Fetch new leaderboard wallets from Polymarket
+   Fetch & Insert Leaderboard Wallets
 =========================== */
 async function fetchAndInsertLeaderboardWallets() {
   const timePeriods = ["DAY", "WEEK", "MONTH", "ALL"];
@@ -264,9 +262,10 @@ async function fetchAndInsertLeaderboardWallets() {
       console.log(`[LEADERBOARD][${period}] Fetched=${fetched}`);
 
       for (const entry of data) {
+        // Skip entries without proxyWallet
         if (!entry.proxyWallet) continue;
 
-        // Filter: PnL > $1,000 and volume < 6 * PnL
+        // PnL filter >= $1000
         if (entry.pnl >= 1000 && entry.vol < 6 * entry.pnl) {
           passed++;
 
@@ -301,15 +300,13 @@ async function fetchAndInsertLeaderboardWallets() {
       console.error(`Failed to fetch leaderboard (${period}):`, err.message);
     }
 
-    console.log(
-      `[LEADERBOARD][${period}] Passed=${passed} Inserted=${inserted} Duplicates=${duplicates}`
-    );
+    console.log(`[LEADERBOARD][${period}] Passed=${passed} Inserted=${inserted} Duplicates=${duplicates}`);
   }
 
   console.log(`Leaderboard fetch complete. Total new wallets inserted: ${totalInserted}`);
 }
 /* ===========================
-   Format Signal
+   Format Signal for Telegram / Notes
 =========================== */
 function formatSignal(sig, confidence, emoji, eventType = "Signal Sent") {
   const eventUrl = `https://polymarket.com/events/${sig.market_id}`;
@@ -350,7 +347,7 @@ async function sendResultNotes(sig, result) {
 }
 
 /* ===========================
-   Update pending outcomes
+   Resolve pending outcomes
 =========================== */
 async function updatePendingOutcomes() {
   const { data: pending } = await supabase.from("signals").select("*").eq("outcome", "Pending");
@@ -359,6 +356,8 @@ async function updatePendingOutcomes() {
   const marketIds = [...new Set(pending.map(s => s.market_id))];
   const markets = await Promise.all(marketIds.map(id => fetchMarket(id)));
   const marketMap = Object.fromEntries(markets.map(m => [m?.id, m]));
+
+  let resolvedAny = false;
 
   for (const sig of pending) {
     const market = marketMap[sig.market_id];
@@ -383,12 +382,57 @@ async function updatePendingOutcomes() {
       }
     }
 
+    resolvedAny = true;
     await sendResultNotes(sig, result);
+  }
+
+  if (resolvedAny) await sendMajoritySignals();
+}
+
+/* ===========================
+   Send Majority Signals
+=========================== */
+async function sendMajoritySignals() {
+  const { data: markets } = await supabase.from("signals").select("market_id", { distinct: true });
+  if (!markets) return;
+
+  for (const { market_id } of markets) {
+    const counts = await getMarketVoteCounts(market_id);
+    const side = getMajoritySide(counts);
+    if (!side) continue;
+
+    const confidence = getMajorityConfidence(counts);
+    if (!confidence) continue;
+
+    const { data: signals } = await supabase.from("signals").select("*").eq("market_id", market_id).eq("side", side);
+    if (!signals) continue;
+
+    for (const sig of signals) {
+      if (!FORCE_SEND && sig.signal_sent_at) continue;
+
+      const emoji = RESULT_EMOJIS[sig.outcome] || "⚪";
+      const text = formatSignal(sig, confidence, emoji, "Signal Sent");
+
+      await sendTelegram(text);
+
+      const noteText = toBlockquote(text);
+      const { data: notes } = await supabase.from("notes").select("id, content").eq("slug", "polymarket-millionaires").maybeSingle();
+
+      let newContent = notes?.content || "";
+      const safeSignal = sig.signal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const regex = new RegExp(`.*\\[${safeSignal}\\]\\(.*\\).*`, "g");
+
+      if (regex.test(newContent)) newContent = newContent.replace(regex, noteText);
+      else newContent += newContent ? `\n\n${noteText}` : noteText;
+
+      await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", "polymarket-millionaires");
+      await supabase.from("signals").update({ signal_sent_at: new Date() }).eq("id", sig.id);
+    }
   }
 }
 
 /* ===========================
-   Update pre-signals
+   Pre-signals (near-threshold)
 =========================== */
 async function updatePreSignals() {
   const { data: markets } = await supabase.from("signals").select("market_id", { distinct: true });
@@ -422,7 +466,7 @@ async function updatePreSignals() {
 }
 
 /* ===========================
-   Daily Summary
+   Daily Summary + Leaderboard
 =========================== */
 async function sendDailySummary() {
   const now = new Date();
@@ -442,6 +486,7 @@ async function sendDailySummary() {
   const pendingSignals = allSignals.filter(s => s.outcome === "Pending");
 
   let summaryText = `Yesterday's results:\n`;
+
   if (!ySignals || ySignals.length === 0) summaryText += `0 predictions yesterday.\n`;
   else ySignals.forEach(s => summaryText += `${s.signal} - ${s.side} - ${s.outcome || "Pending"} ${RESULT_EMOJIS[s.outcome] || "⚪"}\n`);
 
@@ -450,10 +495,12 @@ async function sendDailySummary() {
   else pendingSignals.forEach(s => summaryText += `${s.signal} - ${s.side} - Pending ⚪\n`);
 
   await sendTelegram(toBlockquote(summaryText), true);
-  await supabase.from("notes").update({ content: toBlockquote(summaryText), public: true }).eq("slug", "polymarket-millionaires");
+  await supabase
+    .from("notes")
+    .update({ content: toBlockquote(summaryText), public: true })
+    .eq("slug", "polymarket-millionaires");
 
   // Update leaderboard and fetch new wallets
-  await updateLeaderboard();
   await fetchAndInsertLeaderboardWallets();
 }
 
@@ -494,7 +541,7 @@ async function main() {
 main();
 
 /* ===========================
-   HTTP server for Render
+   Keep Render happy by binding to a port
 =========================== */
 const PORT = process.env.PORT || 3000;
 

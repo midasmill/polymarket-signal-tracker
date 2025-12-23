@@ -1,5 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import fetch from "node-fetch";
+import cron from "node-cron";
+import { utcToZonedTime } from "date-fns-tz";
 
 /* ===========================
    ENV
@@ -13,13 +15,13 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) throw new Error("Supabase keys 
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-/* ===========================
-   SETTINGS
-=========================== */
-const POLL_INTERVAL = 30 * 1000; // adjust as needed
+const POLL_INTERVAL = 30 * 1000;
 const LOSING_STREAK_THRESHOLD = 3;
-const MIN_WALLETS_FOR_SIGNAL = 2; // production threshold
-const FORCE_SEND = false; // production: send only if eligible
+const MIN_WALLETS_FOR_SIGNAL = 2; // production mode threshold
+const FORCE_SEND = true; // send all eligible signals
+
+const TIMEZONE = "America/New_York";
+const RESULT_EMOJIS = { WIN: "✅", LOSS: "❌" };
 
 /* ===========================
    Telegram helper
@@ -79,10 +81,6 @@ function getConfidenceEmoji(count) {
   return "";
 }
 
-function confidenceToNumber(conf) {
-  return (conf.match(/⭐/g) || []).length;
-}
-
 /* ===========================
    Market vote counts
 =========================== */
@@ -97,15 +95,17 @@ async function getMarketVoteCounts(marketId) {
   const perWallet = {};
   for (const s of signals) {
     perWallet[s.wallet_id] ??= {};
-    // count all votes per side
+    // Count multiple votes, decide majority per wallet
     perWallet[s.wallet_id][s.side] = (perWallet[s.wallet_id][s.side] || 0) + 1;
   }
 
   const counts = {};
   for (const votes of Object.values(perWallet)) {
-    // pick side with majority vote per wallet
-    const walletSide = Object.entries(votes).sort((a, b) => b[1] - a[1])[0][0];
-    counts[walletSide] = (counts[walletSide] || 0) + 1;
+    const sides = Object.entries(votes);
+    // pick side with max votes for this wallet
+    sides.sort((a, b) => b[1] - a[1]);
+    const side = sides[0][0];
+    counts[side] = (counts[side] || 0) + 1;
   }
 
   return counts;
@@ -138,6 +138,7 @@ async function trackWallet(wallet) {
   for (const trade of trades) {
     if (trade.proxyWallet && trade.proxyWallet.toLowerCase() !== wallet.polymarket_proxy_wallet.toLowerCase()) continue;
 
+    // safeguard: market_id + side + signal uniqueness
     const { data: existing } = await supabase
       .from("signals")
       .select("id")
@@ -206,26 +207,18 @@ async function updatePendingOutcomes() {
 
     resolvedAny = true;
 
+    // send Notes/Telegram for resolved signal
     const counts = await getMarketVoteCounts(sig.market_id);
     const confidence = getMajorityConfidence(counts);
+    const emoji = RESULT_EMOJIS[result] || "";
 
-    const noteText = `Result Received: ${new Date().toLocaleString()}\nMarket Event: ${sig.signal}\nPrediction: ${sig.side}\nConfidence: ${confidence}\nOutcome: ${winningSide}\nResult: ${result}`;
-
-    // Telegram
+    const noteText = `Result Received: ${new Date().toLocaleString()}\nMarket Event: ${sig.signal}\nPrediction: ${sig.side}\nConfidence: ${confidence}\nOutcome: ${winningSide}\nResult: ${result} ${emoji}`;
     await sendTelegram(noteText);
-
-    // Notes (plain text with line breaks)
-    const formattedNoteText = noteText
-      .split('\n')
-      .map(line => line.trim())
-      .filter(Boolean)
-      .join('\n');
 
     const { data: notes } = await supabase.from("notes").select("id, content").eq("slug", "polymarket-millionaires").maybeSingle();
     const newContent = notes
-      ? notes.content + `\n${formattedNoteText}`
-      : formattedNoteText;
-
+      ? notes.content + `\n\n${noteText}`
+      : noteText;
     await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", "polymarket-millionaires");
   }
 
@@ -260,17 +253,8 @@ async function sendMajoritySignals() {
     for (const sig of signals) {
       if (!FORCE_SEND && sig.signal_sent_at) continue;
 
-      const noteText = `Signal Sent: ${new Date().toLocaleString()}\nMarket Event: ${sig.signal}\nPrediction: ${sig.side}\nConfidence: ${confidence}\nOutcome: Pending`;
-
-      // Telegram
+      const noteText = `Signal Sent: ${new Date().toLocaleString()}\nMarket Event: ${sig.signal}\nPrediction: ${sig.side}\nConfidence: ${confidence}\nOutcome: ${sig.outcome || "Pending"}`;
       await sendTelegram(noteText);
-
-      // Notes (plain text with line breaks)
-      const formattedNoteText = noteText
-        .split('\n')
-        .map(line => line.trim())
-        .filter(Boolean)
-        .join('\n');
 
       const { data: notes } = await supabase
         .from("notes")
@@ -278,16 +262,68 @@ async function sendMajoritySignals() {
         .eq("slug", "polymarket-millionaires")
         .maybeSingle();
       const newContent = notes
-        ? notes.content + `\n${formattedNoteText}`
-        : formattedNoteText;
-
+        ? notes.content + `\n\n${noteText}`
+        : noteText;
       await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", "polymarket-millionaires");
 
-      // mark as sent
       await supabase.from("signals").update({ signal_sent_at: new Date() }).eq("id", sig.id);
     }
   }
 }
+
+/* ===========================
+   Daily Summary at 7am ET
+=========================== */
+async function sendDailySummary() {
+  const now = new Date();
+  const todayET = utcToZonedTime(now, TIMEZONE);
+  const yesterdayET = new Date(todayET);
+  yesterdayET.setDate(todayET.getDate() - 1);
+  const startYesterday = new Date(yesterdayET.setHours(0, 0, 0, 0));
+  const endYesterday = new Date(yesterdayET.setHours(23, 59, 59, 999));
+
+  const { data: allSignals } = await supabase.from("signals").select("*");
+  const allWins = allSignals.filter(s => s.outcome === "WIN").length;
+  const allLosses = allSignals.filter(s => s.outcome === "LOSS").length;
+
+  const { data: ySignals } = await supabase
+    .from("signals")
+    .select("*")
+    .gte("created_at", startYesterday.toISOString())
+    .lte("created_at", endYesterday.toISOString());
+
+  const yWins = ySignals.filter(s => s.outcome === "WIN").length;
+  const yLosses = ySignals.filter(s => s.outcome === "LOSS").length;
+  const pendingSignals = allSignals.filter(s => s.outcome === "Pending");
+
+  let summaryText = `📊 DAILY SUMMARY (${todayET.toLocaleDateString()})\n`;
+  summaryText += `All-time (W-L): ${allWins}-${allLosses}\n`;
+  summaryText += `Yesterday (${yesterdayET.toLocaleDateString()}) (W-L): ${yWins}-${yLosses}\n`;
+  summaryText += `Pending: ${pendingSignals.length}\n\n`;
+
+  summaryText += `Yesterday's results:\n`;
+  ySignals.forEach(s => {
+    const emoji = RESULT_EMOJIS[s.outcome] || "";
+    summaryText += `${s.signal} - ${s.side} - ${s.outcome || "Pending"} ${emoji}\n`;
+  });
+
+  summaryText += `\nPending picks:\n`;
+  pendingSignals.forEach(s => {
+    summaryText += `${s.signal} - ${s.side} - Pending\n`;
+  });
+
+  await sendTelegram(summaryText);
+
+  const { data: notes } = await supabase.from("notes").select("id, content").eq("slug", "polymarket-millionaires").maybeSingle();
+  const newContent = notes ? notes.content + `\n\n${summaryText}` : summaryText;
+  await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", "polymarket-millionaires");
+}
+
+// Cron: run daily at 7am ET
+cron.schedule("0 7 * * *", () => {
+  console.log("Sending daily summary...");
+  sendDailySummary();
+}, { timezone: TIMEZONE });
 
 /* ===========================
    Main Loop

@@ -1,6 +1,8 @@
 import { createClient } from "@supabase/supabase-js";
 import fetch from "node-fetch";
-import { utcToZonedTime, zonedTimeToUtc, format } from "date-fns-tz";
+import * as dateFnsTz from "date-fns-tz";
+
+const { utcToZonedTime, zonedTimeToUtc, format } = dateFnsTz;
 
 
 
@@ -26,6 +28,7 @@ const date = new Date();
 
 const zonedDate = utcToZonedTime(date, timeZone);
 console.log(format(zonedDate, "yyyy-MM-dd HH:mm:ssXXX", { timeZone }));
+
 
 const RESULT_EMOJIS = { WIN: "✅", LOSS: "❌", Pending: "⚪" };
 

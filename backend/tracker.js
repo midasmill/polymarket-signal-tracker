@@ -1,12 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import fetch from "node-fetch";
-import * as dateFnsTz from "date-fns-tz";
-
-const { utcToZonedTime, zonedTimeToUtc, format } = dateFnsTz;
-
-
-
-
+import cron from "node-cron";
 
 /* ===========================
    ENV
@@ -24,13 +18,6 @@ const POLL_INTERVAL = 30 * 1000;
 const LOSING_STREAK_THRESHOLD = 3;
 const MIN_WALLETS_FOR_SIGNAL = 2; // production mode threshold
 const FORCE_SEND = true; // send all eligible signals
-
-const timeZone = "America/New_York";
-const date = new Date();
-
-const zonedDate = utcToZonedTime(date, timeZone);
-console.log(format(zonedDate, "yyyy-MM-dd HH:mm:ssXXX", { timeZone }));
-
 
 const RESULT_EMOJIS = { WIN: "✅", LOSS: "❌", Pending: "⚪" };
 
@@ -111,14 +98,13 @@ async function getMarketVoteCounts(marketId) {
 
   const counts = {};
   for (const votes of Object.values(perWallet)) {
-const sides = Object.entries(votes).sort((a, b) => b[1] - a[1]);
+    const sides = Object.entries(votes).sort((a, b) => b[1] - a[1]);
 
-// tie → no vote from this wallet
-if (sides.length > 1 && sides[0][1] === sides[1][1]) continue;
+    // tie → no vote from this wallet
+    if (sides.length > 1 && sides[0][1] === sides[1][1]) continue;
 
-const side = sides[0][0];
-counts[side] = (counts[side] || 0) + 1;
-
+    const side = sides[0][0];
+    counts[side] = (counts[side] || 0) + 1;
   }
 
   return counts;
@@ -234,7 +220,7 @@ async function updatePendingOutcomes() {
 
     await sendTelegram(noteText);
 
-    // Replace content for this signal in Notes page (no duplicates)
+    // Update notes content
     const { data: notes } = await supabase.from("notes").select("id, content").eq("slug", "polymarket-millionaires").maybeSingle();
     let newContent = notes ? notes.content : "";
     const regex = new RegExp(`.*\\[${sig.signal}\\]\\(.*\\).*`, "g");
@@ -311,11 +297,11 @@ async function sendMajoritySignals() {
 =========================== */
 async function sendDailySummary() {
   const now = new Date();
-  const todayET = utcToZonedTime(now, TIMEZONE);
-  const yesterdayET = new Date(todayET);
-  yesterdayET.setDate(todayET.getDate() - 1);
-  const startYesterday = new Date(yesterdayET.setHours(0, 0, 0, 0));
-  const endYesterday = new Date(yesterdayET.setHours(23, 59, 59, 999));
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+
+  const startYesterday = new Date(yesterday.setHours(0, 0, 0, 0));
+  const endYesterday = new Date(yesterday.setHours(23, 59, 59, 999));
 
   const { data: allSignals } = await supabase.from("signals").select("*");
   const allWins = allSignals.filter(s => s.outcome === "WIN").length;
@@ -331,9 +317,9 @@ async function sendDailySummary() {
   const yLosses = ySignals.filter(s => s.outcome === "LOSS").length;
   const pendingSignals = allSignals.filter(s => s.outcome === "Pending");
 
-  let summaryText = `📊 DAILY SUMMARY (${todayET.toLocaleDateString()})\n`;
+  let summaryText = `📊 DAILY SUMMARY (${now.toLocaleDateString()})\n`;
   summaryText += `All-time (W-L): ${allWins}-${allLosses}\n`;
-  summaryText += `Yesterday (${yesterdayET.toLocaleDateString()}) (W-L): ${yWins}-${yLosses}\n`;
+  summaryText += `Yesterday (${yesterday.toLocaleDateString()}) (W-L): ${yWins}-${yLosses}\n`;
   summaryText += `Pending: ${pendingSignals.length}\n\n`;
 
   summaryText += `Yesterday's results:\n`;
@@ -349,16 +335,17 @@ async function sendDailySummary() {
 
   await sendTelegram(summaryText);
 
-  const { data: notes } = await supabase.from("notes").select("id, content").eq("slug", "polymarket-millionaires").maybeSingle();
-  const newContent = summaryText; // overwrite previous content
-  await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", "polymarket-millionaires");
+  await supabase
+    .from("notes")
+    .update({ content: summaryText, public: true })
+    .eq("slug", "polymarket-millionaires");
 }
 
 // Cron: run daily at 7am ET
 cron.schedule("0 7 * * *", () => {
   console.log("Sending daily summary...");
   sendDailySummary();
-}, { timezone: TIMEZONE });
+});
 
 /* ===========================
    Main Loop

@@ -400,7 +400,7 @@ async function updatePreSignals() {
 /* ===========================
    Fetch new leaderboard wallets from Polymarket
 =========================== */
-async function fetchLeaderboardWallets() {
+async function fetchAndInsertLeaderboardWallets() {
   const timePeriods = ["DAY", "WEEK", "MONTH", "ALL"];
   let totalNewWallets = 0;
 

@@ -540,9 +540,7 @@ async function main() {
 
 main();
 
-/* ===========================
-   Keep Render happy by binding to a port
-=========================== */
+/* Keep Render happy by binding to a port */
 const PORT = process.env.PORT || 3000;
 
 http.createServer((req, res) => {

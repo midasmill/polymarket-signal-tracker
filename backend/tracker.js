@@ -234,6 +234,7 @@ async function trackWallet(wallet) {
 
   await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
 }
+
 /* ===========================
    Format Signal
 =========================== */
@@ -393,8 +394,33 @@ async function updatePreSignals() {
     }
   }
 }
+
 /* ===========================
-   Daily Summary
+   Leaderboard for PNL > $10,000
+=========================== */
+async function updateLeaderboard() {
+  const { data: topWallets } = await supabase
+    .from("wallets")
+    .select("*")
+    .gte("pnl", 10000)
+    .order("pnl", { ascending: false });
+
+  if (!topWallets?.length) return;
+
+  let leaderboardText = "💰 Polymarket Millionaires Leaderboard 💰\n\n";
+  topWallets.forEach((w, idx) => {
+    leaderboardText += `${idx + 1}. Wallet ${w.id} — PNL: $${w.pnl}\n`;
+  });
+
+  await sendTelegram(toBlockquote(leaderboardText), true);
+  await supabase
+    .from("notes")
+    .update({ content: toBlockquote(leaderboardText), public: true })
+    .eq("slug", "polymarket-millionaires-leaderboard");
+}
+
+/* ===========================
+   Daily Summary + Leaderboard
 =========================== */
 async function sendDailySummary() {
   const now = new Date();
@@ -427,13 +453,16 @@ async function sendDailySummary() {
     .from("notes")
     .update({ content: toBlockquote(summaryText), public: true })
     .eq("slug", "polymarket-millionaires");
+
+  // Update leaderboard as part of daily summary
+  await updateLeaderboard();
 }
 
 /* ===========================
    Cron daily at 7am ET
 =========================== */
 cron.schedule("0 7 * * *", () => {
-  console.log("Sending daily summary...");
+  console.log("Sending daily summary + leaderboard...");
   sendDailySummary();
 }, { timezone: TIMEZONE });
 

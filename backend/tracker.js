@@ -1,7 +1,8 @@
 import { createClient } from "@supabase/supabase-js";
 import fetch from "node-fetch";
-import cron from "node-cron";
-import { utcToZonedTime } from "date-fns-tz";
+import pkg from "date-fns-tz";
+const { utcToZonedTime, zonedTimeToUtc, format } = pkg;
+
 
 /* ===========================
    ENV

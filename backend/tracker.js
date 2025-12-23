@@ -212,7 +212,9 @@ async function updatePendingOutcomes() {
     await sendTelegram(noteText);
 
     const { data: notes } = await supabase.from("notes").select("id, content").eq("slug", "polymarket-millionaires").maybeSingle();
-    const newContent = notes ? notes.content + `<p>${noteText.replace(/\n/g, "<br>")}</p>` : `<p>${noteText.replace(/\n/g, "<br>")</p>`;
+    const newContent = notes
+      ? notes.content + `<p>${noteText.replace(/\n/g, "<br>")}</p>`
+      : `<p>${noteText.replace(/\n/g, "<br>")}</p>`;
     await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", "polymarket-millionaires");
   }
 
@@ -258,7 +260,9 @@ async function sendMajoritySignals() {
         .select("id, content")
         .eq("slug", "polymarket-millionaires")
         .maybeSingle();
-      const newContent = notes ? notes.content + `<p>${noteText.replace(/\n/g, "<br>")}</p>` : `<p>${noteText.replace(/\n/g, "<br>")</p>`;
+      const newContent = notes
+        ? notes.content + `<p>${noteText.replace(/\n/g, "<br>")}</p>`
+        : `<p>${noteText.replace(/\n/g, "<br>")}</p>`;
       await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", "polymarket-millionaires");
 
       // mark as sent

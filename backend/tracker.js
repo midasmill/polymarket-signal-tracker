@@ -493,7 +493,7 @@ async function sendDailySummary() {
 
   // Update leaderboard and fetch new wallets
   await updateLeaderboard();
-  await fetchLeaderboardWallets();
+  await fetchAndInsertLeaderboardWallets();
 }
 
 /* ===========================

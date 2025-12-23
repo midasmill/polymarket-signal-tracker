@@ -17,7 +17,7 @@ const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "2
 const FORCE_SEND = process.env.FORCE_SEND === "true" || true;
 
 const CONFIDENCE_THRESHOLDS = {
-  ⭐: MIN_WALLETS_FOR_SIGNAL,
+  "⭐": MIN_WALLETS_FOR_SIGNAL,
   "⭐⭐": parseInt(process.env.CONF_2 || "15"),
   "⭐⭐⭐": parseInt(process.env.CONF_3 || "25"),
   "⭐⭐⭐⭐": parseInt(process.env.CONF_4 || "35"),
@@ -108,11 +108,17 @@ async function fetchMarket(marketId) {
    Confidence helpers
 =========================== */
 function getConfidenceEmoji(count) {
-  for (const [emoji, threshold] of Object.entries(CONFIDENCE_THRESHOLDS).reverse()) {
+  // Object.entries preserves insertion order, but we want to check highest first
+  // So we sort entries by their threshold descending
+  const entries = Object.entries(CONFIDENCE_THRESHOLDS)
+    .sort(([, thresholdA], [, thresholdB]) => thresholdB - thresholdA);
+
+  for (const [emoji, threshold] of entries) {
     if (count >= threshold) return emoji;
   }
   return "";
 }
+
 
 /* ===========================
    Market vote counts

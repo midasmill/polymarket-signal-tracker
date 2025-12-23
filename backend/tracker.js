@@ -396,79 +396,102 @@ async function updatePreSignals() {
   }
 }
 
-/* ===========================
-   Fetch and insert leaderboard wallets
-=========================== */
+// ===============================
+// Fetch + insert leaderboard wallets
+// ===============================
+
 async function fetchAndInsertLeaderboardWallets() {
-  const timePeriods = ["DAY", "WEEK", "MONTH", "ALL"];
-  let totalNew = 0;
+  const PERIODS = ["DAY", "WEEK", "MONTH", "ALL"];
+  const LIMIT = 300; // change to 300 if you want deeper scan
 
-  for (const period of timePeriods) {
+  let totalInserted = 0;
+
+  for (const period of PERIODS) {
+    let fetched = 0;
+    let passedFilter = 0;
+    let inserted = 0;
+    let skippedDuplicate = 0;
+
     try {
-      const url = `https://data-api.polymarket.com/v1/leaderboard?category=OVERALL&timePeriod=${period}&orderBy=PNL&limit=300`;
+      const url =
+        `https://data-api.polymarket.com/v1/leaderboard` +
+        `?category=OVERALL` +
+        `&timePeriod=${period}` +
+        `&orderBy=PNL` +
+        `&limit=${LIMIT}`;
 
-      const res = await fetch(url, {
-        headers: {
-          "User-Agent": "Mozilla/5.0",
-          "Accept": "application/json",
-        },
-      });
+      const res = await fetch(url);
 
       if (!res.ok) {
-        console.error(`Failed to fetch leaderboard (${period}): HTTP ${res.status}`);
+        console.error(
+          `[LEADERBOARD][${period}] HTTP ${res.status}`
+        );
         continue;
       }
 
-      const json = await res.json();
+      const data = await res.json();
+      fetched = data.length;
 
-      // 🔑 FIX: API RETURNS ARRAY, NOT OBJECT
-      const data = Array.isArray(json) ? json : [];
-
-      console.log(`Fetched ${data.length} leaderboard entries for ${period}`);
-
-      let newWalletsCount = 0;
+      console.log(
+        `[LEADERBOARD][${period}] Fetched ${fetched} entries`
+      );
 
       for (const entry of data) {
         if (!entry.proxyWallet) continue;
+        if (typeof entry.pnl !== "number") continue;
+        if (typeof entry.vol !== "number" || entry.vol <= 0) continue;
 
-        // ✅ Your filter (correct)
-        if (
-  entry.pnl >= 5000 &&
-  entry.vol > 0 &&
-  entry.pnl / entry.vol >= 0.17
-) {
+        // === FILTER RULES ===
+        // PnL >= $5,000
+        // PnL / Volume >= ~17%
+        if (entry.pnl < 5000) continue;
+        if (entry.pnl / entry.vol < 0.17) continue;
 
-          const { data: existing } = await supabase
-            .from("wallets")
-            .select("id")
-            .eq("polymarket_proxy_wallet", entry.proxyWallet)
-            .maybeSingle();
+        passedFilter++;
 
-          if (existing) continue;
+        // Only use username if it's not a hex wallet
+        const username =
+          entry.userName && !entry.userName.startsWith("0x")
+            ? entry.userName
+            : null;
 
-          const { error } = await supabase.from("wallets").insert({
-            polymarket_proxy_wallet: entry.proxyWallet,
-            polymarket_username: entry.userName,
-            created_at: new Date(),
-          });
+        const { error } = await supabase
+          .from("wallets")
+          .upsert(
+            {
+              polymarket_proxy_wallet: entry.proxyWallet,
+              polymarket_username: username,
+            },
+            {
+              onConflict: "polymarket_proxy_wallet",
+              ignoreDuplicates: true,
+            }
+          );
 
-          if (!error) {
-            newWalletsCount++;
-            totalNew++;
-          } else {
-            console.error("Insert wallet failed:", error.message);
-          }
+        if (error) {
+          skippedDuplicate++;
+        } else {
+          inserted++;
+          totalInserted++;
         }
       }
 
-      console.log(`TimePeriod ${period} complete. New wallets added: ${newWalletsCount}`);
-    } catch (err) {
-      console.error(`Leaderboard error (${period}):`, err.message);
+      console.log(
+        `[LEADERBOARD][${period}] Passed=${passedFilter} Inserted=${inserted} Duplicates=${skippedDuplicate}`
+      );
+    } catch (e) {
+      console.error(
+        `[LEADERBOARD][${period}] Error:`,
+        e.message
+      );
     }
   }
 
-  console.log(`Leaderboard fetch complete. Total new wallets inserted: ${totalNew}`);
+  console.log(
+    `Leaderboard fetch complete. Total new wallets inserted: ${totalInserted}`
+  );
 }
+
 
 /* ===========================
    Daily Summary + Leaderboard

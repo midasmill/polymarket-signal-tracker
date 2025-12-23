@@ -24,7 +24,7 @@ const CONFIDENCE_THRESHOLDS = {
   "⭐⭐⭐⭐⭐": parseInt(process.env.CONF_5 || "50"),
 };
 
-const RESULT_EMOJIS = { WIN: "✅", LOSS: "❌", Pending: "⚪" };
+const RESULT_EMOJIS = { WIN: "✅", LOSS: "❌", PUSH: "⚪", Pending: "⚪" };
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) throw new Error("Supabase keys required");
 
@@ -108,17 +108,36 @@ async function fetchMarket(marketId) {
    Confidence helpers
 =========================== */
 function getConfidenceEmoji(count) {
-  // Object.entries preserves insertion order, but we want to check highest first
-  // So we sort entries by their threshold descending
   const entries = Object.entries(CONFIDENCE_THRESHOLDS)
-    .sort(([, thresholdA], [, thresholdB]) => thresholdB - thresholdA);
-
+    .sort(([, a], [, b]) => b - a);
   for (const [emoji, threshold] of entries) {
     if (count >= threshold) return emoji;
   }
   return "";
 }
 
+function getMajoritySide(counts) {
+  if (!counts || Object.keys(counts).length === 0) return null;
+  const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  if (entries.length < 1) return null;
+  if (entries.length > 1 && entries[0][1] === entries[1][1]) return null; // tie
+  return entries[0][0];
+}
+
+function getMajorityConfidence(counts) {
+  if (!counts || Object.keys(counts).length === 0) return "";
+  const max = Math.max(...Object.values(counts));
+  return getConfidenceEmoji(max);
+}
+
+/* ===========================
+   Safe counts helper
+=========================== */
+async function getSafeMarketVoteCounts(marketId) {
+  const counts = await getMarketVoteCounts(marketId);
+  if (!counts || Object.keys(counts).length === 0) return {};
+  return counts;
+}
 
 /* ===========================
    Market vote counts
@@ -145,20 +164,6 @@ async function getMarketVoteCounts(marketId) {
   }
 
   return counts;
-}
-
-function getMajoritySide(counts) {
-  if (!counts) return null;
-  const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
-  if (entries.length < 1) return null;
-  if (entries.length > 1 && entries[0][1] === entries[1][1]) return null; // tie
-  return entries[0][0];
-}
-
-function getMajorityConfidence(counts) {
-  if (!counts) return "";
-  const max = Math.max(...Object.values(counts));
-  return getConfidenceEmoji(max);
 }
 
 /* ===========================
@@ -198,6 +203,7 @@ async function trackWallet(wallet) {
       wallet_count: 1,
       wallet_set: [String(wallet.id)],
       tx_hashes: [trade.transactionHash],
+      last_confidence_sent: "",
     });
 
     insertedCount++;
@@ -244,15 +250,22 @@ async function updatePendingOutcomes() {
     await sendResultNotes(sig, result);
   }
 
-  if (resolvedAny) await sendMajoritySignals();
+  if (resolvedAny) {
+    try {
+      await sendMajoritySignals();
+    } catch (err) {
+      console.error("Error sending majority signals:", err.message);
+    }
+  }
 }
 
 /* ===========================
    Notes helper
 =========================== */
 async function sendResultNotes(sig, result) {
-  const counts = await getMarketVoteCounts(sig.market_id);
+  const counts = await getSafeMarketVoteCounts(sig.market_id);
   const confidence = getMajorityConfidence(counts);
+
   const emoji = RESULT_EMOJIS[result] || "⚪";
   const eventUrl = `https://polymarket.com/events/${sig.slug}`;
 
@@ -267,7 +280,6 @@ Result: ${result} ${emoji}`;
 
   await sendTelegram(noteText);
 
-  // update notes safely
   const { data: notes } = await supabase.from("notes").select("id, content").eq("slug", "polymarket-millionaires").maybeSingle();
   let newContent = notes?.content || "";
   const safeSignal = sig.signal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -277,30 +289,33 @@ Result: ${result} ${emoji}`;
   } else {
     newContent += newContent ? `\n\n${noteText}` : noteText;
   }
+
   await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", "polymarket-millionaires");
 }
 
 /* ===========================
-   Send majority signals
+   Send majority signals (updated to handle confidence changes and result)
 =========================== */
 async function sendMajoritySignals() {
   const { data: markets } = await supabase.from("signals").select("market_id", { distinct: true });
   if (!markets) return;
 
   for (const { market_id } of markets) {
-    const counts = await getMarketVoteCounts(market_id);
+    const counts = await getSafeMarketVoteCounts(market_id);
+    if (!Object.keys(counts).length) continue;
+
     const side = getMajoritySide(counts);
     if (!side) continue;
 
     const confidence = getMajorityConfidence(counts);
     if (!confidence) continue;
 
-    const { data: signals } = await supabase.from("signals").select("*").eq("market_id", market_id).eq("side", side);
-    if (!signals) continue;
+    const { data: signals } = await supabase.from("signals").select("*").eq("market_id", market_id).eq("side", side).order("id", { ascending: true });
+    if (!signals?.length) continue;
 
-    for (const sig of signals) {
-      if (!FORCE_SEND && sig.signal_sent_at) continue;
-
+    // Send message if confidence changed or result updated or not sent yet
+    const sig = signals[0];
+    if (sig.last_confidence_sent !== confidence || sig.outcome !== "Pending" || !sig.signal_sent_at) {
       const eventUrl = `https://polymarket.com/events/${sig.slug}`;
       const emoji = RESULT_EMOJIS[sig.outcome] || "⚪";
 
@@ -311,9 +326,9 @@ Confidence: ${confidence}
 Outcome: ${sig.outcome || "Pending"} ${emoji}`;
 
       const noteText = toBlockquote(rawNoteText);
-
       await sendTelegram(noteText);
 
+      // update notes
       const { data: notes } = await supabase.from("notes").select("id, content").eq("slug", "polymarket-millionaires").maybeSingle();
       let newContent = notes?.content || "";
       const safeSignal = sig.signal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -325,7 +340,9 @@ Outcome: ${sig.outcome || "Pending"} ${emoji}`;
       }
       await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", "polymarket-millionaires");
 
-      await supabase.from("signals").update({ signal_sent_at: new Date() }).eq("id", sig.id);
+      // mark all relevant signals as sent
+      const sigIds = signals.map(x => x.id);
+      await supabase.from("signals").update({ signal_sent_at: new Date(), last_confidence_sent: confidence }).in("id", sigIds);
     }
   }
 }

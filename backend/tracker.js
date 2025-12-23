@@ -1,8 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import fetch from "node-fetch";
 import cron from "node-cron";
-import http from "http"; // <- only here, remove any other import
-
+import http from "http";
 
 /* ===========================
    ENV
@@ -127,7 +126,6 @@ function getConfidenceEmoji(count) {
   }
   return "";
 }
-
 /* ===========================
    Market vote counts
 =========================== */
@@ -215,12 +213,19 @@ async function trackWallet(wallet) {
 
     if (existing) continue;
 
+    // Normalize side: Buy/SELL -> Up/Down or Yes/No
+    let side = String(trade.outcome).toUpperCase();
+    if (trade.side) {
+      if (trade.side.toUpperCase() === "BUY") side = "YES";
+      else if (trade.side.toUpperCase() === "SELL") side = "NO";
+    }
+
     await supabase.from("signals").insert({
       wallet_id: wallet.id,
       signal: trade.title,
       market_name: trade.title,
       market_id: trade.conditionId,
-      side: String(trade.outcome).toUpperCase(),
+      side,
       tx_hash: trade.transactionHash,
       outcome: "Pending",
       created_at: new Date(trade.timestamp * 1000),
@@ -235,6 +240,73 @@ async function trackWallet(wallet) {
   if (insertedCount > 0) console.log(`Inserted ${insertedCount} new trades for wallet ${wallet.id}`);
 
   await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
+}
+
+/* ===========================
+   Fetch new leaderboard wallets from Polymarket
+=========================== */
+async function fetchAndInsertLeaderboardWallets() {
+  const timePeriods = ["DAY", "WEEK", "MONTH", "ALL"];
+  let totalInserted = 0;
+
+  for (const period of timePeriods) {
+    let fetched = 0;
+    let passed = 0;
+    let inserted = 0;
+    let duplicates = 0;
+
+    try {
+      const url = `https://data-api.polymarket.com/v1/leaderboard?category=OVERALL&timePeriod=${period}&orderBy=PNL&limit=300`;
+      const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      fetched = data.length;
+      console.log(`[LEADERBOARD][${period}] Fetched=${fetched}`);
+
+      for (const entry of data) {
+        if (!entry.proxyWallet) continue;
+
+        // Filter: PnL > $1,000 and volume < 6 * PnL
+        if (entry.pnl >= 1000 && entry.vol < 6 * entry.pnl) {
+          passed++;
+
+          const { data: existing } = await supabase
+            .from("wallets")
+            .select("id")
+            .or(
+              `polymarket_proxy_wallet.eq.${entry.proxyWallet},polymarket_username.eq.${entry.userName}`
+            )
+            .maybeSingle();
+
+          if (existing) {
+            duplicates++;
+            continue;
+          }
+
+          try {
+            await supabase.from("wallets").insert({
+              polymarket_proxy_wallet: entry.proxyWallet,
+              polymarket_username: entry.userName,
+              last_checked: new Date(),
+              paused: false,
+            });
+            inserted++;
+            totalInserted++;
+          } catch (err) {
+            console.error("Insert wallet failed:", err.message);
+          }
+        }
+      }
+    } catch (err) {
+      console.error(`Failed to fetch leaderboard (${period}):`, err.message);
+    }
+
+    console.log(
+      `[LEADERBOARD][${period}] Passed=${passed} Inserted=${inserted} Duplicates=${duplicates}`
+    );
+  }
+
+  console.log(`Leaderboard fetch complete. Total new wallets inserted: ${totalInserted}`);
 }
 /* ===========================
    Format Signal
@@ -278,7 +350,7 @@ async function sendResultNotes(sig, result) {
 }
 
 /* ===========================
-   Resolve outcomes & losing streaks
+   Update pending outcomes
 =========================== */
 async function updatePendingOutcomes() {
   const { data: pending } = await supabase.from("signals").select("*").eq("outcome", "Pending");
@@ -287,8 +359,6 @@ async function updatePendingOutcomes() {
   const marketIds = [...new Set(pending.map(s => s.market_id))];
   const markets = await Promise.all(marketIds.map(id => fetchMarket(id)));
   const marketMap = Object.fromEntries(markets.map(m => [m?.id, m]));
-
-  let resolvedAny = false;
 
   for (const sig of pending) {
     const market = marketMap[sig.market_id];
@@ -313,57 +383,12 @@ async function updatePendingOutcomes() {
       }
     }
 
-    resolvedAny = true;
     await sendResultNotes(sig, result);
   }
-
-  if (resolvedAny) await sendMajoritySignals();
 }
 
 /* ===========================
-   Send majority signals
-=========================== */
-async function sendMajoritySignals() {
-  const { data: markets } = await supabase.from("signals").select("market_id", { distinct: true });
-  if (!markets) return;
-
-  for (const { market_id } of markets) {
-    const counts = await getMarketVoteCounts(market_id);
-    const side = getMajoritySide(counts);
-    if (!side) continue;
-
-    const confidence = getMajorityConfidence(counts);
-    if (!confidence) continue;
-
-    const { data: signals } = await supabase.from("signals").select("*").eq("market_id", market_id).eq("side", side);
-    if (!signals) continue;
-
-    for (const sig of signals) {
-      if (!FORCE_SEND && sig.signal_sent_at) continue;
-
-      const emoji = RESULT_EMOJIS[sig.outcome] || "⚪";
-      const text = formatSignal(sig, confidence, emoji, "Signal Sent");
-
-      await sendTelegram(text);
-
-      const noteText = toBlockquote(text);
-      const { data: notes } = await supabase.from("notes").select("id, content").eq("slug", "polymarket-millionaires").maybeSingle();
-
-      let newContent = notes?.content || "";
-      const safeSignal = sig.signal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const regex = new RegExp(`.*\\[${safeSignal}\\]\\(.*\\).*`, "g");
-
-      if (regex.test(newContent)) newContent = newContent.replace(regex, noteText);
-      else newContent += newContent ? `\n\n${noteText}` : noteText;
-
-      await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", "polymarket-millionaires");
-      await supabase.from("signals").update({ signal_sent_at: new Date() }).eq("id", sig.id);
-    }
-  }
-}
-
-/* ===========================
-   Pre-signals (near-threshold)
+   Update pre-signals
 =========================== */
 async function updatePreSignals() {
   const { data: markets } = await supabase.from("signals").select("market_id", { distinct: true });
@@ -396,81 +421,8 @@ async function updatePreSignals() {
   }
 }
 
-
 /* ===========================
-   Fetch new leaderboard wallets from Polymarket
-=========================== */
-async function fetchAndInsertLeaderboardWallets() {
-  const timePeriods = ["DAY", "WEEK", "MONTH", "ALL"];
-  let totalInserted = 0;
-
-  for (const period of timePeriods) {
-    let fetched = 0;
-    let passed = 0;
-    let inserted = 0;
-    let duplicates = 0;
-
-    try {
-      const url = `https://data-api.polymarket.com/v1/leaderboard?category=OVERALL&timePeriod=${period}&orderBy=PNL&limit=50`;
-      const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      fetched = data.length;
-      console.log(`[LEADERBOARD][${period}] Fetched=${fetched}`);
-
-      for (const entry of data) {
-        // Skip entries without proxyWallet
-        if (!entry.proxyWallet) continue;
-
-        // PnL and volume filter
-        if (entry.pnl >= 100 && entry.vol < 6 * entry.pnl) {
-          passed++;
-
-          // Insert only if not already in wallets table
-          const { data: existing } = await supabase
-            .from("wallets")
-            .select("id")
-            .or(
-              `polymarket_proxy_wallet.eq.${entry.proxyWallet},polymarket_username.eq.${entry.userName}`
-            )
-            .maybeSingle();
-
-          if (existing) {
-            duplicates++;
-            continue;
-          }
-
-          try {
-            await supabase.from("wallets").insert({
-              polymarket_proxy_wallet: entry.proxyWallet,
-              polymarket_username: entry.userName,
-              last_checked: new Date(),
-              paused: false,
-            });
-            inserted++;
-            totalInserted++;
-          } catch (err) {
-            console.error("Insert wallet failed:", err.message);
-          }
-        }
-      }
-    } catch (err) {
-      console.error(`Failed to fetch leaderboard (${period}):`, err.message);
-    }
-
-    console.log(
-      `[LEADERBOARD][${period}] Passed=${passed} Inserted=${inserted} Duplicates=${duplicates}`
-    );
-  }
-
-  console.log(`Leaderboard fetch complete. Total new wallets inserted: ${totalInserted}`);
-}
-
-
-
-
-/* ===========================
-   Daily Summary + Leaderboard
+   Daily Summary
 =========================== */
 async function sendDailySummary() {
   const now = new Date();
@@ -490,7 +442,6 @@ async function sendDailySummary() {
   const pendingSignals = allSignals.filter(s => s.outcome === "Pending");
 
   let summaryText = `Yesterday's results:\n`;
-
   if (!ySignals || ySignals.length === 0) summaryText += `0 predictions yesterday.\n`;
   else ySignals.forEach(s => summaryText += `${s.signal} - ${s.side} - ${s.outcome || "Pending"} ${RESULT_EMOJIS[s.outcome] || "⚪"}\n`);
 
@@ -499,10 +450,7 @@ async function sendDailySummary() {
   else pendingSignals.forEach(s => summaryText += `${s.signal} - ${s.side} - Pending ⚪\n`);
 
   await sendTelegram(toBlockquote(summaryText), true);
-  await supabase
-    .from("notes")
-    .update({ content: toBlockquote(summaryText), public: true })
-    .eq("slug", "polymarket-millionaires");
+  await supabase.from("notes").update({ content: toBlockquote(summaryText), public: true }).eq("slug", "polymarket-millionaires");
 
   // Update leaderboard and fetch new wallets
   await updateLeaderboard();
@@ -546,7 +494,7 @@ async function main() {
 main();
 
 /* ===========================
-   Keep Render happy by binding to a port
+   HTTP server for Render
 =========================== */
 const PORT = process.env.PORT || 3000;
 

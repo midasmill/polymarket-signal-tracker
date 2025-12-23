@@ -397,6 +397,7 @@ async function updatePreSignals() {
 }
 
 
+
 /* ===========================
    Fetch and insert leaderboard wallets
 =========================== */
@@ -460,7 +461,6 @@ async function fetchAndInsertLeaderboardWallets() {
 
 
 
-
 /* ===========================
    Daily Summary + Leaderboard
 =========================== */
@@ -501,19 +501,19 @@ async function sendDailySummary() {
   await fetchAndInsertLeaderboardWallets();
 }
 
-// Cron daily at 7am ET
-cron.schedule("0 7 * * *", async () => {
-  console.log("Fetching leaderboard wallets + sending daily summary...");
-  await fetchAndInsertLeaderboardWallets();
-  await sendDailySummary();
+/* ===========================
+   Cron daily at 7am ET
+=========================== */
+cron.schedule("0 7 * * *", () => {
+  console.log("Running daily summary + leaderboard + new wallets fetch...");
+  sendDailySummary();
 }, { timezone: TIMEZONE });
-
 
 /* ===========================
    Main Loop
 =========================== */
 async function main() {
-  console.log("🚀 Polymarket tracker live");
+  console.log("🚀 POLYMARKET TRACKER LIVE 🚀");
 
   // Insert new leaderboard wallets immediately on deploy
   await fetchAndInsertLeaderboardWallets();
@@ -527,7 +527,7 @@ async function main() {
 
       await Promise.all(wallets.map(trackWallet));
       await updatePendingOutcomes();
-      await updatePreSignals(); // <-- added pre-signals update here
+      await updatePreSignals();
     } catch (e) {
       console.error("Loop error:", e);
       await sendTelegram(`Tracker loop error: ${e.message}`);
@@ -535,6 +535,7 @@ async function main() {
   }, POLL_INTERVAL);
 }
 
+main();
 
 /* ===========================
    Keep Render happy by binding to a port

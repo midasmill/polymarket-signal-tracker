@@ -536,11 +536,14 @@ async function main() {
       await sendTelegram(`Tracker loop error: ${e.message}`);
     }
   }, POLL_INTERVAL);
-}
+} // <-- closes main()
 
-main();
+// Start the tracker
+main().catch(err => console.error("Tracker failed to start:", err));
 
-/* Keep Render happy by binding to a port */
+/* ===========================
+   Keep Render happy by binding to a port
+=========================== */
 const PORT = process.env.PORT || 3000;
 
 http.createServer((req, res) => {

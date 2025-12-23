@@ -399,82 +399,62 @@ async function updatePreSignals() {
 /* ===========================
    Fetch new leaderboard wallets from Polymarket
 =========================== */
-async function fetchLeaderboardWallets() {
+async function fetchAndInsertLeaderboardWallets() {
   const timePeriods = ["DAY", "WEEK", "MONTH", "ALL"];
-  const limit = 100; // number of users per API request
-  let newWalletsInserted = 0;
+  const limit = 300;
+  let totalInserted = 0;
 
   for (const period of timePeriods) {
-    let offset = 0;
-    let hasMore = true;
+    const url = `https://data-api.polymarket.com/v1/leaderboard?category=OVERALL&timePeriod=${period}&orderBy=PNL&limit=${limit}`;
 
-    while (hasMore) {
-      const url = `https://data-api.polymarket.com/leaderboard?timePeriod=${period}&orderBy=PNL_DESC&limit=${limit}&offset=${offset}`;
-      let data;
-      try {
-        data = await fetchWithRetry(url, {
-          headers: {
-            "User-Agent": "Mozilla/5.0",
-            Accept: "application/json",
-          },
-        });
-      } catch (err) {
-        console.error(`Failed to fetch leaderboard (${period}):`, err.message);
-        break;
-      }
+    let data;
+    try {
+      const res = await fetch(url, {
+        headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      data = await res.json();
+    } catch (err) {
+      console.error(`Failed to fetch leaderboard (${period}):`, err.message);
+      continue;
+    }
 
-      if (!data?.users?.length) {
-        console.log(`No more users found for ${period} at offset ${offset}`);
-        hasMore = false;
-        break;
-      }
+    if (!Array.isArray(data?.results)) continue;
 
-      for (const user of data.users) {
-        const userName = user.userName;
-        const proxyWallet = user.proxyWallet || null;
-        const pnl = Number(user.pnl || 0);
-        const volume = Number(user.volume || 0);
+    for (const user of data.results) {
+      const pnl = parseFloat(user.pnl || 0);
+      if (pnl < 5000) continue; // skip users below $5k PnL
 
-        // Filter: PnL >= $5,000 & volume < 6x PnL
-        if (pnl < 5000 || volume >= pnl * 6) continue;
+      const proxyWallet = user.proxyWallet?.toLowerCase();
+      const username = user.userName || user.user;
 
-        // Check if user already exists in wallets table
-        const { data: existing } = await supabase
-          .from("wallets")
-          .select("id")
-          .or(
-            `polymarket_proxy_wallet.eq.${proxyWallet},polymarket_username.eq.${userName}`
-          )
-          .maybeSingle();
+      if (!proxyWallet) continue;
 
-        if (existing) {
-          console.log(`Skipping existing user: ${userName} / ${proxyWallet}`);
-          continue;
-        }
+      // check if wallet already exists
+      const { data: existing } = await supabase
+        .from("wallets")
+        .select("id")
+        .eq("polymarket_proxy_wallet", proxyWallet)
+        .maybeSingle();
 
-        // Insert new wallet
-        const { data: inserted, error } = await supabase.from("wallets").insert({
-          polymarket_proxy_wallet: proxyWallet,
-          polymarket_username: userName,
-          created_at: new Date(),
-        });
+      if (existing) continue;
 
-        if (error) {
-          console.error(`Failed to insert wallet ${userName} / ${proxyWallet}:`, error.message);
-        } else {
-          console.log(`Inserted new wallet: ${userName} / ${proxyWallet}`);
-          newWalletsInserted++;
-        }
-      }
+      // insert new wallet
+      await supabase.from("wallets").insert({
+        polymarket_proxy_wallet: proxyWallet,
+        polymarket_username: username,
+        added_from_leaderboard: true,
+        last_checked: new Date(),
+      });
 
-      // Move to next page
-      offset += limit;
-      if (data.users.length < limit) hasMore = false;
+      totalInserted++;
+      console.log(`Inserted new wallet: ${username} (${proxyWallet})`);
     }
   }
 
-  console.log(`Leaderboard fetch complete. Total new wallets inserted: ${newWalletsInserted}`);
+  console.log(`Leaderboard fetch complete. Total new wallets inserted: ${totalInserted}`);
 }
+
 
 /* ===========================
    Daily Summary + Leaderboard

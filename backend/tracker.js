@@ -100,10 +100,14 @@ async function getMarketVoteCounts(marketId) {
 
   const counts = {};
   for (const votes of Object.values(perWallet)) {
-    const sides = Object.entries(votes);
-    sides.sort((a, b) => b[1] - a[1]);
-    const side = sides[0][0];
-    counts[side] = (counts[side] || 0) + 1;
+const sides = Object.entries(votes).sort((a, b) => b[1] - a[1]);
+
+// tie → no vote from this wallet
+if (sides.length > 1 && sides[0][1] === sides[1][1]) continue;
+
+const side = sides[0][0];
+counts[side] = (counts[side] || 0) + 1;
+
   }
 
   return counts;

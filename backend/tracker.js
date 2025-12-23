@@ -397,79 +397,75 @@ async function updatePreSignals() {
 }
 
 // ===============================
-// Fetch + insert leaderboard wallets
+// Fetch + insert leaderboard wallets (FINAL FIX)
 // ===============================
 
 async function fetchAndInsertLeaderboardWallets() {
   const PERIODS = ["DAY", "WEEK", "MONTH", "ALL"];
-  const LIMIT = 300; // change to 300 if you want deeper scan
+  const LIMIT = 300;
 
   let totalInserted = 0;
 
   for (const period of PERIODS) {
     let fetched = 0;
-    let passedFilter = 0;
+    let passed = 0;
     let inserted = 0;
-    let skippedDuplicate = 0;
+    let duplicates = 0;
 
     try {
       const url =
         `https://data-api.polymarket.com/v1/leaderboard` +
-        `?category=OVERALL` +
-        `&timePeriod=${period}` +
-        `&orderBy=PNL` +
-        `&limit=${LIMIT}`;
+        `?category=OVERALL&timePeriod=${period}` +
+        `&orderBy=PNL&limit=${LIMIT}`;
 
       const res = await fetch(url);
-
       if (!res.ok) {
-        console.error(
-          `[LEADERBOARD][${period}] HTTP ${res.status}`
-        );
+        console.error(`[LEADERBOARD][${period}] HTTP ${res.status}`);
         continue;
       }
 
       const data = await res.json();
       fetched = data.length;
 
-      console.log(
-        `[LEADERBOARD][${period}] Fetched ${fetched} entries`
-      );
+      console.log(`[LEADERBOARD][${period}] Fetched ${fetched} entries`);
 
       for (const entry of data) {
         if (!entry.proxyWallet) continue;
         if (typeof entry.pnl !== "number") continue;
         if (typeof entry.vol !== "number" || entry.vol <= 0) continue;
 
-        // === FILTER RULES ===
-        // PnL >= $5,000
-        // PnL / Volume >= ~17%
+        // === FILTERS ===
         if (entry.pnl < 5000) continue;
         if (entry.pnl / entry.vol < 0.17) continue;
 
-        passedFilter++;
+        passed++;
 
-        // Only use username if it's not a hex wallet
+        // Only keep real usernames (not 0x garbage)
         const username =
-          entry.userName && !entry.userName.startsWith("0x")
+          entry.userName &&
+          !entry.userName.startsWith("0x") &&
+          entry.userName.length < 64
             ? entry.userName
             : null;
 
+        // Insert by proxy wallet ONLY
         const { error } = await supabase
           .from("wallets")
-          .upsert(
-            {
-              polymarket_proxy_wallet: entry.proxyWallet,
-              polymarket_username: username,
-            },
-            {
-              onConflict: "polymarket_proxy_wallet",
-              ignoreDuplicates: true,
-            }
-          );
+          .insert({
+            polymarket_proxy_wallet: entry.proxyWallet,
+            polymarket_username: username,
+            pnl: entry.pnl,
+          });
 
         if (error) {
-          skippedDuplicate++;
+          if (
+            error.message?.includes("polymarket_proxy_wallet") ||
+            error.message?.includes("duplicate")
+          ) {
+            duplicates++;
+          } else {
+            console.error("Insert wallet failed:", error.message);
+          }
         } else {
           inserted++;
           totalInserted++;
@@ -477,13 +473,10 @@ async function fetchAndInsertLeaderboardWallets() {
       }
 
       console.log(
-        `[LEADERBOARD][${period}] Passed=${passedFilter} Inserted=${inserted} Duplicates=${skippedDuplicate}`
+        `[LEADERBOARD][${period}] Passed=${passed} Inserted=${inserted} Duplicates=${duplicates}`
       );
     } catch (e) {
-      console.error(
-        `[LEADERBOARD][${period}] Error:`,
-        e.message
-      );
+      console.error(`[LEADERBOARD][${period}] Error:`, e.message);
     }
   }
 
@@ -491,6 +484,7 @@ async function fetchAndInsertLeaderboardWallets() {
     `Leaderboard fetch complete. Total new wallets inserted: ${totalInserted}`
   );
 }
+
 
 
 /* ===========================

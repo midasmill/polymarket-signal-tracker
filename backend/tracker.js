@@ -432,7 +432,11 @@ async function fetchAndInsertLeaderboardWallets() {
         if (!entry.proxyWallet) continue;
 
         // ✅ Your filter (correct)
-        if (entry.pnl >= 5000 && entry.vol < 6 * entry.pnl) {
+        if (
+  entry.pnl >= 5000 &&
+  entry.vol > 0 &&
+  entry.pnl / entry.vol >= 0.17
+) {
 
           const { data: existing } = await supabase
             .from("wallets")

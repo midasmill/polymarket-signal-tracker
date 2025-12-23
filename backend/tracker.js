@@ -13,10 +13,13 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) throw new Error("Supabase keys 
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-const POLL_INTERVAL = 30 * 1000;
+/* ===========================
+   SETTINGS
+=========================== */
+const POLL_INTERVAL = 30 * 1000; // adjust as needed
 const LOSING_STREAK_THRESHOLD = 3;
-const MIN_WALLETS_FOR_SIGNAL = 1; // lowered for testing
-const FORCE_SEND = true; // test mode: sends all eligible signals
+const MIN_WALLETS_FOR_SIGNAL = 3; // production threshold
+const FORCE_SEND = false; // production: send only if eligible
 
 /* ===========================
    Telegram helper
@@ -81,7 +84,7 @@ function confidenceToNumber(conf) {
 }
 
 /* ===========================
-   Market vote counts (fixed wallet majority logic)
+   Market vote counts
 =========================== */
 async function getMarketVoteCounts(marketId) {
   const { data: signals } = await supabase
@@ -92,21 +95,17 @@ async function getMarketVoteCounts(marketId) {
   if (!signals || signals.length === 0) return null;
 
   const perWallet = {};
-
-  // Group votes by wallet
   for (const s of signals) {
     perWallet[s.wallet_id] ??= {};
+    // count all votes per side
     perWallet[s.wallet_id][s.side] = (perWallet[s.wallet_id][s.side] || 0) + 1;
   }
 
   const counts = {};
-
-  // Take majority vote per wallet
   for (const votes of Object.values(perWallet)) {
-    const sides = Object.entries(votes); // [[side, count], ...]
-    sides.sort((a, b) => b[1] - a[1]);   // sort descending by vote count
-    const side = sides[0][0];            // majority side
-    counts[side] = (counts[side] || 0) + 1;
+    // pick side with majority vote per wallet
+    const walletSide = Object.entries(votes).sort((a, b) => b[1] - a[1])[0][0];
+    counts[walletSide] = (counts[walletSide] || 0) + 1;
   }
 
   return counts;
@@ -139,7 +138,6 @@ async function trackWallet(wallet) {
   for (const trade of trades) {
     if (trade.proxyWallet && trade.proxyWallet.toLowerCase() !== wallet.polymarket_proxy_wallet.toLowerCase()) continue;
 
-    // safeguard: market_id + side + signal uniqueness
     const { data: existing } = await supabase
       .from("signals")
       .select("id")
@@ -208,17 +206,26 @@ async function updatePendingOutcomes() {
 
     resolvedAny = true;
 
-    // send Notes/Telegram for resolved signal
     const counts = await getMarketVoteCounts(sig.market_id);
     const confidence = getMajorityConfidence(counts);
 
-    const noteText = `Result Received: ${new Date().toLocaleString()}\nMarket Event: ${sig.signal}\nPrediction: ${sig.side}\nConfidence: ${confidence}\nOutcome: ${winningSide}\nResult: ${result}\n`;
+    const noteText = `Result Received: ${new Date().toLocaleString()}\nMarket Event: ${sig.signal}\nPrediction: ${sig.side}\nConfidence: ${confidence}\nOutcome: ${winningSide}\nResult: ${result}`;
 
+    // Telegram
     await sendTelegram(noteText);
 
-    // update Notes page as plain text
+    // Notes (plain text with line breaks)
+    const formattedNoteText = noteText
+      .split('\n')
+      .map(line => line.trim())
+      .filter(Boolean)
+      .join('\n');
+
     const { data: notes } = await supabase.from("notes").select("id, content").eq("slug", "polymarket-millionaires").maybeSingle();
-    const newContent = notes ? notes.content + `\n${noteText}` : noteText;
+    const newContent = notes
+      ? notes.content + `\n${formattedNoteText}`
+      : formattedNoteText;
+
     await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", "polymarket-millionaires");
   }
 
@@ -253,18 +260,27 @@ async function sendMajoritySignals() {
     for (const sig of signals) {
       if (!FORCE_SEND && sig.signal_sent_at) continue;
 
-      const noteText = `Signal Sent: ${new Date().toLocaleString()}\nMarket Event: ${sig.signal}\nPrediction: ${sig.side}\nConfidence: ${confidence}\n`;
+      const noteText = `Signal Sent: ${new Date().toLocaleString()}\nMarket Event: ${sig.signal}\nPrediction: ${sig.side}\nConfidence: ${confidence}\nOutcome: Pending`;
 
       // Telegram
       await sendTelegram(noteText);
 
-      // Notes page as plain text
+      // Notes (plain text with line breaks)
+      const formattedNoteText = noteText
+        .split('\n')
+        .map(line => line.trim())
+        .filter(Boolean)
+        .join('\n');
+
       const { data: notes } = await supabase
         .from("notes")
         .select("id, content")
         .eq("slug", "polymarket-millionaires")
         .maybeSingle();
-      const newContent = notes ? notes.content + `\n${noteText}` : noteText;
+      const newContent = notes
+        ? notes.content + `\n${formattedNoteText}`
+        : formattedNoteText;
+
       await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", "polymarket-millionaires");
 
       // mark as sent

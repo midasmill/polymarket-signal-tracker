@@ -226,60 +226,50 @@ async function updatePendingOutcomes() {
 /* ===========================
    Send majority signals (FORCE_SEND friendly)
 =========================== */
+
 async function sendMajoritySignals() {
-  const { data: markets } = await supabase.from("signals").select("market_id", { distinct: true });
-  if (!markets) return;
+  const { data: signals } = await supabase
+    .from("signals")
+    .select("*")
+    .eq("outcome", "Pending"); // only unsent, pending signals
 
-  for (const { market_id } of markets) {
-    // Get vote counts; if FORCE_SEND, fake counts so even a single signal can send
-    const counts = FORCE_SEND ? { YES: 1 } : await getMarketVoteCounts(market_id);
-    const side = getMajoritySide(counts);
-    if (!side) continue;
+  if (!signals || signals.length === 0) return;
 
-    // Confidence: if FORCE_SEND, always set at least 1 star
-    const confidence = FORCE_SEND ? "⭐" : getMajorityConfidence(counts);
+  for (const sig of signals) {
+    if (!FORCE_SEND && sig.signal_sent_at) continue;
 
-    const { data: signals } = await supabase
-      .from("signals")
-      .select("*")
-      .eq("market_id", market_id)
-      .eq("side", side);
+    // determine side and confidence
+    let side = sig.side;
+    let confidence = "⭐";
 
-    if (!signals || signals.length === 0) continue;
-
-    for (const sig of signals) {
-      // Skip only if not forcing and already sent
-      if (!FORCE_SEND && sig.signal_sent_at) continue;
-
-      const noteText = `Signal Sent: ${new Date().toLocaleString()}\nMarket Event: ${sig.signal}\nPrediction: ${sig.side}\nConfidence: ${confidence}\n`;
-
-      // Send Telegram
-      await sendTelegram(noteText);
-
-      // Update Notes page
-      const { data: notes } = await supabase
-        .from("notes")
-        .select("id, content")
-        .eq("slug", "polymarket-millionaires")
-        .maybeSingle();
-
-      const newContent = notes
-        ? notes.content + `<p>${noteText.replace(/\n/g, "<br>")}</p>`
-        : `<p>${noteText.replace(/\n/g, "<br>")}</p>`;
-
-      await supabase
-        .from("notes")
-        .update({ content: newContent, public: true })
-        .eq("slug", "polymarket-millionaires");
-
-      // Mark signal as sent
-      await supabase
-        .from("signals")
-        .update({ signal_sent_at: new Date() })
-        .eq("id", sig.id);
-
-      console.log("✅ Signal sent for market:", sig.market_id, "side:", sig.side);
+    if (!FORCE_SEND) {
+      const counts = await getMarketVoteCounts(sig.market_id);
+      side = getMajoritySide(counts) || side;
+      confidence = getMajorityConfidence(counts) || "⭐";
     }
+
+    const noteText = `Signal Sent: ${new Date().toLocaleString()}\nMarket Event: ${sig.signal}\nPrediction: ${side}\nConfidence: ${confidence}\n`;
+
+    // Telegram
+    await sendTelegram(noteText);
+
+    // Notes page
+    const { data: notes } = await supabase
+      .from("notes")
+      .select("id, content")
+      .eq("slug", "polymarket-millionaires")
+      .maybeSingle();
+
+    const newContent = notes
+      ? notes.content + `<p>${noteText.replace(/\n/g, "<br>")}</p>`
+      : `<p>${noteText.replace(/\n/g, "<br>")}</p>`;
+
+    await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", "polymarket-millionaires");
+
+    // mark as sent
+    await supabase.from("signals").update({ signal_sent_at: new Date() }).eq("id", sig.id);
+
+    console.log("✅ FORCE_SEND signal sent:", sig.signal, sig.side);
   }
 }
 

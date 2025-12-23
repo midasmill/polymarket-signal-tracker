@@ -24,7 +24,7 @@ const CONFIDENCE_THRESHOLDS = {
   "⭐⭐⭐⭐⭐": parseInt(process.env.CONF_5 || "50"),
 };
 
-const RESULT_EMOJIS = { WIN: "✅", LOSS: "❌", PUSH: "⚪", Pending: "⚪" };
+const RESULT_EMOJIS = { WIN: "✅", LOSS: "❌", Pending: "⚪" };
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) throw new Error("Supabase keys required");
 
@@ -43,8 +43,10 @@ function toBlockquote(text) {
 /* ===========================
    Telegram helper
 =========================== */
-async function sendTelegram(text) {
+async function sendTelegram(text, useBlockquote = false) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+  if (useBlockquote) text = toBlockquote(text);
+
   try {
     await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: "POST",
@@ -66,8 +68,7 @@ async function fetchWithRetry(url, options = {}, retries = 3, delay = 1000) {
     try {
       const res = await fetch(url, options);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      return data;
+      return await res.json();
     } catch (err) {
       if (i < retries - 1) await new Promise(r => setTimeout(r, delay));
       else throw err;
@@ -79,10 +80,7 @@ async function fetchLatestTrades(user) {
   const url = `https://data-api.polymarket.com/trades?limit=100&takerOnly=true&user=${user}`;
   try {
     const data = await fetchWithRetry(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0",
-        Accept: "application/json",
-      },
+      headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
     });
     return Array.isArray(data) ? data : [];
   } catch (err) {
@@ -93,7 +91,6 @@ async function fetchLatestTrades(user) {
 
 async function fetchMarket(marketId) {
   if (marketCache.has(marketId)) return marketCache.get(marketId);
-
   try {
     const market = await fetchWithRetry(`https://polymarket.com/api/markets/${marketId}`);
     if (market) marketCache.set(marketId, market);
@@ -108,46 +105,16 @@ async function fetchMarket(marketId) {
    Confidence helpers
 =========================== */
 function getConfidenceEmoji(count) {
-  const entries = Object.entries(CONFIDENCE_THRESHOLDS)
-    .sort(([, a], [, b]) => b - a);
-  for (const [emoji, threshold] of entries) {
-    if (count >= threshold) return emoji;
-  }
+  const entries = Object.entries(CONFIDENCE_THRESHOLDS).sort(([, a], [, b]) => b - a);
+  for (const [emoji, threshold] of entries) if (count >= threshold) return emoji;
   return "";
-}
-
-function getMajoritySide(counts) {
-  if (!counts || Object.keys(counts).length === 0) return null;
-  const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
-  if (entries.length < 1) return null;
-  if (entries.length > 1 && entries[0][1] === entries[1][1]) return null; // tie
-  return entries[0][0];
-}
-
-function getMajorityConfidence(counts) {
-  if (!counts || Object.keys(counts).length === 0) return "";
-  const max = Math.max(...Object.values(counts));
-  return getConfidenceEmoji(max);
-}
-
-/* ===========================
-   Safe counts helper
-=========================== */
-async function getSafeMarketVoteCounts(marketId) {
-  const counts = await getMarketVoteCounts(marketId);
-  if (!counts || Object.keys(counts).length === 0) return {};
-  return counts;
 }
 
 /* ===========================
    Market vote counts
 =========================== */
 async function getMarketVoteCounts(marketId) {
-  const { data: signals } = await supabase
-    .from("signals")
-    .select("wallet_id, side")
-    .eq("market_id", marketId);
-
+  const { data: signals } = await supabase.from("signals").select("wallet_id, side").eq("market_id", marketId);
   if (!signals || !signals.length) return null;
 
   const perWallet = {};
@@ -159,11 +126,23 @@ async function getMarketVoteCounts(marketId) {
   const counts = {};
   for (const votes of Object.values(perWallet)) {
     const sides = Object.entries(votes).sort((a, b) => b[1] - a[1]);
-    if (sides.length > 1 && sides[0][1] === sides[1][1]) continue; // tie → skip
+    if (sides.length > 1 && sides[0][1] === sides[1][1]) continue;
     counts[sides[0][0]] = (counts[sides[0][0]] || 0) + 1;
   }
 
   return counts;
+}
+
+function getMajoritySide(counts) {
+  if (!counts) return null;
+  const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  if (entries.length > 1 && entries[0][1] === entries[1][1]) return null;
+  return entries[0][0];
+}
+
+function getMajorityConfidence(counts) {
+  if (!counts) return "";
+  return getConfidenceEmoji(Math.max(...Object.values(counts)));
 }
 
 /* ===========================
@@ -203,7 +182,6 @@ async function trackWallet(wallet) {
       wallet_count: 1,
       wallet_set: [String(wallet.id)],
       tx_hashes: [trade.transactionHash],
-      last_confidence_sent: "",
     });
 
     insertedCount++;
@@ -214,7 +192,43 @@ async function trackWallet(wallet) {
 }
 
 /* ===========================
-   Resolve outcomes & handle losing streaks
+   Format Signal for Telegram/Notes
+=========================== */
+function formatSignal(sig, confidence, emoji, eventType = "Signal Sent") {
+  const eventUrl = `https://polymarket.com/events/${sig.slug}`;
+  return `${eventType}: ${new Date().toLocaleString()}
+Market Event: [${sig.signal}](${eventUrl})
+Prediction: ${sig.side}
+Confidence: ${confidence}
+Outcome: ${sig.outcome || "Pending"}
+Result: ${sig.outcome ? emoji : "⚪"}`;
+}
+
+/* ===========================
+   Send result notes
+=========================== */
+async function sendResultNotes(sig, result) {
+  const counts = await getMarketVoteCounts(sig.market_id);
+  const confidence = getMajorityConfidence(counts);
+  const emoji = RESULT_EMOJIS[result] || "⚪";
+
+  const text = formatSignal(sig, confidence, emoji, "Result Received");
+
+  await sendTelegram(text); // Telegram message (no blockquote)
+
+  const noteText = toBlockquote(text);
+  const { data: notes } = await supabase.from("notes").select("id, content").eq("slug", "polymarket-millionaires").maybeSingle();
+  let newContent = notes?.content || "";
+  const safeSignal = sig.signal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const regex = new RegExp(`.*\\[${safeSignal}\\]\\(.*\\).*`, "g");
+  if (regex.test(newContent)) newContent = newContent.replace(regex, noteText);
+  else newContent += newContent ? `\n\n${noteText}` : noteText;
+
+  await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", "polymarket-millionaires");
+}
+
+/* ===========================
+   Resolve outcomes & losing streaks
 =========================== */
 async function updatePendingOutcomes() {
   const { data: pending } = await supabase.from("signals").select("*").eq("outcome", "Pending");
@@ -250,99 +264,45 @@ async function updatePendingOutcomes() {
     await sendResultNotes(sig, result);
   }
 
-  if (resolvedAny) {
-    try {
-      await sendMajoritySignals();
-    } catch (err) {
-      console.error("Error sending majority signals:", err.message);
-    }
-  }
+  if (resolvedAny) await sendMajoritySignals();
 }
 
 /* ===========================
-   Notes helper
-=========================== */
-async function sendResultNotes(sig, result) {
-  const counts = await getSafeMarketVoteCounts(sig.market_id);
-  const confidence = getMajorityConfidence(counts);
-
-  const emoji = RESULT_EMOJIS[result] || "⚪";
-  const eventUrl = `https://polymarket.com/events/${sig.slug}`;
-
-  const rawNoteText = `Result Received: ${new Date().toLocaleString()}
-Market Event: [${sig.signal}](${eventUrl})
-Prediction: ${sig.side}
-Confidence: ${confidence}
-Outcome: ${sig.side}
-Result: ${result} ${emoji}`;
-
-  const noteText = toBlockquote(rawNoteText);
-
-  await sendTelegram(noteText);
-
-  const { data: notes } = await supabase.from("notes").select("id, content").eq("slug", "polymarket-millionaires").maybeSingle();
-  let newContent = notes?.content || "";
-  const safeSignal = sig.signal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const regex = new RegExp(`.*\\[${safeSignal}\\]\\(.*\\).*`, "g");
-  if (regex.test(newContent)) {
-    newContent = newContent.replace(regex, noteText);
-  } else {
-    newContent += newContent ? `\n\n${noteText}` : noteText;
-  }
-
-  await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", "polymarket-millionaires");
-}
-
-/* ===========================
-   Send majority signals (updated to handle confidence changes and result)
+   Send majority signals
 =========================== */
 async function sendMajoritySignals() {
   const { data: markets } = await supabase.from("signals").select("market_id", { distinct: true });
   if (!markets) return;
 
   for (const { market_id } of markets) {
-    const counts = await getSafeMarketVoteCounts(market_id);
-    if (!Object.keys(counts).length) continue;
-
+    const counts = await getMarketVoteCounts(market_id);
     const side = getMajoritySide(counts);
     if (!side) continue;
 
     const confidence = getMajorityConfidence(counts);
     if (!confidence) continue;
 
-    const { data: signals } = await supabase.from("signals").select("*").eq("market_id", market_id).eq("side", side).order("id", { ascending: true });
-    if (!signals?.length) continue;
+    const { data: signals } = await supabase.from("signals").select("*").eq("market_id", market_id).eq("side", side);
+    if (!signals) continue;
 
-    // Send message if confidence changed or result updated or not sent yet
-    const sig = signals[0];
-    if (sig.last_confidence_sent !== confidence || sig.outcome !== "Pending" || !sig.signal_sent_at) {
-      const eventUrl = `https://polymarket.com/events/${sig.slug}`;
+    for (const sig of signals) {
+      if (!FORCE_SEND && sig.signal_sent_at) continue;
+
       const emoji = RESULT_EMOJIS[sig.outcome] || "⚪";
+      const text = formatSignal(sig, confidence, emoji, "Signal Sent");
 
-      const rawNoteText = `Signal Sent: ${new Date().toLocaleString()}
-Market Event: [${sig.signal}](${eventUrl})
-Prediction: ${sig.side}
-Confidence: ${confidence}
-Outcome: ${sig.outcome || "Pending"} ${emoji}`;
+      await sendTelegram(text);
 
-      const noteText = toBlockquote(rawNoteText);
-      await sendTelegram(noteText);
-
-      // update notes
+      const noteText = toBlockquote(text);
       const { data: notes } = await supabase.from("notes").select("id, content").eq("slug", "polymarket-millionaires").maybeSingle();
       let newContent = notes?.content || "";
       const safeSignal = sig.signal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const regex = new RegExp(`.*\\[${safeSignal}\\]\\(.*\\).*`, "g");
-      if (regex.test(newContent)) {
-        newContent = newContent.replace(regex, noteText);
-      } else {
-        newContent += newContent ? `\n\n${noteText}` : noteText;
-      }
-      await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", "polymarket-millionaires");
+      if (regex.test(newContent)) newContent = newContent.replace(regex, noteText);
+      else newContent += newContent ? `\n\n${noteText}` : noteText;
 
-      // mark all relevant signals as sent
-      const sigIds = signals.map(x => x.id);
-      await supabase.from("signals").update({ signal_sent_at: new Date(), last_confidence_sent: confidence }).in("id", sigIds);
+      await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", "polymarket-millionaires");
+      await supabase.from("signals").update({ signal_sent_at: new Date() }).eq("id", sig.id);
     }
   }
 }
@@ -359,40 +319,30 @@ async function sendDailySummary() {
   const endYesterday = new Date(yesterday.setHours(23, 59, 59, 999));
 
   const { data: allSignals } = await supabase.from("signals").select("*");
-  const allWins = allSignals.filter(s => s.outcome === "WIN").length;
-  const allLosses = allSignals.filter(s => s.outcome === "LOSS").length;
-
   const { data: ySignals } = await supabase
     .from("signals")
     .select("*")
     .gte("created_at", startYesterday.toISOString())
     .lte("created_at", endYesterday.toISOString());
 
-  const yWins = ySignals.filter(s => s.outcome === "WIN").length;
-  const yLosses = ySignals.filter(s => s.outcome === "LOSS").length;
   const pendingSignals = allSignals.filter(s => s.outcome === "Pending");
 
-  let summaryText = `📊 DAILY SUMMARY (${now.toLocaleDateString()})\n`;
-  summaryText += `All-time (W-L): ${allWins}-${allLosses}\n`;
-  summaryText += `Yesterday (${yesterday.toLocaleDateString()}) (W-L): ${yWins}-${yLosses}\n`;
-  summaryText += `Pending: ${pendingSignals.length}\n\n`;
+  let summaryText = `Yesterday's results:\n`;
 
-  summaryText += `Yesterday's results:\n`;
-  ySignals.forEach(s => {
-    const emoji = RESULT_EMOJIS[s.outcome] || "⚪";
-    summaryText += `${s.signal} - ${s.side} - ${s.outcome || "Pending"} ${emoji}\n`;
-  });
+  if (!ySignals || ySignals.length === 0) summaryText += `0 predictions yesterday.\n`;
+  else ySignals.forEach(s => summaryText += `${s.signal} - ${s.side} - ${s.outcome || "Pending"} ${RESULT_EMOJIS[s.outcome] || "⚪"}\n`);
 
   summaryText += `\nPending picks:\n`;
-  pendingSignals.forEach(s => {
-    summaryText += `${s.signal} - ${s.side} - Pending ⚪\n`;
-  });
+  if (!pendingSignals || pendingSignals.length === 0) summaryText += `0 predictions pending ⚪\n`;
+  else pendingSignals.forEach(s => summaryText += `${s.signal} - ${s.side} - Pending ⚪\n`);
 
-  await sendTelegram(toBlockquote(summaryText));
+  await sendTelegram(toBlockquote(summaryText), true);
   await supabase.from("notes").update({ content: toBlockquote(summaryText), public: true }).eq("slug", "polymarket-millionaires");
 }
 
-// Cron daily at 7am ET
+/* ===========================
+   Cron daily at 7am ET
+=========================== */
 cron.schedule("0 7 * * *", () => {
   console.log("Sending daily summary...");
   sendDailySummary();

@@ -1,7 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import fetch from "node-fetch";
 import cron from "node-cron";
-import http from "http"; // only import once
+import http from "http";
 
 /* ===========================
    ENV
@@ -14,7 +14,7 @@ const TIMEZONE = process.env.TIMEZONE || "America/New_York";
 
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || "30000", 10);
 const LOSING_STREAK_THRESHOLD = parseInt(process.env.LOSING_STREAK_THRESHOLD || "3", 10);
-const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "2", 10);
+const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "1", 10); // 1 pick for 1* confidence
 const FORCE_SEND = process.env.FORCE_SEND === "true" || true;
 
 const CONFIDENCE_THRESHOLDS = {
@@ -25,7 +25,7 @@ const CONFIDENCE_THRESHOLDS = {
   "⭐⭐⭐⭐⭐": parseInt(process.env.CONF_5 || "50"),
 };
 
-const RESULT_EMOJIS = { WIN: "✅", LOSS: "❌", Pending: "⚪" };
+const RESULT_EMOJIS = { WIN: "✅", LOSS: "❌", PUSH: "⚪", Pending: "⚪" };
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   throw new Error("Supabase keys required");
@@ -63,7 +63,7 @@ async function sendTelegram(text, useBlockquote = false) {
 }
 
 /* ===========================
-   Polymarket API with retries + cache
+   Polymarket API fetch helpers
 =========================== */
 const marketCache = new Map();
 
@@ -84,10 +84,7 @@ async function fetchLatestTrades(user) {
   const url = `https://data-api.polymarket.com/trades?limit=100&takerOnly=true&user=${user}`;
   try {
     const data = await fetchWithRetry(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0",
-        Accept: "application/json",
-      },
+      headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
     });
     return Array.isArray(data) ? data : [];
   } catch (err) {
@@ -112,12 +109,11 @@ async function fetchMarket(marketId) {
    Confidence helpers
 =========================== */
 function getConfidenceEmoji(count) {
-  const entries = Object.entries(CONFIDENCE_THRESHOLDS).sort(([aKey, aVal], [bKey, bVal]) => bVal - aVal);
-  for (const [emoji, threshold] of entries) {
-    if (count >= threshold) return emoji;
-  }
+  const entries = Object.entries(CONFIDENCE_THRESHOLDS).sort(([a, x], [b, y]) => y - x);
+  for (const [emoji, threshold] of entries) if (count >= threshold) return emoji;
   return "";
 }
+
 /* ===========================
    Market vote counts
 =========================== */
@@ -127,7 +123,7 @@ async function getMarketVoteCounts(marketId) {
     .select("wallet_id, side")
     .eq("market_id", marketId);
 
-  if (!signals || !signals.length) return null;
+  if (!signals?.length) return null;
 
   const perWallet = {};
   for (const s of signals) {
@@ -138,7 +134,7 @@ async function getMarketVoteCounts(marketId) {
   const counts = {};
   for (const votes of Object.values(perWallet)) {
     const sides = Object.entries(votes).sort((a, b) => b[1] - a[1]);
-    if (sides.length > 1 && sides[0][1] === sides[1][1]) continue; // tied votes ignored
+    if (sides.length > 1 && sides[0][1] === sides[1][1]) continue;
     counts[sides[0][0]] = (counts[sides[0][0]] || 0) + 1;
   }
 
@@ -148,13 +144,28 @@ async function getMarketVoteCounts(marketId) {
 function getMajoritySide(counts) {
   if (!counts) return null;
   const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
-  if (entries.length > 1 && entries[0][1] === entries[1][1]) return null; // tie
+  if (entries.length > 1 && entries[0][1] === entries[1][1]) return null;
   return entries[0][0];
 }
 
 function getMajorityConfidence(counts) {
   if (!counts) return "";
   return getConfidenceEmoji(Math.max(...Object.values(counts)));
+}
+
+/* ===========================
+   Calculate Wallet Win-Rate
+=========================== */
+async function getWalletWinRate(wallet_id) {
+  const { data: trades } = await supabase
+    .from("signals")
+    .select("outcome")
+    .eq("wallet_id", wallet_id)
+    .in("outcome", ["WIN", "LOSS"]);
+
+  if (!trades?.length) return 0;
+  const wins = trades.filter(t => t.outcome === "WIN").length;
+  return wins / trades.length;
 }
 
 /* ===========================
@@ -167,13 +178,11 @@ async function trackWallet(wallet) {
   let identityUsed = null;
 
   if (wallet.polymarket_proxy_wallet) {
-    console.log(`Wallet ${wallet.id}: trying proxy wallet ${wallet.polymarket_proxy_wallet}`);
     trades = await fetchLatestTrades(wallet.polymarket_proxy_wallet);
     if (trades.length > 0) identityUsed = "proxy";
   }
 
   if (trades.length === 0 && wallet.polymarket_username) {
-    console.log(`Wallet ${wallet.id}: proxy empty, trying username ${wallet.polymarket_username}`);
     trades = await fetchLatestTrades(wallet.polymarket_username);
     if (trades.length > 0) identityUsed = "username";
   }
@@ -184,12 +193,22 @@ async function trackWallet(wallet) {
     return;
   }
 
-  console.log(`Wallet ${wallet.id}: ${trades.length} trades found using ${identityUsed}`);
+  // ----- Check historical win-rate -----
+  const winRate = await getWalletWinRate(wallet.id);
+  if (winRate < 0.8) {
+    console.log(`Wallet ${wallet.id}: skipped (win-rate < 80%: ${Math.round(winRate*100)}%)`);
+    return;
+  }
+
+  console.log(`Wallet ${wallet.id}: ${trades.length} trades found using ${identityUsed} (win-rate: ${Math.round(winRate*100)}%)`);
 
   let insertedCount = 0;
   for (const trade of trades) {
-    // filter by proxyWallet consistency
-    if (identityUsed === "proxy" && trade.proxyWallet && trade.proxyWallet.toLowerCase() !== wallet.polymarket_proxy_wallet.toLowerCase()) continue;
+    if (identityUsed === "proxy" &&
+        trade.proxyWallet &&
+        trade.proxyWallet.toLowerCase() !== wallet.polymarket_proxy_wallet.toLowerCase()) {
+      continue;
+    }
 
     const { data: existing } = await supabase
       .from("signals")
@@ -201,22 +220,12 @@ async function trackWallet(wallet) {
 
     if (existing) continue;
 
-    // normalize side: POLY uses "BUY"/"SELL" + outcome "Yes/No" or "Up/Down"
-    let side = trade.side?.toUpperCase() || "";
-    let outcomeText = trade.outcome?.toUpperCase() || "PENDING";
-
-    // map to our table convention
-    if (side === "BUY" && outcomeText === "YES") side = "YES";
-    else if (side === "SELL" && outcomeText === "NO") side = "NO";
-    else if (side === "BUY" && outcomeText === "UP") side = "UP";
-    else if (side === "SELL" && outcomeText === "DOWN") side = "DOWN";
-
     await supabase.from("signals").insert({
       wallet_id: wallet.id,
       signal: trade.title,
       market_name: trade.title,
       market_id: trade.conditionId,
-      side,
+      side: String(trade.outcome).toUpperCase(),
       tx_hash: trade.transactionHash,
       outcome: "Pending",
       created_at: new Date(trade.timestamp * 1000),
@@ -232,7 +241,6 @@ async function trackWallet(wallet) {
 
   await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
 }
-
 /* ===========================
    Format Signal
 =========================== */
@@ -245,6 +253,7 @@ Confidence: ${confidence}
 Outcome: ${sig.outcome || "Pending"}
 Result: ${sig.outcome ? emoji : "⚪"}`;
 }
+
 /* ===========================
    Send Result Notes
 =========================== */
@@ -393,20 +402,17 @@ async function updatePreSignals() {
 }
 
 /* ===========================
-   Fetch new leaderboard wallets from Polymarket
+   Fetch new leaderboard wallets
 =========================== */
 async function fetchAndInsertLeaderboardWallets() {
   const timePeriods = ["DAY", "WEEK", "MONTH", "ALL"];
   let totalInserted = 0;
 
   for (const period of timePeriods) {
-    let fetched = 0;
-    let passed = 0;
-    let inserted = 0;
-    let duplicates = 0;
+    let fetched = 0, passed = 0, inserted = 0, duplicates = 0;
 
     try {
-      const url = `https://data-api.polymarket.com/v1/leaderboard?category=OVERALL&timePeriod=${period}&orderBy=PNL&limit=50`;
+      const url = `https://data-api.polymarket.com/v1/leaderboard?category=OVERALL&timePeriod=${period}&orderBy=PNL&limit=300`;
       const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
@@ -415,35 +421,27 @@ async function fetchAndInsertLeaderboardWallets() {
 
       for (const entry of data) {
         if (!entry.proxyWallet) continue;
+        // PnL >= 1000 & winrate >= 80%
+        if (entry.pnl < 1000) continue;
 
-        // filters: win-rate > 80%, PNL >= 1000, vol < 6 * PNL
-        if ((entry.winRate || 1) >= 0.8 && entry.pnl >= 100 && entry.vol < 6 * entry.pnl) {
-          passed++;
+        const { data: existingWallet } = await supabase
+          .from("wallets")
+          .select("id")
+          .or(`polymarket_proxy_wallet.eq.${entry.proxyWallet},polymarket_username.eq.${entry.userName}`)
+          .maybeSingle();
 
-          const { data: existing } = await supabase
-            .from("wallets")
-            .select("id")
-            .or(`polymarket_proxy_wallet.eq.${entry.proxyWallet},polymarket_username.eq.${entry.userName}`)
-            .maybeSingle();
+        if (existingWallet) { duplicates++; continue; }
 
-          if (existing) {
-            duplicates++;
-            continue;
-          }
-
-          try {
-            await supabase.from("wallets").insert({
-              polymarket_proxy_wallet: entry.proxyWallet,
-              polymarket_username: entry.userName,
-              last_checked: new Date(),
-              paused: false,
-            });
-            inserted++;
-            totalInserted++;
-          } catch (err) {
-            console.error("Insert wallet failed:", err.message);
-          }
-        }
+        // Insert wallet
+        await supabase.from("wallets").insert({
+          polymarket_proxy_wallet: entry.proxyWallet,
+          polymarket_username: entry.userName,
+          last_checked: new Date(),
+          paused: false,
+        });
+        inserted++;
+        totalInserted++;
+        passed++;
       }
     } catch (err) {
       console.error(`Failed to fetch leaderboard (${period}):`, err.message);
@@ -456,20 +454,57 @@ async function fetchAndInsertLeaderboardWallets() {
 }
 
 /* ===========================
-   Main Loop
+   Daily summary + cron
+=========================== */
+async function sendDailySummary() {
+  const now = new Date();
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+
+  const startYesterday = new Date(yesterday.setHours(0, 0, 0, 0));
+  const endYesterday = new Date(yesterday.setHours(23, 59, 59, 999));
+
+  const { data: ySignals } = await supabase
+    .from("signals")
+    .select("*")
+    .gte("created_at", startYesterday.toISOString())
+    .lte("created_at", endYesterday.toISOString());
+
+  const pendingSignals = await supabase
+    .from("signals")
+    .select("*")
+    .eq("outcome", "Pending");
+
+  let summaryText = `Yesterday's results:\n`;
+  if (!ySignals?.length) summaryText += `0 predictions yesterday.\n`;
+  else ySignals.forEach(s => summaryText += `${s.signal} - ${s.side} - ${s.outcome || "Pending"} ${RESULT_EMOJIS[s.outcome] || "⚪"}\n`);
+
+  summaryText += `\nPending picks:\n`;
+  if (!pendingSignals?.length) summaryText += `0 predictions pending ⚪\n`;
+  else pendingSignals.forEach(s => summaryText += `${s.signal} - ${s.side} - Pending ⚪\n`);
+
+  await sendTelegram(toBlockquote(summaryText), true);
+  await supabase.from("notes").update({ content: toBlockquote(summaryText), public: true }).eq("slug", "polymarket-millionaires");
+
+  await fetchAndInsertLeaderboardWallets();
+}
+
+cron.schedule("0 7 * * *", () => {
+  console.log("Running daily summary + leaderboard fetch...");
+  sendDailySummary();
+}, { timezone: TIMEZONE });
+
+/* ===========================
+   Main loop
 =========================== */
 async function main() {
   console.log("🚀 POLYMARKET TRACKER LIVE 🚀");
-
-  // Fetch leaderboard wallets immediately on deploy
   await fetchAndInsertLeaderboardWallets();
 
   setInterval(async () => {
     try {
       const { data: wallets } = await supabase.from("wallets").select("*");
       if (!wallets?.length) return;
-
-      console.log("Wallets loaded:", wallets.length);
 
       await Promise.all(wallets.map(trackWallet));
       await updatePendingOutcomes();
@@ -484,13 +519,10 @@ async function main() {
 main();
 
 /* ===========================
-   Keep Render happy by binding to a port
+   HTTP keep-alive
 =========================== */
 const PORT = process.env.PORT || 3000;
-
 http.createServer((req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain" });
   res.end("Polymarket tracker running\n");
-}).listen(PORT, () => {
-  console.log(`Tracker listening on port ${PORT}`);
-});
+}).listen(PORT, () => console.log(`Tracker listening on port ${PORT}`));

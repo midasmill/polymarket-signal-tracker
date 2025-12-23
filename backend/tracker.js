@@ -49,8 +49,6 @@ async function fetchLatestTrades(user) {
       },
     });
     if (!res.ok) return null;
-    const contentType = res.headers.get("content-type") || "";
-    if (!contentType.includes("application/json")) return null;
     const data = await res.json();
     return Array.isArray(data) ? data : null;
   } catch (err) {
@@ -95,14 +93,12 @@ async function getMarketVoteCounts(marketId) {
   const perWallet = {};
   for (const s of signals) {
     perWallet[s.wallet_id] ??= {};
-    // Count multiple votes, decide majority per wallet
     perWallet[s.wallet_id][s.side] = (perWallet[s.wallet_id][s.side] || 0) + 1;
   }
 
   const counts = {};
   for (const votes of Object.values(perWallet)) {
     const sides = Object.entries(votes);
-    // pick side with max votes for this wallet
     sides.sort((a, b) => b[1] - a[1]);
     const side = sides[0][0];
     counts[side] = (counts[side] || 0) + 1;
@@ -138,7 +134,6 @@ async function trackWallet(wallet) {
   for (const trade of trades) {
     if (trade.proxyWallet && trade.proxyWallet.toLowerCase() !== wallet.polymarket_proxy_wallet.toLowerCase()) continue;
 
-    // safeguard: market_id + side + signal uniqueness
     const { data: existing } = await supabase
       .from("signals")
       .select("id")
@@ -156,6 +151,7 @@ async function trackWallet(wallet) {
       signal: trade.title,
       market_name: trade.title,
       market_id: trade.conditionId,
+      slug: trade.slug, // store slug for link
       side,
       tx_hash: trade.transactionHash,
       outcome: "Pending",
@@ -207,18 +203,28 @@ async function updatePendingOutcomes() {
 
     resolvedAny = true;
 
-    // send Notes/Telegram for resolved signal
     const counts = await getMarketVoteCounts(sig.market_id);
     const confidence = getMajorityConfidence(counts);
     const emoji = RESULT_EMOJIS[result] || "";
+    const eventUrl = `https://polymarket.com/events/${sig.slug}`;
 
-    const noteText = `Result Received: ${new Date().toLocaleString()}\nMarket Event: ${sig.signal}\nPrediction: ${sig.side}\nConfidence: ${confidence}\nOutcome: ${winningSide}\nResult: ${result} ${emoji}`;
+    const noteText = `Result Received: ${new Date().toLocaleString()}\n` +
+                     `Market Event: [${sig.signal}](${eventUrl})\n` +
+                     `Prediction: ${sig.side}\n` +
+                     `Confidence: ${confidence}\n` +
+                     `Outcome: ${winningSide}\n` +
+                     `Result: ${result} ${emoji}`;
+
     await sendTelegram(noteText);
 
     const { data: notes } = await supabase.from("notes").select("id, content").eq("slug", "polymarket-millionaires").maybeSingle();
-    const newContent = notes
-      ? notes.content + `\n\n${noteText}`
-      : noteText;
+    let newContent = notes ? notes.content : "";
+    const regex = new RegExp(`.*\\[${sig.signal}\\]\\(.*\\).*`, "g");
+    if (regex.test(newContent)) {
+      newContent = newContent.replace(regex, noteText);
+    } else {
+      newContent += newContent ? `\n\n${noteText}` : noteText;
+    }
     await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", "polymarket-millionaires");
   }
 
@@ -253,7 +259,13 @@ async function sendMajoritySignals() {
     for (const sig of signals) {
       if (!FORCE_SEND && sig.signal_sent_at) continue;
 
-      const noteText = `Signal Sent: ${new Date().toLocaleString()}\nMarket Event: ${sig.signal}\nPrediction: ${sig.side}\nConfidence: ${confidence}\nOutcome: ${sig.outcome || "Pending"}`;
+      const eventUrl = `https://polymarket.com/events/${sig.slug}`;
+      const noteText = `Signal Sent: ${new Date().toLocaleString()}\n` +
+                       `Market Event: [${sig.signal}](${eventUrl})\n` +
+                       `Prediction: ${sig.side}\n` +
+                       `Confidence: ${confidence}\n` +
+                       `Outcome: ${sig.outcome || "Pending"}`;
+
       await sendTelegram(noteText);
 
       const { data: notes } = await supabase
@@ -261,9 +273,13 @@ async function sendMajoritySignals() {
         .select("id, content")
         .eq("slug", "polymarket-millionaires")
         .maybeSingle();
-      const newContent = notes
-        ? notes.content + `\n\n${noteText}`
-        : noteText;
+      let newContent = notes ? notes.content : "";
+      const regex = new RegExp(`.*\\[${sig.signal}\\]\\(.*\\).*`, "g");
+      if (regex.test(newContent)) {
+        newContent = newContent.replace(regex, noteText);
+      } else {
+        newContent += newContent ? `\n\n${noteText}` : noteText;
+      }
       await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", "polymarket-millionaires");
 
       await supabase.from("signals").update({ signal_sent_at: new Date() }).eq("id", sig.id);
@@ -314,8 +330,7 @@ async function sendDailySummary() {
 
   await sendTelegram(summaryText);
 
-  const { data: notes } = await supabase.from("notes").select("id, content").eq("slug", "polymarket-millionaires").maybeSingle();
-  const newContent = notes ? notes.content + `\n\n${summaryText}` : summaryText;
+  const newContent = summaryText; // overwrite previous Notes content
   await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", "polymarket-millionaires");
 }
 

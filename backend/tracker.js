@@ -18,7 +18,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 =========================== */
 const POLL_INTERVAL = 30 * 1000; // adjust as needed
 const LOSING_STREAK_THRESHOLD = 3;
-const MIN_WALLETS_FOR_SIGNAL = 3; // production threshold
+const MIN_WALLETS_FOR_SIGNAL = 2; // production threshold
 const FORCE_SEND = false; // production: send only if eligible
 
 /* ===========================

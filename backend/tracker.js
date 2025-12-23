@@ -217,7 +217,6 @@ async function trackWallet(wallet) {
   );
 
   let insertedCount = 0;
-
   for (const trade of trades) {
     // Keep original proxyWallet guard only when proxy was used
     if (

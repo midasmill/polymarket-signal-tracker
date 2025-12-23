@@ -508,10 +508,10 @@ cron.schedule("0 7 * * *", () => {
    Main Loop
 =========================== */
 async function main() {
-  console.log("🚀 Polymarket tracker live");
+  console.log("🚀 POLYMARKET TRACKER LIVE 🚀");
 
   // Fetch leaderboard wallets immediately on deploy
-  await fetchLeaderboardWallets();
+  await fetchAndInsertLeaderboardWallets();
 
   setInterval(async () => {
     try {

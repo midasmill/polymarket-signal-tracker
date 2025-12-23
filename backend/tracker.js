@@ -398,66 +398,65 @@ async function updatePreSignals() {
 
 
 /* ===========================
-   Fetch new leaderboard wallets from Polymarket
+   Fetch and insert leaderboard wallets
 =========================== */
 async function fetchAndInsertLeaderboardWallets() {
   const timePeriods = ["DAY", "WEEK", "MONTH", "ALL"];
-  let totalNewWallets = 0;
+  let totalNew = 0;
 
   for (const period of timePeriods) {
     try {
-      const url = `https://data-api.polymarket.com/v1/leaderboard?category=OVERALL&timePeriod=${period}&orderBy=PNL&limit=100`;
+      const url = `https://data-api.polymarket.com/v1/leaderboard?category=OVERALL&timePeriod=${period}&orderBy=PNL&limit=300`;
       const res = await fetch(url, {
-        headers: {
-          "User-Agent": "Mozilla/5.0",
-          Accept: "application/json",
-        },
+        headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
       });
 
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        console.error(`Failed to fetch leaderboard (${period}): HTTP ${res.status}`);
+        continue;
+      }
+
       const json = await res.json();
-      const data = json.data || [];
+      const data = json.data || []; // correctly access the array of entries
 
       console.log(`Fetched ${data.length} leaderboard entries for ${period}`);
 
       let newWalletsCount = 0;
 
       for (const entry of data) {
-        const walletId = entry.proxyWallet || entry.userName;
-        if (!walletId) continue;
+        if (!entry.proxyWallet) continue;
 
-        const pnl = Number(entry.pnl);
-        const vol = Number(entry.vol);
-
-        // Filter: PnL >= 5000 and volume < 6 * PnL
-        if (pnl >= 5000 && vol < 6 * pnl) {
-          // Only insert if not already in wallets table
+        // Filter: PnL >= $5000 and volume < 6 * PnL
+        if (entry.pnl >= 5000 && entry.vol < 6 * entry.pnl) {
+          // Check if wallet already exists
           const { data: existing } = await supabase
             .from("wallets")
             .select("id")
-            .eq("polymarket_proxy_wallet", entry.proxyWallet || "")
+            .eq("polymarket_proxy_wallet", entry.proxyWallet)
             .maybeSingle();
 
           if (!existing) {
             await supabase.from("wallets").insert({
-              polymarket_proxy_wallet: entry.proxyWallet || null,
-              polymarket_username: entry.userName || null,
+              polymarket_proxy_wallet: entry.proxyWallet,
+              polymarket_username: entry.userName,
               created_at: new Date(),
             });
+
             newWalletsCount++;
-            totalNewWallets++;
+            totalNew++;
           }
         }
       }
 
       console.log(`TimePeriod ${period} complete. New wallets added: ${newWalletsCount}`);
     } catch (err) {
-      console.error(`Failed to fetch leaderboard (${period}):`, err.message);
+      console.error(`Error fetching leaderboard (${period}):`, err.message);
     }
   }
 
-  console.log(`Leaderboard fetch complete. Total new wallets inserted: ${totalNewWallets}`);
+  console.log(`Leaderboard fetch complete. Total new wallets inserted: ${totalNew}`);
 }
+
 
 
 
@@ -502,21 +501,21 @@ async function sendDailySummary() {
   await fetchAndInsertLeaderboardWallets();
 }
 
-/* ===========================
-   Cron daily at 7am ET
-=========================== */
-cron.schedule("0 7 * * *", () => {
-  console.log("Running daily summary + leaderboard + new wallets fetch...");
-  sendDailySummary();
+// Cron daily at 7am ET
+cron.schedule("0 7 * * *", async () => {
+  console.log("Fetching leaderboard wallets + sending daily summary...");
+  await fetchAndInsertLeaderboardWallets();
+  await sendDailySummary();
 }, { timezone: TIMEZONE });
+
 
 /* ===========================
    Main Loop
 =========================== */
 async function main() {
-  console.log("🚀 POLYMARKET TRACKER LIVE 🚀");
+  console.log("🚀 Polymarket tracker live");
 
-  // Fetch leaderboard wallets immediately on deploy
+  // Insert new leaderboard wallets immediately on deploy
   await fetchAndInsertLeaderboardWallets();
 
   setInterval(async () => {
@@ -528,7 +527,7 @@ async function main() {
 
       await Promise.all(wallets.map(trackWallet));
       await updatePendingOutcomes();
-      await updatePreSignals();
+      await updatePreSignals(); // <-- added pre-signals update here
     } catch (e) {
       console.error("Loop error:", e);
       await sendTelegram(`Tracker loop error: ${e.message}`);
@@ -536,7 +535,6 @@ async function main() {
   }, POLL_INTERVAL);
 }
 
-main();
 
 /* ===========================
    Keep Render happy by binding to a port

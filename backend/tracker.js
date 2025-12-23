@@ -21,7 +21,12 @@ const LOSING_STREAK_THRESHOLD = 3;
 const MIN_WALLETS_FOR_SIGNAL = 2; // production mode threshold
 const FORCE_SEND = true; // send all eligible signals
 
-const TIMEZONE = "America/New_York";
+const timeZone = "America/New_York";
+const date = new Date();
+
+const zonedDate = utcToZonedTime(date, timeZone);
+console.log(format(zonedDate, "yyyy-MM-dd HH:mm:ssXXX", { timeZone }));
+
 const RESULT_EMOJIS = { WIN: "✅", LOSS: "❌", Pending: "⚪" };
 
 /* ===========================

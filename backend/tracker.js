@@ -112,24 +112,25 @@ function getConfidenceEmoji(count) {
 }
 
 async function getMarketVoteCounts(marketId) {
-  // Fetch all signals for this market
-  const { data: signals } = await supabase.from("signals").select("id, side").eq("market_id", marketId);
-  if (!signals?.length) return null;
+  const { data: votes } = await supabase
+    .from("signal_wallets as sw")
+    .select("wallet_id, signals(side)")
+    .eq("signals.market_id", marketId)
+    .limit(1000);
+
+  if (!votes?.length) return null;
+
+  const perWallet = {};
+  for (const v of votes) {
+    perWallet[v.wallet_id] ??= {};
+    perWallet[v.wallet_id][v.signals.side] = (perWallet[v.wallet_id][v.signals.side] || 0) + 1;
+  }
 
   const counts = {};
-  // For each signal, count unique wallets in signal_wallets
-  for (const sig of signals) {
-    const { data: wallets } = await supabase.from("signal_wallets").select("wallet_id").eq("signal_id", sig.id);
-    if (!wallets?.length) continue;
-
-    const perWallet = {};
-    for (const w of wallets) {
-      perWallet[w.wallet_id] = (perWallet[w.wallet_id] || 0) + 1;
-    }
-
-    const sorted = Object.entries(perWallet).sort((a, b) => b[1] - a[1]);
-    if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) continue; // tie
-    counts[sig.side] = (counts[sig.side] || 0) + 1;
+  for (const votes of Object.values(perWallet)) {
+    const sorted = Object.entries(votes).sort((a, b) => b[1] - a[1]);
+    if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) continue;
+    counts[sorted[0][0]] = (counts[sorted[0][0]] || 0) + 1;
   }
 
   return counts;
@@ -167,10 +168,10 @@ async function updateNotes(noteText, sigSignal) {
 }
 
 /* ===========================
-   Track Wallet Trades
+   Track Wallet Trades with retry
 =========================== */
 async function trackWallet(wallet) {
-  if (!wallet.polymarket_proxy_wallet || wallet.paused) return;
+  if (wallet.paused || !wallet.polymarket_proxy_wallet) return;
 
   const trades = await fetchLatestTrades(wallet);
   if (!trades.length) return;
@@ -178,70 +179,66 @@ async function trackWallet(wallet) {
   let insertedCount = 0;
 
   for (const trade of trades) {
-    try {
-      if (trade.proxyWallet && trade.proxyWallet.toLowerCase() !== wallet.polymarket_proxy_wallet.toLowerCase()) continue;
+    if (trade.proxyWallet && trade.proxyWallet.toLowerCase() !== wallet.polymarket_proxy_wallet.toLowerCase()) continue;
 
-      // Check if signal_wallet exists
-      const { data: existingWalletSignal } = await supabase
-        .from("signal_wallets")
-        .select("*")
-        .eq("wallet_id", wallet.id)
-        .eq("tx_hash", trade.transactionHash)
-        .maybeSingle();
+    let success = false;
+    let attempts = 0;
+    const maxRetries = 3;
 
-      if (existingWalletSignal) continue;
+    while (!success && attempts < maxRetries) {
+      try {
+        attempts++;
 
-      // Check if signal exists
-      let signalId;
-      const { data: existingSignal } = await supabase
-        .from("signals")
-        .select("id")
-        .eq("market_id", trade.conditionId)
-        .maybeSingle();
-
-      if (existingSignal) {
-        signalId = existingSignal.id;
-      } else {
-        const { data: newSignal, error: insertError } = await supabase
-          .from("signals")
-          .insert({
-            wallet_count: 1,
-            market_id: trade.conditionId,
-            market_name: trade.title || "Unknown Market",
-            slug: trade.slug || trade.conditionId,
-            signal: trade.title || "No title",
-            side: String(trade.outcome || trade.side || "BUY").toUpperCase(),
-            outcome: "Pending",
-            created_at: trade.timestamp ? new Date(trade.timestamp * 1000) : new Date(),
-          })
+        // Check if already exists
+        const { data: existingSW } = await supabase
+          .from("signal_wallets")
           .select("id")
-          .single();
+          .eq("wallet_id", wallet.id)
+          .eq("tx_hash", trade.transactionHash)
+          .maybeSingle();
+        if (existingSW) break;
 
-        if (insertError) {
-          console.error("Failed to insert signal for trade:", trade, insertError.message);
-          continue;
+        // Get or insert signal
+        let signalId;
+        const { data: existingSignal } = await supabase
+          .from("signals")
+          .select("id")
+          .eq("market_id", trade.conditionId)
+          .maybeSingle();
+
+        if (existingSignal) signalId = existingSignal.id;
+        else {
+          const { data: newSignal } = await supabase
+            .from("signals")
+            .insert({
+              wallet_count: 1,
+              market_id: trade.conditionId,
+              market_name: trade.title,
+              slug: trade.slug,
+              signal: trade.title,
+              side: String(trade.outcome).toUpperCase(),
+              outcome: "Pending",
+              created_at: new Date(trade.timestamp * 1000),
+            })
+            .select("id")
+            .single();
+          signalId = newSignal.id;
         }
-        signalId = newSignal.id;
-      }
 
-      // Insert signal_wallet record
-      const { error: walletInsertError } = await supabase
-        .from("signal_wallets")
-        .insert({
+        // Insert into signal_wallets
+        await supabase.from("signal_wallets").insert({
           signal_id: signalId,
           wallet_id: wallet.id,
           tx_hash: trade.transactionHash,
           wallet_count: 1,
         });
 
-      if (walletInsertError) {
-        console.error("Failed to insert signal_wallet:", trade, walletInsertError.message);
-        continue;
+        insertedCount++;
+        success = true;
+      } catch (err) {
+        console.error(`Failed to insert signal for trade (attempt ${attempts}):`, trade, err.message);
+        if (attempts < maxRetries) await new Promise(r => setTimeout(r, 1000));
       }
-
-      insertedCount++;
-    } catch (err) {
-      console.error("Unexpected error processing trade:", trade, err.message);
     }
   }
 
@@ -275,8 +272,8 @@ async function updatePendingOutcomes() {
       const result = sig.side === winningSide ? "WIN" : (market.cancelled ? "PUSH" : "LOSS");
       await supabase.from("signals").update({ outcome: result, outcome_at: new Date() }).eq("id", sig.id);
 
-      // Handle wallet losing streak
-      const { data: wallet } = await supabase.from("wallets").select("*").eq("id", sig.wallet_id).single();
+      // Losing streak
+      const { data: wallet } = await supabase.from("wallets").select("*").eq("id", sig.wallet_id).maybeSingle();
       if (!wallet) continue;
 
       if (result === "LOSS") {

@@ -331,41 +331,36 @@ main();
 =========================== */
 async function updateWalletWinRatesAndPause() {
   try {
-    const query = `
-      UPDATE wallets w
-      SET 
-        win_rate = sub.wr,
-        paused = CASE
-                  WHEN sub.wr >= 80 THEN false
-                  WHEN sub.wr < 80 THEN true
-                  ELSE w.paused
-                 END
-      FROM (
-        SELECT wallet_id,
-               CASE 
-                 WHEN COUNT(DISTINCT market_id) = 0 THEN 0
-                 ELSE SUM(CASE WHEN outcome='WIN' THEN 1 ELSE 0 END)::float / COUNT(DISTINCT market_id) * 100
-               END AS wr
-        FROM signals
-        WHERE outcome IN ('WIN','LOSS')
-        GROUP BY wallet_id
-      ) AS sub
-      WHERE w.id = sub.wallet_id
-      RETURNING id, paused, win_rate
-    `;
+    const { data: wallets } = await supabase
+      .from("wallets")
+      .select("id")
+      .order("id");
 
-    const { data: updatedWallets, error } = await supabase.rpc('execute_sql', { sql: query });
-    if (error) { console.error("Batch win rate + pause update failed:", error.message); return; }
-    console.log("Batch win rate + pause update complete.");
+    for (const wallet of wallets) {
+      // Fetch wallet's signals
+      const { data: signals } = await supabase
+        .from("signals")
+        .select("market_id, outcome")
+        .eq("wallet_id", wallet.id)
+        .in("outcome", ["WIN", "LOSS"]);
 
-    if (updatedWallets?.length) {
-      for (const wallet of updatedWallets) {
-        if (!wallet.paused && wallet.win_rate >= 80) {
-          console.log(`Wallet ${wallet.id} just unpaused — fetching unresolved picks...`);
-          await trackWallet(wallet);
-        }
+      const totalMarkets = new Set(signals.map(s => s.market_id)).size;
+      const wins = signals.filter(s => s.outcome === "WIN").length;
+      const win_rate = totalMarkets > 0 ? (wins / totalMarkets) * 100 : 0;
+
+      const paused = win_rate < 80;
+
+      await supabase
+        .from("wallets")
+        .update({ win_rate, paused })
+        .eq("id", wallet.id);
+
+      if (!paused && win_rate >= 80) {
+        await trackWallet(wallet); // fetch unresolved picks
       }
     }
+
+    console.log("Batch win rate + pause update complete.");
   } catch (err) {
     console.error("Batch win rate + pause update error:", err.message);
   }

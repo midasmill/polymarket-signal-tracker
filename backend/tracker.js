@@ -211,20 +211,21 @@ async function fetchAllBuyCashTrades(identity) {
 const marketResolutionCache = new Map();
 
 async function fetchMarketResolution(conditionId) {
-  if (marketResolutionCache.has(conditionId)) return marketResolutionCache.get(conditionId);
-
   try {
     const market = await fetchWithRetry(`https://polymarket.com/api/markets/${conditionId}`);
-    if (!market || !market.resolved) return null;
+    if (!market || !market.resolved) return null; // not resolved yet
 
-    const winningSide = String(market.winningOutcome || "").toUpperCase();
-    marketResolutionCache.set(conditionId, winningSide);
-    return winningSide;
+    return String(market.winningOutcome || "").toUpperCase();
   } catch (err) {
-    console.error("Market resolution fetch error:", err.message);
+    if (err.message.includes("404")) {
+      console.warn(`Market resolution not found for conditionId ${conditionId} (404)`);
+      return null; // skip this trade
+    }
+    console.error(`Error fetching market ${conditionId}:`, err.message);
     return null;
   }
 }
+
 
 /* ===========================
    Calculate Volume-Weighted Win Rate

@@ -70,40 +70,27 @@ async function sendTelegram(text, useBlockquote = false) {
 
 
 /* ===========================
-   Migration Helper
+   Migration Helper — Fix picked_outcome
 =========================== */
 
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
-
 async function fixOldSignals() {
-// Example
-const { data: oldSignals } = await supabase
-  .from("signals")
-  .select("*")
-  .or("picked_outcome.is.null,picked_outcome.eq.''");
-
-for (const sig of oldSignals) {
-  // fetch trade
-  const trades = await fetch(`https://data-api.polymarket.com/trades?user=${sig.wallet_id}&limit=100`).then(r => r.json());
-  const trade = trades.find(t => t.transactionHash === sig.tx_hash);
-  if (!trade) continue;
-
-  await supabase.from("signals").update({
-    picked_outcome: derivePickedOutcome(trade),
-    outcome: "Pending",
-  }).eq("id", sig.id);
-}
-
-   
-   const { data: oldSignals } = await supabase
+  // Fetch all signals where picked_outcome is null or empty
+  const { data: oldSignals } = await supabase
     .from("signals")
     .select("*")
     .or("picked_outcome.is.null,picked_outcome.eq.''");
 
+  if (!oldSignals?.length) {
+    console.log("No old signals to fix.");
+    return;
+  }
+
+  console.log(`Fixing ${oldSignals.length} old signals...`);
+
   for (const sig of oldSignals) {
     if (!sig.tx_hash || !sig.wallet_id) continue;
 
-    // fetch trade from Polymarket
+    // Fetch trade from Polymarket
     let trade = null;
     try {
       const trades = await fetch(
@@ -116,19 +103,26 @@ for (const sig of oldSignals) {
 
     if (!trade) continue;
 
+    // Update signal with correct picked_outcome and reset outcome
     await supabase
       .from("signals")
       .update({
         picked_outcome: derivePickedOutcome(trade),
-        outcome: "Pending",  // reset wrong PnL-based WIN/LOSS
+        outcome: "Pending", // reset old WIN/LOSS
       })
       .eq("id", sig.id);
+
+    console.log(
+      `[MIGRATION] Signal ${sig.id} fixed - Picked outcome:`,
+      derivePickedOutcome(trade)
+    );
   }
 
   console.log("Old signals migration complete!");
 }
 
-fixOldSignals();
+// Call it in your tracker loop or once on deploy
+// await fixOldSignals();
 
 
 

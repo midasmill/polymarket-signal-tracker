@@ -699,12 +699,11 @@ http.createServer((req, res) => {
   res.end("Polymarket tracker running\n");
 }).listen(PORT, () => console.log(`Tracker listening on port ${PORT}`));
 
-/* ===========================
-   Tracker loop
-=========================== */
-
-// Run immediately on startup
-trackerLoop();
-
-// Then repeat every 60 seconds
-setInterval(trackerLoop, 60_000);
+async function trackerLoop() {
+  try {
+    // ... your loop code
+  } catch (err) {
+    console.error("Loop error:", err);
+    // await sendTelegram(...) // commented out
+  }
+} // <-- Make sure this closing brace exists

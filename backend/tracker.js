@@ -320,6 +320,26 @@ async function fetchWalletPositions(userId) {
 }
 
 /* ===========================
+   Fetch wallet positions safely
+========================== */
+async function trackWallet(wallet) {
+  if (!userId) return [];
+  const url = `https://data-api.polymarket.com/positions?user=${userId}&limit=100&sizeThreshold=1&sortBy=CURRENT&sortDirection=DESC`;
+  try {
+    const data = await fetchWithRetry(
+      url,
+      { headers: { "User-Agent": "Mozilla/5.0" } },
+      3, // retries
+      2000 // 2s delay
+    );
+    return Array.isArray(data) ? data : [];
+  } catch (err) {
+    console.error(`Failed to fetch positions for wallet ${userId}:`, err.message);
+    return [];
+  }
+}
+
+/* ===========================
    Track Wallet Trades
 ========================== */
 async function trackWallet(wallet) {

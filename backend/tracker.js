@@ -69,49 +69,6 @@ async function sendTelegram(text, useBlockquote = false) {
 }
 
 
-/* ===========================
-   Migration Helper — Fix picked_outcome
-=========================== */
-
-async function fixAllOldSignals() {
-  const { data: oldSignals } = await supabase
-    .from("signals")
-    .select("*")
-    .or("picked_outcome.is.null,picked_outcome.eq.market_name");
-
-  for (const sig of oldSignals) {
-    if (!sig.tx_hash || !sig.wallet_id) continue;
-
-    let trade = null;
-    try {
-      const trades = await fetch(
-        `https://data-api.polymarket.com/trades?user=${sig.wallet_id}&limit=100`
-      ).then(r => res.json());
-      trade = trades.find(t => t.transactionHash === sig.tx_hash);
-    } catch {
-      continue;
-    }
-    if (!trade) continue;
-
-    const picked = derivePickedOutcome(trade);
-
-    await supabase
-      .from("signals")
-      .update({
-        picked_outcome: picked,
-        outcome: "Pending",       // reset old WIN/LOSS
-        resolved_outcome: null,
-      })
-      .eq("id", sig.id);
-
-    console.log(`[MIGRATION] Signal ${sig.id} updated. Picked outcome: ${picked}`);
-  }
-
-  console.log("All old signals fixed!");
-}
-
-
-
 
 /* ===========================
    Polymarket API with retries + cache
@@ -794,8 +751,6 @@ cron.schedule("0 7 * * *", () => {
 
 async function main() {
   console.log("🚀 POLYMARKET TRACKER LIVE 🚀");
-
-await fixAllOldSignals();
    
   // Insert new leaderboard wallets immediately on deploy
   await fetchAndInsertLeaderboardWallets();

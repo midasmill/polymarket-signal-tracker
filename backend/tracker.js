@@ -272,6 +272,15 @@ async function trackWallet(wallet) {
       outcome_at = new Date(trade.timestamp * 1000);
     }
 
+     console.log("[TRADE DEBUG]", {
+  tx: trade.transactionHash,
+  outcome: trade.outcome,
+  side: trade.side,
+  title: trade.title,
+  conditionId: trade.conditionId
+});
+
+     
 await supabase.from("signals").insert({
   wallet_id: wallet.id,
   signal: trade.title,

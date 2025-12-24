@@ -1,8 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import fetch from "node-fetch";
 import cron from "node-cron";
-import http from "http"; // <- only here, remove any other import
-
+import http from "http"; // 
 
 /* ===========================
    ENV
@@ -33,8 +32,6 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-
-
 
 /* ===========================
    Markdown helper
@@ -67,8 +64,6 @@ async function sendTelegram(text, useBlockquote = false) {
     console.error("Telegram send failed:", err.message);
   }
 }
-
-
 
 /* ===========================
    Polymarket API with retries + cache
@@ -131,9 +126,6 @@ async function fetchMarket(eventSlug) {
   }
 }
 
-
-
-
 /* ===========================
    Confidence helpers
 =========================== */
@@ -187,7 +179,6 @@ function getMajorityConfidence(counts) {
   return getConfidenceEmoji(Math.max(...Object.values(counts)));
 }
 
-
 /* ===========================
    Helper to get actual pick
 =========================== */
@@ -208,7 +199,6 @@ function getPick(sig) {
 
   return "Unknown";
 }
-
 
 /* ===========================
    Format Signal for Telegram/Notes
@@ -246,8 +236,6 @@ function derivePickedOutcome(trade) {
   // Unknown
   return null;
 }
-
-
 
 /* ===========================
    Track Wallet Trades (Resolved + Pending with pick)
@@ -313,7 +301,6 @@ async function trackWallet(wallet) {
   return null;
 }
 
-   
 const pickedOutcome = derivePickedOutcome(trade);
 
      console.log(
@@ -339,8 +326,6 @@ await supabase.from("signals").insert({
   tx_hashes: [trade.transactionHash],
 });
 
-
-
   }
 
   await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
@@ -359,7 +344,6 @@ async function fetchMarketByConditionId(conditionId) {
 
   return res.json();
 }
-
 
 /* ===========================
    Resolve Outcomes using eventSlug
@@ -467,12 +451,6 @@ async function resolvePendingOutcomes() {
   console.log("Pending outcome resolution complete!");
 }
 
-
-
-
-
-
-
 /* ===========================
    Send Result Notes
 =========================== */
@@ -501,6 +479,9 @@ async function sendResultNotes(sig, result) {
   await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", "polymarket-millionaires");
 }
 
+/* ===========================
+   Send Majority Signals
+=========================== */
 
 async function sendMajoritySignals() {
   const { data: markets } = await supabase
@@ -589,42 +570,6 @@ async function sendMajoritySignals() {
   }
 }
 
-
-/* ===========================
-   Pre-signals (near-threshold)
-=========================== */
-async function updatePreSignals() {
-  const { data: markets } = await supabase.from("signals").select("market_id", { distinct: true });
-  if (!markets) return;
-
-  for (const { market_id } of markets) {
-    const counts = await getMarketVoteCounts(market_id);
-    if (!counts) continue;
-
-    const side = getMajoritySide(counts);
-    if (!side) continue;
-
-    const maxCount = Math.max(...Object.values(counts));
-    if (maxCount > 0 && maxCount < MIN_WALLETS_FOR_SIGNAL) {
-      const { data: existing } = await supabase.from("pre_signals").select("id").eq("market_id", market_id).eq("side", side).maybeSingle();
-      if (!existing) {
-        const { data: sig } = await supabase.from("signals").select("*").eq("market_id", market_id).eq("side", side).limit(1).maybeSingle();
-        if (sig) {
-          await supabase.from("pre_signals").insert({
-            market_id,
-            market_name: sig.market_name,
-            side,
-            wallet_count: maxCount,
-            confidence: getConfidenceEmoji(maxCount),
-            signal: sig.signal,
-          });
-        }
-      }
-    }
-  }
-}
-
-
 /* ===========================
    Fetch new leaderboard wallets from Polymarket
 =========================== */
@@ -651,7 +596,7 @@ async function fetchAndInsertLeaderboardWallets() {
         if (!entry.proxyWallet) continue;
 
         // PnL and volume filter
-        if (entry.pnl >= 100 && entry.vol < 6 * entry.pnl) {
+        if (entry.pnl >= 10000 && entry.vol < 6 * entry.pnl) {
           passed++;
 
           // Insert only if not already in wallets table
@@ -693,9 +638,6 @@ async function fetchAndInsertLeaderboardWallets() {
 
   console.log(`Leaderboard fetch complete. Total new wallets inserted: ${totalInserted}`);
 }
-
-
-
 
 /* ===========================
    Daily Summary + Leaderboard
@@ -764,7 +706,6 @@ async function main() {
 
       await Promise.all(wallets.map(trackWallet));
       await resolvePendingOutcomes();
-      await updatePreSignals();
     } catch (e) {
       console.error("Loop error:", e);
       await sendTelegram(`Tracker loop error: ${e.message}`);

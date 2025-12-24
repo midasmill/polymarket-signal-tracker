@@ -44,7 +44,6 @@ function toBlockquote(text) {
     .join("\n");
 }
 
-async function sendTelegram(text, useBlockquote = false) {
 /* ===========================
    Telegram helper
 =========================== */
@@ -67,6 +66,8 @@ async function sendTelegram(text, useBlockquote = false) {
   }
 }
 
+async function fetchAllBuyCashTrades(identity) {wallet
+                                                
 /* ===========================
    Polymarket API with retries + cache
 =========================== */

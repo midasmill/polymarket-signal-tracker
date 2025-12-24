@@ -711,8 +711,10 @@ async function updatePreSignals() {
    Fetch new leaderboard wallets from Polymarket
 =========================== */
 async function fetchAndInsertLeaderboardWallets() {
-  const timePeriods = ["DAY", "WEEK", "MONTH", "ALL"];
-  let totalInserted = 0;
+  const period = "ALL";
+  const pageSize = 50; // API max per request
+  let offset = 0;
+  let allEntries = [];
 
   for (const period of timePeriods) {
     let fetched = 0;
@@ -721,8 +723,8 @@ async function fetchAndInsertLeaderboardWallets() {
     let duplicates = 0;
 
     try {
-      const url = `https://data-api.polymarket.com/v1/leaderboard?category=OVERALL&timePeriod=${period}&orderBy=PNL&limit=50`;
-      const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+  const url = `https://data-api.polymarket.com/v1/leaderboard?category=OVERALL&timePeriod=${period}&orderBy=PNL&limit=${pageSize}&offset=${offset}`;
+        const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       fetched = data.length;

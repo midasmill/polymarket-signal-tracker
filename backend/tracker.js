@@ -298,13 +298,19 @@ async function fetchMarketResolution(conditionId) {
    Calculate Volume-Weighted Win Rate
 =========================== */
 async function calculateVolumeWeightedWinRate(wallet) {
+
   const trades = await fetchAllBuyCashTrades(wallet.polymarket_proxy_wallet || wallet.polymarket_username);
   if (!trades || trades.length === 0) return null;
+
+  const now = Date.now();
+  const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
 
   let totalVolume = 0;
   let winningVolume = 0;
 
   for (const t of trades) {
+    if (t.timestamp * 1000 < sevenDaysAgo) continue; // skip trades older than 7 days
+
     let resolvedSide;
     try {
       resolvedSide = await fetchMarketResolution(t.conditionId);
@@ -326,6 +332,7 @@ async function calculateVolumeWeightedWinRate(wallet) {
 
   return totalVolume > 0 ? winningVolume / totalVolume : null;
 }
+
 
 
 /* ===========================
@@ -711,8 +718,8 @@ async function updatePreSignals() {
    Fetch new leaderboard wallets from Polymarket
 =========================== */
 async function fetchAndInsertLeaderboardWallets() {
-  const timePeriod = "ALL";
-  const pageSize = 300; // fetch up to 300 at once
+  const timePeriod = ["DAY", "WEEK", "MONTH", "ALL"];
+  const pageSize = 200; // fetch up to 100 at once
   let offset = 0;
   let totalInserted = 0;
 
@@ -731,9 +738,22 @@ async function fetchAndInsertLeaderboardWallets() {
       for (const entry of data) {
         if (!entry.proxyWallet) continue;
 
-        if (entry.pnl >= 10000 && entry.vol < 8 * entry.pnl) {
+        if (entry.pnl >= 1000 && entry.vol < 6 * entry.pnl) {
           passed++;
 
+            const tempWallet = {
+    polymarket_proxy_wallet: entry.proxyWallet,
+    polymarket_username: entry.userName
+  };
+
+  const vw = await calculateVolumeWeightedWinRate(tempWallet);
+
+  if (vw === null || vw < 0.8) {
+    console.log(`Skipping wallet ${entry.proxyWallet} due to VW < 80% (${vw?.toFixed(2) || 0})`);
+    continue;
+  }
+
+            // Insert wallet into DB
           const { data: existing } = await supabase
             .from("wallets")
             .select("id")

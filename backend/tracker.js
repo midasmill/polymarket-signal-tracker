@@ -328,37 +328,48 @@ async function calculateVolumeWeightedWinRate(wallet) {
 }
 
 
-
 /* ===========================
-   Track wallet trades
+   Track Wallet Trades (updated for VW filter)
 =========================== */
 async function trackWallet(wallet) {
+  // Skip paused wallets or wallets below 80% VW
   if (wallet.paused) return;
+  if (wallet.win_rate != null && wallet.win_rate < 0.8) {
+    console.log(`Wallet ${wallet.id} skipped due to low VW win rate (${Math.round(wallet.win_rate * 100)}%)`);
+    return;
+  }
 
   let trades = [];
   let identityUsed = null;
 
   if (wallet.polymarket_proxy_wallet) {
-    trades = await fetchAllBuyCashTrades(wallet.polymarket_proxy_wallet);
+    console.log(`Wallet ${wallet.id}: trying proxy wallet ${wallet.polymarket_proxy_wallet}`);
+    trades = await fetchLatestTrades(wallet.polymarket_proxy_wallet);
     if (trades.length > 0) identityUsed = "proxy";
   }
 
-   
   if (trades.length === 0 && wallet.polymarket_username) {
-    trades = await fetchAllBuyCashTrades(wallet.polymarket_username);
+    console.log(`Wallet ${wallet.id}: proxy empty, trying username ${wallet.polymarket_username}`);
+    trades = await fetchLatestTrades(wallet.polymarket_username);
     if (trades.length > 0) identityUsed = "username";
   }
 
   if (trades.length === 0) {
-    console.log(`Wallet ${wallet.id}: skipped (no trades)`);
+    console.log(`Wallet ${wallet.id}: skipped (no trades via proxy or username)`);
     await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
     return;
   }
 
   console.log(`Wallet ${wallet.id}: ${trades.length} trades found using ${identityUsed}`);
 
-   
+  let insertedCount = 0;
   for (const trade of trades) {
+    if (identityUsed === "proxy" &&
+        trade.proxyWallet &&
+        trade.proxyWallet.toLowerCase() !== wallet.polymarket_proxy_wallet.toLowerCase()) {
+      continue;
+    }
+
     const { data: existing } = await supabase
       .from("signals")
       .select("id")
@@ -369,24 +380,28 @@ async function trackWallet(wallet) {
 
     if (existing) continue;
 
-     
     await supabase.from("signals").insert({
       wallet_id: wallet.id,
       signal: trade.title,
       market_name: trade.title,
-      market_id: trade.conditionId,   // store conditionId
+      market_id: trade.conditionId,
       side: String(trade.outcome).toUpperCase(),
       tx_hash: trade.transactionHash,
       outcome: "Pending",
       created_at: new Date(trade.timestamp * 1000),
       wallet_count: 1,
       wallet_set: [String(wallet.id)],
-      tx_hashes: [trade.transactionHash]
+      tx_hashes: [trade.transactionHash],
     });
+
+    insertedCount++;
   }
+
+  if (insertedCount > 0) console.log(`Inserted ${insertedCount} new trades for wallet ${wallet.id}`);
 
   await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
 }
+
 
 /* ===========================
    Daily VW Calculation + Auto-pause
@@ -579,45 +594,36 @@ async function updatePendingOutcomes() {
 
 
 /* ===========================
-   Daily wallet VW update + auto-pause
+   Daily Volume-Weighted Win Rate Update
 =========================== */
-
-async function updateWalletWinRates() {
+async function updateWalletVW() {
   const { data: wallets } = await supabase.from("wallets").select("*");
-  if (!wallets?.length) return;
 
-  console.log(`\n=== Volume-Weighted Win Rate Update (${new Date().toLocaleString()}) ===`);
+  if (!wallets?.length) return;
 
   for (const wallet of wallets) {
     try {
       const vw = await calculateVolumeWeightedWinRate(wallet);
+      if (vw == null) continue;
 
-      if (vw === null) {
-        console.log(`Wallet ${wallet.id}: no resolved trades, skipping`);
-        continue;
-      }
-
-      const shouldPause = vw < 0.80;
-
+      // Update wallet with VW
       await supabase
         .from("wallets")
-        .update({
-          win_rate: vw,
-          paused: shouldPause
-        })
+        .update({ win_rate: vw })
         .eq("id", wallet.id);
 
-      console.log(
-        `Wallet ${wallet.id}: VW=${(vw * 100).toFixed(2)}% | ` +
-        `${shouldPause ? "PAUSED" : "ACTIVE"}`
-      );
-
+       
+      // Autopause wallets with VW < 80%
+      if (vw < 0.8 && !wallet.paused) {
+        await supabase.from("wallets").update({ paused: true }).eq("id", wallet.id);
+        console.log(`Wallet ${wallet.id} paused (VW=${(vw*100).toFixed(1)}%)`);
+      } else {
+        console.log(`Wallet ${wallet.id} VW updated: ${(vw*100).toFixed(1)}%`);
+      }
     } catch (err) {
-      console.error(`VW calc failed for wallet ${wallet.id}:`, err.message);
+      console.error(`Error updating VW for wallet ${wallet.id}:`, err.message);
     }
   }
-
-  console.log(`=== VW Update Complete ===\n`);
 }
 
 
@@ -818,9 +824,13 @@ async function sendDailySummary() {
    Cron daily at 7am ET
 =========================== */
 cron.schedule("0 7 * * *", () => {
-   runDailyUpdate().catch(err => console.error("Daily update failed:", err.message));
   console.log("Running daily summary + leaderboard + new wallets fetch...");
   sendDailySummary();
+}, { timezone: TIMEZONE });
+
+cron.schedule("30 6 * * *", async () => {
+  console.log("Running daily VW calculation...");
+  await updateWalletVW();
 }, { timezone: TIMEZONE });
 
 /* ===========================

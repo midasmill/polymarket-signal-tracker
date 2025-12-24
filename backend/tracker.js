@@ -237,7 +237,7 @@ async function trackWallet(wallet) {
 
   let positions = [];
   try {
-    const url = `https://data-api.polymarket.com/positions?user=${userId}&limit=100`;
+    const url = `https://data-api.polymarket.com/positions?user=${userId}&limit=100&sizeThreshold=1&sortBy=CURRENT&sortDirection=DESC`;
     const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
     if (res.ok) positions = await res.json();
     else console.log(`Failed to fetch positions for wallet ${wallet.id}, status: ${res.status}`);
@@ -262,13 +262,14 @@ async function trackWallet(wallet) {
     const eventSlug = pos.eventSlug || pos.slug;
     const cashPnl = pos.cashPnl ?? null;
 
-    let outcome = "Pending";
-    let resolved_outcome = null;
+let outcome = "Pending";
+let resolved_outcome = null;
 
-    if (cashPnl !== null) {
-      outcome = cashPnl < 0 ? "LOSS" : "WIN";
-      resolved_outcome = cashPnl < 0 ? pos.oppositeOutcome || pickedOutcome : pickedOutcome;
-    }
+if (cashPnl !== null) {
+  outcome = cashPnl < 0 ? "LOSS" : "WIN";
+  resolved_outcome = cashPnl < 0 ? pos.oppositeOutcome || pickedOutcome : pickedOutcome;
+}
+
 
     const existingSig = existingSignals.find(s => s.market_id === pos.conditionId);
 

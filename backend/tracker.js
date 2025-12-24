@@ -233,14 +233,16 @@ async function trackWallet(wallet) {
       .maybeSingle();
     if (existing) continue;
 
-    // Determine outcome directly from trade object
+    // Determine outcome from trade object
     let outcome = "Pending";
     let pnl = trade.pnl ?? null;
     let outcome_at = null;
 
     if (trade.outcome) {
-      outcome = trade.side.toUpperCase() === trade.outcome.toUpperCase() ? "WIN" : "LOSS";
+      // If trade resolved, mark as WIN
+      outcome = "WIN";
       outcome_at = new Date(trade.timestamp * 1000);
+      pnl = trade.pnl ?? null;
     }
 
     await supabase.from("signals").insert({
@@ -248,7 +250,7 @@ async function trackWallet(wallet) {
       signal: trade.title,
       market_name: trade.title,
       market_id: trade.eventSlug, // use eventSlug as unique market identifier
-      side: trade.side.toUpperCase(),
+      side: trade.outcome ?? trade.side?.toUpperCase() ?? "BUY",
       tx_hash: trade.transactionHash,
       outcome,
       pnl,
@@ -282,7 +284,6 @@ async function updatePendingOutcomes() {
   let resolvedAny = false;
 
   for (const sig of pending) {
-    // If trade object has outcome, treat as resolved
     if (!sig.tx_hash) continue;
 
     // Fetch the latest trade info to get outcome/pnl
@@ -295,7 +296,7 @@ async function updatePendingOutcomes() {
     }
     if (!trade || !trade.outcome) continue;
 
-    const result = sig.side.toUpperCase() === trade.outcome.toUpperCase() ? "WIN" : "LOSS";
+    const result = "WIN"; // Any resolved trade from Polymarket is a WIN for that user
     const pnl = trade.pnl ?? null;
     const outcome_at = new Date(trade.timestamp * 1000);
 
@@ -308,14 +309,15 @@ async function updatePendingOutcomes() {
     // Update wallet losing streak
     const { data: wallet } = await supabase.from("wallets").select("*").eq("id", sig.wallet_id).single();
     if (wallet) {
-      if (result === "LOSS") {
+      if (pnl !== null && pnl < 0) {
         const streak = (wallet.losing_streak || 0) + 1;
         await supabase.from("wallets").update({ losing_streak: streak }).eq("id", wallet.id);
         if (streak >= LOSING_STREAK_THRESHOLD) {
           await supabase.from("wallets").update({ paused: true }).eq("id", wallet.id);
           await sendTelegram(`Wallet paused due to losing streak:\nWallet ID: ${wallet.id}\nLosses: ${streak}`);
         }
-      } else if (result === "WIN") {
+      } else {
+        // Reset losing streak on WIN
         await supabase.from("wallets").update({ losing_streak: 0 }).eq("id", wallet.id);
       }
     }
@@ -326,6 +328,7 @@ async function updatePendingOutcomes() {
 
   if (resolvedAny) await sendMajoritySignals();
 }
+
 
 
 /* ===========================

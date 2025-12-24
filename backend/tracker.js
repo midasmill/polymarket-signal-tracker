@@ -711,12 +711,12 @@ async function updatePreSignals() {
    Fetch new leaderboard wallets from Polymarket
 =========================== */
 async function fetchAndInsertLeaderboardWallets() {
-  const timePeriods = "ALL";
+  const timePeriod = "ALL";
   const pageSize = 50; // API max per request
   let offset = 0;
   let allEntries = [];
 
-  for (const period of timePeriods) {
+  for (const period of timePeriod) {
     let fetched = 0;
     let passed = 0;
     let inserted = 0;

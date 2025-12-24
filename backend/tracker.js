@@ -73,56 +73,43 @@ async function sendTelegram(text, useBlockquote = false) {
    Migration Helper — Fix picked_outcome
 =========================== */
 
-async function fixOldSignals() {
-  // Fetch all signals where picked_outcome is null or empty
+async function fixAllOldSignals() {
   const { data: oldSignals } = await supabase
     .from("signals")
     .select("*")
-    .or("picked_outcome.is.null,picked_outcome.eq.''");
-
-  if (!oldSignals?.length) {
-    console.log("No old signals to fix.");
-    return;
-  }
-
-  console.log(`Fixing ${oldSignals.length} old signals...`);
+    .or("picked_outcome.is.null,picked_outcome.eq.market_name");
 
   for (const sig of oldSignals) {
     if (!sig.tx_hash || !sig.wallet_id) continue;
 
-    // Fetch trade from Polymarket
     let trade = null;
     try {
       const trades = await fetch(
         `https://data-api.polymarket.com/trades?user=${sig.wallet_id}&limit=100`
-      ).then(res => res.json());
+      ).then(r => res.json());
       trade = trades.find(t => t.transactionHash === sig.tx_hash);
     } catch {
       continue;
     }
-
     if (!trade) continue;
 
-    // Update signal with correct picked_outcome and reset outcome
+    const picked = derivePickedOutcome(trade);
+
     await supabase
       .from("signals")
       .update({
-        picked_outcome: derivePickedOutcome(trade),
-        outcome: "Pending", // reset old WIN/LOSS
+        picked_outcome: picked,
+        outcome: "Pending",       // reset old WIN/LOSS
+        resolved_outcome: null,
       })
       .eq("id", sig.id);
 
-    console.log(
-      `[MIGRATION] Signal ${sig.id} fixed - Picked outcome:`,
-      derivePickedOutcome(trade)
-    );
+    console.log(`[MIGRATION] Signal ${sig.id} updated. Picked outcome: ${picked}`);
   }
 
-  console.log("Old signals migration complete!");
+  console.log("All old signals fixed!");
 }
 
-// Call it in your tracker loop or once on deploy
-// await fixOldSignals();
 
 
 
@@ -808,7 +795,7 @@ cron.schedule("0 7 * * *", () => {
 async function main() {
   console.log("🚀 POLYMARKET TRACKER LIVE 🚀");
 
-await fixOldSignals();
+await fixAllOldSignals();
    
   // Insert new leaderboard wallets immediately on deploy
   await fetchAndInsertLeaderboardWallets();

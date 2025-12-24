@@ -718,81 +718,86 @@ async function updatePreSignals() {
    Fetch new leaderboard wallets from Polymarket
 =========================== */
 async function fetchAndInsertLeaderboardWallets() {
-  const timePeriod = ["DAY", "WEEK", "MONTH", "ALL"];
+  const timePeriods = ["DAY", "WEEK", "MONTH", "ALL"];
   const pageSize = 100; // fetch up to 100 at once
-  let offset = 0;
   let totalInserted = 0;
 
-  while (true) {
-    try {
-      const url = `https://data-api.polymarket.com/v1/leaderboard?category=OVERALL&timePeriod=${timePeriod}&orderBy=PNL&limit=${pageSize}&offset=${offset}`;
-      const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      if (!Array.isArray(data) || data.length === 0) break;
+  for (const period of timePeriods) {
+    let offset = 0;
 
-      console.log(`[LEADERBOARD][${timePeriod}] Fetched=${data.length}, Offset=${offset}`);
+    while (true) {
+      try {
+        const url = `https://data-api.polymarket.com/v1/leaderboard?category=OVERALL&timePeriod=${period}&orderBy=PNL&limit=${pageSize}&offset=${offset}`;
+        const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (!Array.isArray(data) || data.length === 0) break;
 
-      let passed = 0, inserted = 0, duplicates = 0;
+        console.log(`[LEADERBOARD][${period}] Fetched=${data.length}, Offset=${offset}`);
 
-      for (const entry of data) {
-        if (!entry.proxyWallet) continue;
+        let passed = 0, inserted = 0, duplicates = 0;
 
-        if (entry.pnl >= 1000 && entry.vol < 6 * entry.pnl) {
-          passed++;
+        for (const entry of data) {
+          if (!entry.proxyWallet) continue;
+
+          // PnL and volume filter
+          if (entry.pnl >= 1000 && entry.vol < 6 * entry.pnl) {
+            passed++;
 
             const tempWallet = {
-    polymarket_proxy_wallet: entry.proxyWallet,
-    polymarket_username: entry.userName
-  };
-
-  const vw = await calculateVolumeWeightedWinRate(tempWallet);
-
-  if (vw === null || vw < 0.8) {
-    console.log(`Skipping wallet ${entry.proxyWallet} due to VW < 80% (${vw?.toFixed(2) || 0})`);
-    continue;
-  }
-
-            // Insert wallet into DB
-          const { data: existing } = await supabase
-            .from("wallets")
-            .select("id")
-            .or(`polymarket_proxy_wallet.eq.${entry.proxyWallet},polymarket_username.eq.${entry.userName}`)
-            .maybeSingle();
-
-          if (existing) {
-            duplicates++;
-            continue;
-          }
-
-          try {
-            await supabase.from("wallets").insert({
               polymarket_proxy_wallet: entry.proxyWallet,
-              polymarket_username: entry.userName,
-              last_checked: new Date(),
-              paused: false,
-            });
-            inserted++;
-            totalInserted++;
-          } catch (err) {
-            console.error("Insert wallet failed:", err.message);
+              polymarket_username: entry.userName
+            };
+
+            // Compute VW
+            const vw = await calculateVolumeWeightedWinRate(tempWallet);
+            if (vw === null || vw < 0.8) {
+              console.log(`Skipping wallet ${entry.proxyWallet} due to VW < 80% (${vw?.toFixed(2) || 0})`);
+              continue;
+            }
+
+            // Insert wallet into DB if not exists
+            const { data: existing } = await supabase
+              .from("wallets")
+              .select("id")
+              .or(`polymarket_proxy_wallet.eq.${entry.proxyWallet},polymarket_username.eq.${entry.userName}`)
+              .maybeSingle();
+
+            if (existing) {
+              duplicates++;
+              continue;
+            }
+
+            try {
+              await supabase.from("wallets").insert({
+                polymarket_proxy_wallet: entry.proxyWallet,
+                polymarket_username: entry.userName,
+                last_checked: new Date(),
+                paused: false,
+              });
+              inserted++;
+              totalInserted++;
+            } catch (err) {
+              console.error("Insert wallet failed:", err.message);
+            }
           }
         }
+
+        console.log(`[LEADERBOARD][${period}] Passed=${passed} Inserted=${inserted} Duplicates=${duplicates}`);
+
+        if (data.length < pageSize) break; // last page reached
+        offset += pageSize;
+
+      } catch (err) {
+        console.error(`Failed to fetch leaderboard (${period}):`, err.message);
+        break;
       }
-
-      console.log(`[LEADERBOARD][${timePeriod}] Passed=${passed} Inserted=${inserted} Duplicates=${duplicates}`);
-
-      if (data.length < pageSize) break; // last page reached
-      offset += pageSize;
-
-    } catch (err) {
-      console.error(`Failed to fetch leaderboard (${timePeriod}):`, err.message);
-      break;
     }
   }
 
   console.log(`Leaderboard fetch complete. Total new wallets inserted: ${totalInserted}`);
 }
+
 
 
 

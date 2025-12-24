@@ -714,15 +714,16 @@ async function updatePreSignals() {
 }
 
 
+
 /* ===========================
-   Fetch new leaderboard wallets from Polymarket
+   Fetch new leaderboard wallets from Polymarket (Bootstrap + VW)
 =========================== */
 async function fetchAndInsertLeaderboardWallets() {
-  const timePeriods = ["DAY", "WEEK", "MONTH", "ALL"];
+  const timePeriod = ["DAY", "WEEK", "MONTH", "ALL"];
   const pageSize = 100; // fetch up to 100 at once
   let totalInserted = 0;
 
-  for (const period of timePeriods) {
+  for (const period of timePeriod) {
     let offset = 0;
 
     while (true) {
@@ -740,23 +741,11 @@ async function fetchAndInsertLeaderboardWallets() {
         for (const entry of data) {
           if (!entry.proxyWallet) continue;
 
-          // PnL and volume filter
-          if (entry.pnl >= 1000 && entry.vol < 6 * entry.pnl) {
+          // PnL / volume filter
+          if (entry.pnl >= 10000 && entry.vol < 6 * entry.pnl) {
             passed++;
 
-            const tempWallet = {
-              polymarket_proxy_wallet: entry.proxyWallet,
-              polymarket_username: entry.userName
-            };
-
-            // Compute VW
-            const vw = await calculateVolumeWeightedWinRate(tempWallet);
-            if (vw === null || vw < 0.8) {
-              console.log(`Skipping wallet ${entry.proxyWallet} due to VW < 80% (${vw?.toFixed(2) || 0})`);
-              continue;
-            }
-
-            // Insert wallet into DB if not exists
+            // Insert wallet if not exists
             const { data: existing } = await supabase
               .from("wallets")
               .select("id")
@@ -769,14 +758,27 @@ async function fetchAndInsertLeaderboardWallets() {
             }
 
             try {
-              await supabase.from("wallets").insert({
+              const { data: insertedWallet } = await supabase.from("wallets").insert({
                 polymarket_proxy_wallet: entry.proxyWallet,
                 polymarket_username: entry.userName,
                 last_checked: new Date(),
                 paused: false,
-              });
+              }).select().single();
+
               inserted++;
               totalInserted++;
+
+              // Calculate VW for this wallet after inserting
+              const vw = await calculateVolumeWeightedWinRate(insertedWallet);
+              if (vw === null) {
+                console.log(`VW not available yet for wallet ${entry.proxyWallet}`);
+              } else if (vw < 0.8) {
+                console.log(`Pausing wallet ${entry.proxyWallet} due to VW < 80% (${(vw*100).toFixed(1)}%)`);
+                await supabase.from("wallets").update({ paused: true }).eq("id", insertedWallet.id);
+              } else {
+                console.log(`Wallet ${entry.proxyWallet} has VW ${(vw*100).toFixed(1)}%`);
+              }
+
             } catch (err) {
               console.error("Insert wallet failed:", err.message);
             }

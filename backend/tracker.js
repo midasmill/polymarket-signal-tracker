@@ -103,32 +103,30 @@ async function fetchLatestTrades(user) {
   }
 }
 
-async function fetchMarket(marketId) {
-  if (!marketId) return null;
+async function fetchMarket(eventSlug) {
+  if (!eventSlug) return null;
 
-  if (marketCache.has(marketId)) return marketCache.get(marketId);
+  if (marketCache.has(eventSlug)) return marketCache.get(eventSlug);
 
-  const url = `https://data-api.polymarket.com/markets/${marketId}`;
+  const url = `https://data-api.polymarket.com/events/${eventSlug}`;
 
   try {
     const market = await fetchWithRetry(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0",
-        Accept: "application/json",
-      },
+      headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
     });
 
-    if (market) marketCache.set(marketId, market);
+    if (market) marketCache.set(eventSlug, market);
     return market;
   } catch (err) {
     if (err.message.includes("404")) {
-      console.log(`Market ${marketId} not found (404)`);
+      console.log(`Market ${eventSlug} not found (404)`);
     } else {
-      console.error(`Market fetch error (${marketId}):`, err.message);
+      console.error(`Market fetch error (${eventSlug}):`, err.message);
     }
     return null;
   }
 }
+
 
 
 
@@ -237,17 +235,19 @@ async function trackWallet(wallet) {
     if (existing) continue;
 
     // Fetch market to check if resolved
-    const market = await fetchMarket(trade.conditionId);
-    let outcome = "Pending";
-    let pnl = null;
-    let outcome_at = null;
+const market = await fetchMarket(trade.eventSlug);
+let outcome = "Pending";
+let pnl = null;
+let outcome_at = null;
 
-    if (market?.resolved) {
-      const winningSide = String(market.winningOutcome || "").toUpperCase();
-      outcome = String(trade.outcome).toUpperCase() === winningSide ? "WIN" : market.cancelled ? "PUSH" : "LOSS";
-      pnl = trade.pnl ?? null; // Use trade.pnl if available
-      outcome_at = new Date(trade.timestamp * 1000); // Use trade timestamp for resolved
-    }
+if (market?.resolved) {
+  // Find the outcome matching trade.conditionId
+  const winningOutcomeId = market.winningOutcomeId;
+  outcome = trade.conditionId === winningOutcomeId ? "WIN" : "LOSS";
+  pnl = trade.pnl ?? null;
+  outcome_at = new Date(trade.timestamp * 1000);
+}
+
 
 await supabase.from("signals").insert({
   wallet_id: wallet.id,

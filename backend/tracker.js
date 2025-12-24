@@ -306,8 +306,9 @@ async function fetchMarketByConditionId(conditionId) {
   return res.json();
 }
 
+
 /* ===========================
-   Update Pending Outcomes (RESOLUTION-BASED, SELL-SAFE)
+   Update Pending Outcomes (RESOLUTION-ONLY, CAN'T LIE)
 =========================== */
 async function updatePendingOutcomes() {
   const { data: pending } = await supabase
@@ -318,7 +319,8 @@ async function updatePendingOutcomes() {
   if (!pending?.length) return;
 
   for (const sig of pending) {
-    // If we don’t know what the wallet picked, SKIP
+    // Hard guardrails
+    if (!sig.market_id) continue;
     if (!sig.picked_outcome) continue;
 
     let market;
@@ -328,18 +330,15 @@ async function updatePendingOutcomes() {
       continue;
     }
 
-    // Market not resolved yet
     if (!market?.resolved || !market.winningOutcome) continue;
 
     const resolved_outcome = market.winningOutcome;
 
-    let finalOutcome = "LOSS";
-    if (
+    const finalOutcome =
       sig.picked_outcome.toLowerCase() ===
       resolved_outcome.toLowerCase()
-    ) {
-      finalOutcome = "WIN";
-    }
+        ? "WIN"
+        : "LOSS";
 
     await supabase
       .from("signals")
@@ -350,37 +349,38 @@ async function updatePendingOutcomes() {
       })
       .eq("id", sig.id);
 
-    // Losing streak logic
+    // Wallet streak logic
     const { data: wallet } = await supabase
       .from("wallets")
       .select("*")
       .eq("id", sig.wallet_id)
       .single();
 
-    if (wallet) {
-      if (finalOutcome === "LOSS") {
-        const streak = (wallet.losing_streak || 0) + 1;
+    if (!wallet) continue;
+
+    if (finalOutcome === "LOSS") {
+      const streak = (wallet.losing_streak || 0) + 1;
+
+      await supabase
+        .from("wallets")
+        .update({ losing_streak: streak })
+        .eq("id", wallet.id);
+
+      if (streak >= LOSING_STREAK_THRESHOLD) {
         await supabase
           .from("wallets")
-          .update({ losing_streak: streak })
+          .update({ paused: true })
           .eq("id", wallet.id);
 
-        if (streak >= LOSING_STREAK_THRESHOLD) {
-          await supabase
-            .from("wallets")
-            .update({ paused: true })
-            .eq("id", wallet.id);
-
-          await sendTelegram(
-            `⛔ Wallet paused\nWallet ID: ${wallet.id}\nLosing streak: ${streak}`
-          );
-        }
-      } else {
-        await supabase
-          .from("wallets")
-          .update({ losing_streak: 0 })
-          .eq("id", wallet.id);
+        await sendTelegram(
+          `⛔ Wallet paused\nWallet ID: ${wallet.id}\nLosing streak: ${streak}`
+        );
       }
+    } else {
+      await supabase
+        .from("wallets")
+        .update({ losing_streak: 0 })
+        .eq("id", wallet.id);
     }
 
     await sendResultNotes(
@@ -393,6 +393,7 @@ async function updatePendingOutcomes() {
 
   await sendMajoritySignals();
 }
+
 
 
 

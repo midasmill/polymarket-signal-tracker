@@ -282,22 +282,32 @@ async function updateNotes(slug, text) {
    Unpause Wallet
 =========================== */
 async function unpauseAndFetchWallet(wallet) {
-  if (!wallet.paused) return;
-
-  const { data: updated } = await supabase
+  const { data: updated, error } = await supabase
     .from("wallets")
-    .select("win_rate, paused")
+    .select("*")
     .eq("id", wallet.id)
     .maybeSingle();
 
-  if (!updated) return;
+  if (error || !updated) return;
 
-  if (updated.win_rate >= 80) {
-    await supabase.from("wallets").update({ paused: false }).eq("id", wallet.id);
+  if (updated.win_rate >= 80 && updated.paused) {
+    const { error: updateErr } = await supabase
+      .from("wallets")
+      .update({ paused: false })
+      .eq("id", wallet.id);
+
+    if (updateErr) {
+      console.error(`Failed to unpause wallet ${wallet.id}:`, updateErr.message);
+      return;
+    }
+
     console.log(`Wallet ${wallet.id} unpaused (win_rate=${updated.win_rate.toFixed(2)}%)`);
-    await trackWallet({ ...wallet, paused: false });
+
+    // Fetch unresolved picks ignoring paused status
+    await trackWallet({ ...updated, paused: false, forceFetch: true });
   }
 }
+
 
 /* ===========================
    Fetch wallet positions safely

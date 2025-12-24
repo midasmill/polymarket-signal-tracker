@@ -440,43 +440,6 @@ async function trackWallet(wallet) {
   else console.log(`Wallet ${wallet.id} — winRate: ${winRate.toFixed(2)}%, losingStreak: ${losingStreak}, livePicks: ${livePicks}, paused: ${paused}`);
 }
 
-
-
-
-// ---------------------- Main loop ----------------------
-async function main() {
-  console.log("🚀 POLYMARKET TRACKER LIVE 🚀");
-
-  // Fetch leaderboard wallets once at startup
-  await fetchAndInsertLeaderboardWallets();
-
-  // Polling loop
-  setInterval(async () => {
-    try {
-      // Fetch wallets from DB
-      const { data: wallets } = await supabase.from("wallets").select("*");
-      if (!wallets?.length) return;
-
-      console.log(`Wallets loaded: ${wallets.length}`);
-
-      // Process each wallet
-      for (const wallet of wallets) {
-        try {
-          await trackWallet(wallet);
-        } catch (err) {
-          console.error(`Error tracking wallet ${wallet.id}:`, err.message);
-        }
-      }
-
-
-} catch (err) {
-  console.error("Loop error:", err);
-  // await sendTelegram(`Tracker loop error: ${err.message}`); // disabled
-}
-
-  }, POLL_INTERVAL);
-}
-
 /* ===========================
    Update Wallet Metrics
 ========================== */
@@ -554,9 +517,6 @@ async function updateWalletMetricsJS() {
     console.error("Error updating wallet metrics:", err.message);
   }
 }
-
-
-
 
 /* ===========================
    Send Result Notes
@@ -699,15 +659,15 @@ setInterval(() => {
 }, 60_000); // every 60 seconds
 
 /* ===========================
-   Tracker loop
-========================== */
+   Tracker Loop
+=========================== */
 async function trackerLoop() {
   try {
     // 1️⃣ Fetch all wallets
     const { data: wallets } = await supabase.from("wallets").select("*");
     if (!wallets?.length) return console.log("No wallets found");
 
-    console.log(`Tracking ${wallets.length} wallets...`);
+    console.log(`[${new Date().toISOString()}] Tracking ${wallets.length} wallets...`);
 
     // 2️⃣ Track each wallet (fetch positions & update signals)
     for (const wallet of wallets) {
@@ -732,19 +692,36 @@ async function trackerLoop() {
       console.error("Error sending majority signals:", err.message);
     }
 
-    console.log("✅ Tracker loop completed successfully");
+    console.log(`✅ Tracker loop completed successfully`);
   } catch (err) {
     console.error("Loop error:", err.message);
-    // Telegram notifications disabled to avoid spamming
+    // Telegram notifications are disabled to avoid spamming
     // await sendTelegram(`Tracker loop error: ${err.message}`);
   }
 }
 
-// Run immediately on startup
-trackerLoop();
+/* ===========================
+   Main Function
+=========================== */
+async function main() {
+  console.log("🚀 POLYMARKET TRACKER LIVE 🚀");
 
-// Repeat every POLL_INTERVAL milliseconds
-setInterval(trackerLoop, POLL_INTERVAL);
+  // Fetch leaderboard wallets once at startup
+  try {
+    await fetchAndInsertLeaderboardWallets();
+  } catch (err) {
+    console.error("Failed to fetch leaderboard wallets:", err.message);
+  }
+
+  // Run tracker loop immediately
+  await trackerLoop();
+
+  // Repeat tracker loop every POLL_INTERVAL milliseconds
+  setInterval(trackerLoop, POLL_INTERVAL);
+}
+
+// Run main on startup
+main();
 
    
 /* ===========================

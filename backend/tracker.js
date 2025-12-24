@@ -272,20 +272,24 @@ Result: ${sig.outcome ? emoji : "⚪"}`;
    Picked outcome helper
 =========================== */
 function derivePickedOutcome(trade) {
-  // Most Polymarket trades already contain the label (sports, yes/no, up/down)
-  if (trade.outcome && typeof trade.outcome === "string") {
-    return trade.outcome;
-  }
+  // If Polymarket provides a textual outcome, use it
+  if (trade.outcome && typeof trade.outcome === "string") return trade.outcome;
 
-  // Fallback: outcomeIndex exists but label missing
-  // DO NOT guess labels — just mark index
-  if (typeof trade.outcomeIndex === "number") {
-    return `OPTION_${trade.outcomeIndex}`;
-  }
+  // Yes/No markets
+  if (trade.outcomeIndex === 0) return "Yes";
+  if (trade.outcomeIndex === 1) return "No";
+
+  // Up/Down markets
+  if (trade.outcomeIndex === 0) return "Up";
+  if (trade.outcomeIndex === 1) return "Down";
+
+  // Multi-option fallback
+  if (typeof trade.outcomeIndex === "number") return `OPTION_${trade.outcomeIndex}`;
 
   // Unknown
   return null;
 }
+
 
 
 /* ===========================

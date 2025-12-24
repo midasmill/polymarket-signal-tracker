@@ -849,6 +849,9 @@ async function main() {
 
       console.log("Wallets loaded:", wallets.length);
 
+           // trackWallet now automatically skips paused or low-VW wallets
+    await Promise.all(wallets.map(trackWallet));
+       
       await Promise.all(wallets.map(trackWallet));
       await updatePendingOutcomes();
       await updatePreSignals();

@@ -275,23 +275,6 @@ async function dailyVolumeWeightedCheck() {
 
 
 
-/* ===========================
-   Fetch all buy/cash trades for VW
-=========================== */
-async function fetchAllBuyCashTrades(wallet) {
-  let trades = [];
-  if (wallet.polymarket_proxy_wallet) {
-    trades = await fetchLatestTrades(wallet.polymarket_proxy_wallet);
-  }
-  if (trades.length === 0 && wallet.polymarket_username) {
-    trades = await fetchLatestTrades(wallet.polymarket_username);
-  }
-
-  // Filter for BUY & CASH trades if needed
-  return trades.filter(t => t.side === "BUY" /* && t.filterType==="CASH" if available */);
-}
-
-
 
 /* ===========================
    Daily Leaderboard + Pre-Signals

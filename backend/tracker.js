@@ -102,7 +102,36 @@ async function recalcAllWalletStats() {
   }
 }
 
+/* ===========================
+   Loop function
+=========================== */
+async function trackerLoop() {
+  try {
+    console.log("🔄 Tracker loop start");
 
+    // fetch active wallets
+    const { data: wallets } = await supabase
+      .from("wallets")
+      .select("*")
+      .eq("paused", false);
+
+    if (!wallets?.length) {
+      console.log("No active wallets");
+      return;
+    }
+
+    for (const wallet of wallets) {
+      await trackWallet(wallet);
+    }
+
+    // update metrics AFTER processing trades
+    await updateWalletWinRatesAndPauseJS();
+
+    console.log("✅ Tracker loop complete");
+  } catch (err) {
+    console.error("Tracker loop error:", err.message);
+  }
+}
 
 /* ===========================
    Markdown helper
@@ -656,4 +685,12 @@ http.createServer((req, res) => {
   res.end("Polymarket tracker running\n");
 }).listen(PORT, () => console.log(`Tracker listening on port ${PORT}`));
 
+/* ===========================
+   Tracker loop
+=========================== */
 
+// Run immediately on startup
+trackerLoop();
+
+// Then repeat every 60 seconds
+setInterval(trackerLoop, 60_000);

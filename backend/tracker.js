@@ -433,7 +433,7 @@ async function main() {
 
       // ✅ Update win rates and losing streaks after all wallets processed
 await trackWallet(wallet);        // fetch live/resolved picks
-await updateWalletMetricsJS();    // recalc win rate & losing streak
+await updateWalletWinRatesAndPauseJS();    // recalc win rate & losing streak
 
 
 } catch (err) {

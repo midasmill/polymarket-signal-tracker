@@ -449,23 +449,30 @@ cron.schedule("0 7 * * *", () => {
 =========================== */
 async function main() {
   console.log("🚀 POLYMARKET TRACKER LIVE 🚀");
+
+  // Fetch leaderboard wallets once at startup
   await fetchAndInsertLeaderboardWallets();
 
+  // Main polling loop
   setInterval(async () => {
     try {
       const { data: wallets } = await supabase.from("wallets").select("*");
       if (!wallets?.length) return;
-      console.log("Wallets loaded:", wallets.length);
 
+      console.log(`Wallets loaded: ${wallets.length}`);
+
+      // Process each wallet (insert new signals + resolve pending automatically)
       await Promise.all(wallets.map(trackWallet));
-    } catch (e) {
-      console.error("Loop error:", e);
-      await sendTelegram(`Tracker loop error: ${e.message}`);
+    } catch (err) {
+      console.error("Loop error:", err);
+      await sendTelegram(`Tracker loop error: ${err.message}`);
     }
   }, POLL_INTERVAL);
 }
 
+// Start the tracker
 main();
+
 
 /* ===========================
    Keep Render happy

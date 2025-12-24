@@ -336,22 +336,15 @@ async function trackWallet(wallet) {
   const userId = wallet.polymarket_proxy_wallet || wallet.polymarket_username;
   if (!userId) return;
 
-  let positions = [];
-  try {
-    const url = `https://data-api.polymarket.com/positions?user=${userId}&limit=100&sizeThreshold=1&sortBy=CURRENT&sortDirection=DESC`;
-    const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
-    if (res.ok) positions = await res.json();
-    else console.log(`Failed to fetch positions for wallet ${wallet.id}, status: ${res.status}`);
-  } catch (err) {
-    console.error(`Failed to fetch positions for wallet ${wallet.id}:`, err.message);
-  }
+  // Fetch wallet positions safely
+  const positions = await fetchWalletPositions(userId);
 
   if (!positions.length) {
     await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
     return;
   }
 
-  // Fetch existing signals
+  // Fetch existing signals for wallet
   const { data: existingSignals } = await supabase
     .from("signals")
     .select("id, tx_hash, market_id, outcome")
@@ -359,16 +352,39 @@ async function trackWallet(wallet) {
 
   const existingTxs = new Set(existingSignals?.map(s => s.tx_hash));
 
+  // Map to track wins/losses per market for streak calculation
+  const marketMap = {};
+
   for (const pos of positions) {
     const marketId = pos.conditionId;
     const pickedOutcome = pos.outcome || `OPTION_${pos.outcomeIndex}`;
     const pnl = pos.cashPnl ?? null;
 
-    let outcome = pnl === null ? "Pending" : pnl > 0 ? "WIN" : "LOSS";
-    let resolvedOutcome = pnl === null ? null : pnl > 0 ? pickedOutcome : pos.oppositeOutcome || pickedOutcome;
+    let outcome = "Pending";
+    let resolvedOutcome = null;
 
-    // Insert new signal if not exists
-    if (!existingTxs.has(pos.asset)) {
+    if (pnl !== null) {
+      if (pnl > 0) {
+        outcome = "WIN";
+        resolvedOutcome = pickedOutcome;
+      } else {
+        outcome = "LOSS";
+        resolvedOutcome = pos.oppositeOutcome || pickedOutcome;
+      }
+    }
+
+    if (!marketMap[marketId]) marketMap[marketId] = { wins: 0, losses: 0 };
+    if (outcome === "WIN") marketMap[marketId].wins++;
+    else if (outcome === "LOSS") marketMap[marketId].losses++;
+
+    // Insert or update signals
+    const existingSig = existingSignals.find(s => s.market_id === marketId);
+    if (existingSig) {
+      await supabase
+        .from("signals")
+        .update({ pnl, outcome, resolved_outcome: resolvedOutcome, outcome_at: pnl !== null ? new Date() : null })
+        .eq("id", existingSig.id);
+    } else if (!existingTxs.has(pos.asset)) {
       await supabase.from("signals").insert({
         wallet_id: wallet.id,
         signal: pos.title,
@@ -387,23 +403,34 @@ async function trackWallet(wallet) {
         wallet_set: [String(wallet.id)],
         tx_hashes: [pos.asset],
       });
-    } else {
-      // Update existing signal if resolved
-      const existingSig = existingSignals.find(s => s.market_id === marketId);
-      if (existingSig && pnl !== null) {
-        await supabase.from("signals").update({
-          pnl,
-          outcome,
-          resolved_outcome: resolvedOutcome,
-          outcome_at: new Date(),
-        }).eq("id", existingSig.id);
-      }
     }
   }
 
-  // Always update last_checked
-  await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
+  // Calculate losing streak: consecutive markets lost
+  const lostMarkets = Object.values(marketMap).filter(m => m.losses > m.wins).length;
+  const { data: walletData } = await supabase
+    .from("wallets")
+    .select("losing_streak, win_rate")
+    .eq("id", wallet.id)
+    .maybeSingle();
+
+  const prevStreak = walletData?.losing_streak || 0;
+  const newStreak = lostMarkets > 0 ? prevStreak + lostMarkets : 0;
+
+  // Calculate win rate
+  const totalResolved = Object.values(marketMap).reduce((sum, m) => sum + m.wins + m.losses, 0);
+  const totalWins = Object.values(marketMap).reduce((sum, m) => sum + m.wins, 0);
+  const winRate = totalResolved > 0 ? (totalWins / totalResolved) * 100 : 0;
+
+  // Update wallet
+  await supabase.from("wallets").update({
+    losing_streak: newStreak,
+    win_rate: winRate,
+    paused: newStreak >= LOSING_STREAK_THRESHOLD || winRate < 80,
+    last_checked: new Date(),
+  }).eq("id", wallet.id);
 }
+
 
 
 // ---------------------- Main loop ----------------------

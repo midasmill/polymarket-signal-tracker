@@ -310,13 +310,21 @@ async function trackWallet(wallet) {
    
 const pickedOutcome = derivePickedOutcome(trade);
 
+     console.log(
+  "[INSERT PICK]",
+  trade.transactionHash,
+  trade.outcome,
+  trade.outcomeIndex,
+  derivePickedOutcome(trade)
+);
+
 await supabase.from("signals").insert({
   wallet_id: wallet.id,
   signal: trade.title,
   market_name: trade.title,
   market_id: trade.conditionId,
   side: trade.side.toUpperCase(),
-  picked_outcome: pickedOutcome,   // ✅ SAFE
+  picked_outcome: derivePickedOutcome(trade),   // ✅ SAFE
   tx_hash: trade.transactionHash,
   outcome: "Pending",
   created_at: new Date(trade.timestamp * 1000),

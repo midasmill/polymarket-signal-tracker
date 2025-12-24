@@ -200,6 +200,33 @@ async function updateNotes(slug, text) {
 }
 
 /* ===========================
+   Unpause
+=========================== */
+async function unpauseAndFetchWallet(wallet) {
+  // Only proceed if wallet is paused
+  if (!wallet.paused) return;
+
+  // Fetch wallet's win rate
+  const { data: updated } = await supabase
+    .from("wallets")
+    .select("win_rate, paused")
+    .eq("id", wallet.id)
+    .maybeSingle();
+
+  if (!updated) return;
+
+  // Unpause if win_rate >= 80%
+  if (updated.win_rate >= 80) {
+    await supabase.from("wallets").update({ paused: false }).eq("id", wallet.id);
+    console.log(`Wallet ${wallet.id} unpaused (win_rate=${updated.win_rate.toFixed(2)}%)`);
+
+    // Immediately fetch unresolved picks
+    await trackWallet({ ...wallet, paused: false });
+  }
+}
+
+
+/* ===========================
    Track Wallet Trades
 =========================== */
 async function trackWallet(wallet) {
@@ -229,65 +256,71 @@ async function trackWallet(wallet) {
     .eq("wallet_id", wallet.id);
 
   const existingTxs = new Set(existingSignals?.map(s => s.tx_hash));
-  const existingMarkets = new Set(existingSignals?.map(s => s.market_id));
 
-for (const pos of positions) {
-  const pickedOutcome = pos.outcome || derivePickedOutcome(pos);
-  const eventSlug = pos.eventSlug || pos.slug;
-  const cashPnl = pos.cashPnl ?? null;
+  for (const pos of positions) {
+    const pickedOutcome = pos.outcome || derivePickedOutcome(pos);
+    const eventSlug = pos.eventSlug || pos.slug;
+    const cashPnl = pos.cashPnl ?? null;
 
-  let outcome = "Pending";
-  let resolved_outcome = null;
+    let outcome = "Pending";
+    let resolved_outcome = null;
 
-  if (cashPnl !== null) {
-    outcome = cashPnl < 0 ? "LOSS" : "WIN";
-    resolved_outcome = cashPnl < 0 ? pos.oppositeOutcome || pickedOutcome : pickedOutcome;
-  }
+    if (cashPnl !== null) {
+      outcome = cashPnl < 0 ? "LOSS" : "WIN";
+      resolved_outcome = cashPnl < 0 ? pos.oppositeOutcome || pickedOutcome : pickedOutcome;
+    }
 
-  // Update existing signal or insert new
-  const existingSig = existingSignals.find(s => s.market_id === pos.conditionId);
+    const existingSig = existingSignals.find(s => s.market_id === pos.conditionId);
 
-  if (existingSig) {
-    await supabase
-      .from("signals")
-      .update({ pnl: cashPnl, outcome, resolved_outcome, outcome_at: cashPnl !== null ? new Date() : null })
-      .eq("id", existingSig.id);
-  } else if (!existingTxs.has(pos.asset)) {
-    await supabase.from("signals").insert({
-      wallet_id: wallet.id,
-      signal: pos.title,
-      market_name: pos.title,
-      market_id: pos.conditionId,
-      event_slug: eventSlug,
-      side: pos.side?.toUpperCase() || "BUY",
-      picked_outcome: pickedOutcome,
-      tx_hash: pos.asset,
-      pnl: cashPnl,
-      outcome,
-      resolved_outcome,
-      outcome_at: cashPnl !== null ? new Date() : null,
-      created_at: new Date(pos.timestamp * 1000 || Date.now()),
-      wallet_count: 1,
-      wallet_set: [String(wallet.id)],
-      tx_hashes: [pos.asset],
-    });
-  }
+    if (existingSig) {
+      await supabase
+        .from("signals")
+        .update({ pnl: cashPnl, outcome, resolved_outcome, outcome_at: cashPnl !== null ? new Date() : null })
+        .eq("id", existingSig.id);
+    } else if (!existingTxs.has(pos.asset)) {
+      await supabase.from("signals").insert({
+        wallet_id: wallet.id,
+        signal: pos.title,
+        market_name: pos.title,
+        market_id: pos.conditionId,
+        event_slug: eventSlug,
+        side: pos.side?.toUpperCase() || "BUY",
+        picked_outcome: pickedOutcome,
+        tx_hash: pos.asset,
+        pnl: cashPnl,
+        outcome,
+        resolved_outcome,
+        outcome_at: cashPnl !== null ? new Date() : null,
+        created_at: new Date(pos.timestamp * 1000 || Date.now()),
+        wallet_count: 1,
+        wallet_set: [String(wallet.id)],
+        tx_hashes: [pos.asset],
+      });
+    }
 
-  // Update losing streak only if outcome is known and LOSS
-  if (outcome === "LOSS") {
+    // Update losing streak
     const { data: walletData } = await supabase
       .from("wallets")
       .select("losing_streak")
       .eq("id", wallet.id)
       .maybeSingle();
 
-    const newStreak = (walletData?.losing_streak || 0) + 1;
-    await supabase.from("wallets").update({ losing_streak: newStreak }).eq("id", wallet.id);
-  } else if (outcome === "WIN") {
-    // Reset losing streak if WIN
-    await supabase.from("wallets").update({ losing_streak: 0 }).eq("id", wallet.id);
+    let newStreak = walletData?.losing_streak || 0;
+    if (outcome === "LOSS") newStreak++;
+    else if (outcome === "WIN") newStreak = 0;
+
+    const updateData = { losing_streak: newStreak };
+
+    // Pause wallet if losing streak ≥ threshold
+    if (newStreak >= LOSING_STREAK_THRESHOLD) updateData.paused = true;
+
+    await supabase.from("wallets").update(updateData).eq("id", wallet.id);
   }
+
+  // Update last_checked
+  await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
 }
+
 
   // Update last_checked
   await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
@@ -295,12 +328,16 @@ for (const pos of positions) {
 
 async function updateWalletWinRatesAndPause() {
   try {
-    // Calculate win rate per wallet and update, then pause if win_rate < 80%
+    // 1️⃣ Update win rates and paused status
     const query = `
       UPDATE wallets w
       SET 
         win_rate = sub.wr,
-        paused = CASE WHEN sub.wr < 80 THEN true ELSE w.paused END
+        paused = CASE 
+                  WHEN sub.wr >= 80 THEN false   -- unpause if win_rate ≥ 80%
+                  WHEN sub.wr < 80 THEN true     -- pause if win_rate < 80%
+                  ELSE w.paused
+                 END
       FROM (
         SELECT wallet_id,
                CASE 
@@ -312,15 +349,32 @@ async function updateWalletWinRatesAndPause() {
         GROUP BY wallet_id
       ) AS sub
       WHERE w.id = sub.wallet_id
+      RETURNING id, paused, win_rate
     `;
 
-    const { error } = await supabase.rpc('execute_sql', { sql: query }); // use your RPC or SQL editor
-    if (error) console.error("Batch win rate + pause update failed:", error.message);
-    else console.log("Batch win rate + pause update complete.");
+    const { data: updatedWallets, error } = await supabase.rpc('execute_sql', { sql: query });
+    if (error) {
+      console.error("Batch win rate + pause update failed:", error.message);
+      return;
+    }
+    console.log("Batch win rate + pause update complete.");
+
+    // 2️⃣ For any wallet that just got unpaused, fetch unresolved picks
+    if (updatedWallets?.length) {
+      for (const wallet of updatedWallets) {
+        if (!wallet.paused && wallet.win_rate >= 80) {
+          console.log(`Wallet ${wallet.id} just unpaused — fetching unresolved picks...`);
+          await trackWallet(wallet);
+        }
+      }
+    }
+
   } catch (err) {
     console.error("Batch win rate + pause update error:", err.message);
   }
 }
+
+
 
 // ---------------------- Main loop ----------------------
 async function main() {
@@ -428,11 +482,14 @@ async function fetchAndInsertLeaderboardWallets() {
           .or(`polymarket_proxy_wallet.eq.${entry.proxyWallet},polymarket_username.eq.${entry.userName}`).maybeSingle();
         if (existing) continue;
 
+        // Insert wallet paused by default
         await supabase.from("wallets").insert({
           polymarket_proxy_wallet: entry.proxyWallet,
           polymarket_username: entry.userName,
           last_checked: new Date(),
-          paused: false,
+          paused: true,      // start paused
+          losing_streak: 0,
+          win_rate: 0
         });
         totalInserted++;
       }
@@ -443,6 +500,7 @@ async function fetchAndInsertLeaderboardWallets() {
 
   console.log(`Leaderboard fetch complete. Total new wallets inserted: ${totalInserted}`);
 }
+
 
 /* ===========================
    Daily Summary

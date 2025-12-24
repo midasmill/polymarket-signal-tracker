@@ -15,7 +15,7 @@ const TIMEZONE = process.env.TIMEZONE || "America/New_York";
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || "30000", 10);
 const LOSING_STREAK_THRESHOLD = parseInt(process.env.LOSING_STREAK_THRESHOLD || "3", 10);
 const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "2", 10);
-const FORCE_SEND = process.env.FORCE_SEND === "true"; // fixed
+const FORCE_SEND = process.env.FORCE_SEND === "true";
 
 const CONFIDENCE_THRESHOLDS = {
   "⭐": MIN_WALLETS_FOR_SIGNAL,
@@ -39,7 +39,6 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 function toBlockquote(text) {
   return text.split("\n").map(line => `> ${line}`).join("\n");
 }
-
 
 /* ===========================
    Telegram helper
@@ -169,7 +168,6 @@ function getPick(sig) {
   return "Unknown";
 }
 
-
 /* ===========================
    Format Signal
 =========================== */
@@ -200,13 +198,11 @@ async function updateNotes(slug, text) {
 }
 
 /* ===========================
-   Unpause
+   Unpause Wallet
 =========================== */
 async function unpauseAndFetchWallet(wallet) {
-  // Only proceed if wallet is paused
   if (!wallet.paused) return;
 
-  // Fetch wallet's win rate
   const { data: updated } = await supabase
     .from("wallets")
     .select("win_rate, paused")
@@ -215,18 +211,15 @@ async function unpauseAndFetchWallet(wallet) {
 
   if (!updated) return;
 
-  // Unpause if win_rate >= 80%
   if (updated.win_rate >= 80) {
     await supabase.from("wallets").update({ paused: false }).eq("id", wallet.id);
     console.log(`Wallet ${wallet.id} unpaused (win_rate=${updated.win_rate.toFixed(2)}%)`);
-
-    // Immediately fetch unresolved picks
     await trackWallet({ ...wallet, paused: false });
   }
 }
 
 /* ===========================
-   Track Wallet Trades (persistent per-market losing streak)
+   Track Wallet Trades
 =========================== */
 async function trackWallet(wallet) {
   const userId = wallet.polymarket_proxy_wallet || wallet.polymarket_username;
@@ -247,16 +240,13 @@ async function trackWallet(wallet) {
     return;
   }
 
-  // Fetch existing signals
   const { data: existingSignals } = await supabase
     .from("signals")
     .select("id, tx_hash, market_id")
     .eq("wallet_id", wallet.id);
 
   const existingTxs = new Set(existingSignals?.map(s => s.tx_hash));
-
-  // Aggregate outcomes per market
-  const marketMap = {}; // { marketId: { wins, losses } }
+  const marketMap = {};
 
   for (const pos of positions) {
     const marketId = pos.conditionId;
@@ -268,26 +258,17 @@ async function trackWallet(wallet) {
     let resolved_outcome = null;
 
     if (pnl !== null) {
-      if (pnl > 0) {
-        outcome = "WIN";
-        resolved_outcome = pickedOutcome;
-      } else {
-        outcome = "LOSS";
-        resolved_outcome = pos.oppositeOutcome || pickedOutcome;
-      }
+      if (pnl > 0) { outcome = "WIN"; resolved_outcome = pickedOutcome; }
+      else { outcome = "LOSS"; resolved_outcome = pos.oppositeOutcome || pickedOutcome; }
     }
 
     if (!marketMap[marketId]) marketMap[marketId] = { wins: 0, losses: 0 };
     if (outcome === "WIN") marketMap[marketId].wins++;
     else if (outcome === "LOSS") marketMap[marketId].losses++;
 
-    // Insert/update signals
     const existingSig = existingSignals.find(s => s.market_id === marketId);
     if (existingSig) {
-      await supabase
-        .from("signals")
-        .update({ pnl, outcome, resolved_outcome, outcome_at: pnl !== null ? new Date() : null })
-        .eq("id", existingSig.id);
+      await supabase.from("signals").update({ pnl, outcome, resolved_outcome, outcome_at: pnl !== null ? new Date() : null }).eq("id", existingSig.id);
     } else if (!existingTxs.has(pos.asset)) {
       await supabase.from("signals").insert({
         wallet_id: wallet.id,
@@ -310,53 +291,32 @@ async function trackWallet(wallet) {
     }
   }
 
-  // ✅ Calculate new losing streak (consecutive lost markets)
-  const lostMarkets = Object.values(marketMap)
-    .filter(m => m.losses > m.wins)
-    .map((_, i) => i + 1); // just counts lost markets
+  const lostMarkets = Object.values(marketMap).filter(m => m.losses > m.wins).length;
+  const { data: walletData } = await supabase.from("wallets").select("losing_streak").eq("id", wallet.id).maybeSingle();
+  const prevStreak = walletData?.losing_streak || 0;
+  const newStreak = lostMarkets > 0 ? prevStreak + lostMarkets : 0;
 
-  // Fetch previous losing streak
-  const { data: walletData } = await supabase
-    .from("wallets")
-    .select("losing_streak")
-    .eq("id", wallet.id)
-    .maybeSingle();
-
-  let prevStreak = walletData?.losing_streak || 0;
-
-  // Count consecutive losses across previous streak + current lost markets
-  let newStreak = lostMarkets.length > 0 ? prevStreak + lostMarkets.length : 0;
-
-  // Pause wallet if new streak ≥ threshold
   const updateData = { losing_streak: newStreak };
   if (newStreak >= LOSING_STREAK_THRESHOLD) updateData.paused = true;
 
   await supabase.from("wallets").update({ ...updateData, last_checked: new Date() }).eq("id", wallet.id);
 }
 
-
-// ---------------------- Main loop ----------------------
+/* ===========================
+   Main loop
+=========================== */
 async function main() {
   console.log("🚀 POLYMARKET TRACKER LIVE 🚀");
-
-  // Fetch leaderboard wallets once at startup
   await fetchAndInsertLeaderboardWallets();
 
-  // Polling loop
   setInterval(async () => {
     try {
-      // Fetch wallets from DB
       const { data: wallets } = await supabase.from("wallets").select("*");
       if (!wallets?.length) return;
 
       console.log(`Wallets loaded: ${wallets.length}`);
-
-      // Process each wallet
       await Promise.all(wallets.map(trackWallet));
-
-      // Update win rates and pause wallets if needed
       await updateWalletWinRatesAndPause();
-
     } catch (err) {
       console.error("Loop error:", err);
       await sendTelegram(`Tracker loop error: ${err.message}`);
@@ -364,7 +324,6 @@ async function main() {
   }, POLL_INTERVAL);
 }
 
-// Start the tracker
 main();
 
 /* ===========================
@@ -372,14 +331,13 @@ main();
 =========================== */
 async function updateWalletWinRatesAndPause() {
   try {
-    // 1️⃣ Calculate win rate per wallet
     const query = `
       UPDATE wallets w
       SET 
         win_rate = sub.wr,
         paused = CASE
-                  WHEN sub.wr >= 80 THEN false   -- unpause if win_rate ≥ 80%
-                  WHEN sub.wr < 80 THEN true     -- pause if win_rate < 80%
+                  WHEN sub.wr >= 80 THEN false
+                  WHEN sub.wr < 80 THEN true
                   ELSE w.paused
                  END
       FROM (
@@ -397,13 +355,9 @@ async function updateWalletWinRatesAndPause() {
     `;
 
     const { data: updatedWallets, error } = await supabase.rpc('execute_sql', { sql: query });
-    if (error) {
-      console.error("Batch win rate + pause update failed:", error.message);
-      return;
-    }
+    if (error) { console.error("Batch win rate + pause update failed:", error.message); return; }
     console.log("Batch win rate + pause update complete.");
 
-    // 2️⃣ Fetch unresolved picks for wallets that just got unpaused
     if (updatedWallets?.length) {
       for (const wallet of updatedWallets) {
         if (!wallet.paused && wallet.win_rate >= 80) {

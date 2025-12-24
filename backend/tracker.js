@@ -101,6 +101,73 @@ async function fetchMarket(marketId) {
 }
 
 /* ===========================
+   Populate VW and autopause wallets
+=========================== */
+async function updateWalletVolumeWeightedWinRates() {
+  const { data: wallets } = await supabase.from("wallets").select("*");
+  if (!wallets?.length) return;
+
+  console.log(`Calculating VW win rates for ${wallets.length} wallets...`);
+
+  for (const wallet of wallets) {
+    const identity = wallet.polymarket_proxy_wallet || wallet.polymarket_username;
+    if (!identity) continue;
+
+    let trades;
+    try {
+      trades = await fetchAllBuyCashTrades(identity);
+    } catch (err) {
+      console.error(`Failed to fetch trades for wallet ${wallet.id}:`, err.message);
+      continue;
+    }
+
+    if (!trades || trades.length === 0) {
+      console.log(`Wallet ${wallet.id}: no trades found`);
+      continue;
+    }
+
+    let totalVolume = 0;
+    let winningVolume = 0;
+
+    for (const t of trades) {
+      let resolvedSide;
+      try {
+        resolvedSide = await fetchMarketResolution(t.conditionId);
+      } catch (err) {
+        console.warn(`Wallet ${wallet.id}: fetch resolution failed for trade ${t.transactionHash}: ${err.message}`);
+        continue;
+      }
+
+      if (!resolvedSide) {
+        console.warn(`Wallet ${wallet.id}: skipping unresolved/404 trade ${t.transactionHash} (${t.conditionId})`);
+        continue;
+      }
+
+      totalVolume += t.size;
+      if (t.side.toUpperCase() === resolvedSide.toUpperCase()) winningVolume += t.size;
+    }
+
+    const vwWinRate = totalVolume > 0 ? winningVolume / totalVolume : 0;
+
+    try {
+      await supabase.from("wallets").update({ win_rate: vwWinRate }).eq("id", wallet.id);
+
+      if (vwWinRate < 0.8 && !wallet.paused) {
+        await supabase.from("wallets").update({ paused: true }).eq("id", wallet.id);
+        console.log(`Wallet ${wallet.id} paused due to VW win rate ${Math.round(vwWinRate*100)}%`);
+      } else {
+        console.log(`Wallet ${wallet.id}: VW win rate = ${Math.round(vwWinRate*100)}%`);
+      }
+    } catch (err) {
+      console.error(`Failed to update wallet ${wallet.id}:`, err.message);
+    }
+  }
+
+  console.log("VW win rate update complete.");
+}
+
+
+/* ===========================
    One-time populate VW for all wallets + auto-pause
 =========================== */
 async function populateAllWalletWinRates() {

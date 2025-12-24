@@ -172,23 +172,36 @@ async function fetchMarketResolution(conditionId) {
    Calculate Volume-Weighted Win Rate
 =========================== */
 async function calculateVolumeWeightedWinRate(wallet) {
-  const trades = await fetchAllBuyCashTrades(wallet.polymarket_proxy_wallet || wallet.polymarket_username);
-  if (!trades || trades.length === 0) return null;
+  let trades = [];
+  try {
+    trades = await fetchAllBuyCashTrades(wallet.polymarket_proxy_wallet || wallet.polymarket_username);
+  } catch (err) {
+    console.error(`Trade fetch failed for wallet ${wallet.id}:`, err.message);
+    return null; // skip this wallet for now
+  }
+
+  if (!trades.length) return null;
 
   let totalVolume = 0;
   let winningVolume = 0;
 
   for (const t of trades) {
-    const resolvedSide = await fetchMarketResolution(t.conditionId);
+    let resolvedSide;
+    try {
+      resolvedSide = await fetchMarketResolution(t.conditionId);
+    } catch (err) {
+      console.error(`Market resolution failed for ${t.conditionId}:`, err.message);
+      continue;
+    }
     if (!resolvedSide) continue;
 
     totalVolume += t.size;
     if (t.side.toUpperCase() === resolvedSide.toUpperCase()) winningVolume += t.size;
   }
 
-   
   return totalVolume > 0 ? winningVolume / totalVolume : null;
 }
+
 
 /* ===========================
    Track wallet trades

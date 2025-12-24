@@ -331,10 +331,8 @@ main();
 =========================== */
 async function updateWalletWinRatesAndPause() {
   try {
-    const { data: wallets } = await supabase
-      .from("wallets")
-      .select("id")
-      .order("id");
+    const { data: wallets } = await supabase.from("wallets").select("id, polymarket_proxy_wallet, polymarket_username");
+    if (!wallets?.length) return;
 
     for (const wallet of wallets) {
       // Fetch wallet's signals
@@ -350,13 +348,11 @@ async function updateWalletWinRatesAndPause() {
 
       const paused = win_rate < 80;
 
-      await supabase
-        .from("wallets")
-        .update({ win_rate, paused })
-        .eq("id", wallet.id);
+      await supabase.from("wallets").update({ win_rate, paused }).eq("id", wallet.id);
 
       if (!paused && win_rate >= 80) {
-        await trackWallet(wallet); // fetch unresolved picks
+        console.log(`Wallet ${wallet.id} just unpaused — fetching unresolved picks...`);
+        await trackWallet(wallet);
       }
     }
 

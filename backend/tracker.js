@@ -379,10 +379,11 @@ async function main() {
       // ✅ Update win rates and losing streaks after all wallets processed
 await updateWalletWinRatesAndPauseJS();
 
-    } catch (err) {
-      console.error("Loop error:", err.message);
-      await sendTelegram(`Tracker loop error: ${err.message}`);
-    }
+} catch (err) {
+  console.error("Loop error:", err);
+  // await sendTelegram(`Tracker loop error: ${err.message}`); // disabled
+}
+
   }, POLL_INTERVAL);
 }
 

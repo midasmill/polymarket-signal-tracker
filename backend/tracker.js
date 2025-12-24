@@ -293,7 +293,21 @@ await supabase.from("signals").insert({
 }
 
 /* ===========================
-   Update Pending Outcomes (SELL-safe, all markets)
+   Helper
+=========================== */
+
+async function fetchMarketByConditionId(conditionId) {
+  const res = await fetch(
+    `https://data-api.polymarket.com/markets/${conditionId}`
+  );
+
+  if (!res.ok) throw new Error("Market fetch failed");
+
+  return res.json();
+}
+
+/* ===========================
+   Update Pending Outcomes (RESOLUTION-BASED, SELL-SAFE)
 =========================== */
 async function updatePendingOutcomes() {
   const { data: pending } = await supabase
@@ -304,33 +318,39 @@ async function updatePendingOutcomes() {
   if (!pending?.length) return;
 
   for (const sig of pending) {
-    // 1️⃣ Fetch market resolution
-    const market = await fetchMarket(sig.market_id);
-    if (!market || !market.resolved || !market.winningOutcome) continue;
+    // If we don’t know what the wallet picked, SKIP
+    if (!sig.picked_outcome) continue;
 
-    const resolvedOutcome = String(market.winningOutcome);
-
-    // 2️⃣ Determine WIN / LOSS (SELL-safe)
-    let result;
-    if (sig.side === "BUY") {
-      result = sig.picked_outcome === resolvedOutcome ? "WIN" : "LOSS";
-    } else if (sig.side === "SELL") {
-      result = sig.picked_outcome !== resolvedOutcome ? "WIN" : "LOSS";
-    } else {
+    let market;
+    try {
+      market = await fetchMarketByConditionId(sig.market_id);
+    } catch {
       continue;
     }
 
-    // 3️⃣ Update signal row
+    // Market not resolved yet
+    if (!market?.resolved || !market.winningOutcome) continue;
+
+    const resolved_outcome = market.winningOutcome;
+
+    let finalOutcome = "LOSS";
+    if (
+      sig.picked_outcome.toLowerCase() ===
+      resolved_outcome.toLowerCase()
+    ) {
+      finalOutcome = "WIN";
+    }
+
     await supabase
       .from("signals")
       .update({
-        outcome: result,
-        resolved_outcome: resolvedOutcome,
-        outcome_at: new Date()
+        resolved_outcome,
+        outcome: finalOutcome,
+        outcome_at: new Date(),
       })
       .eq("id", sig.id);
 
-    // 4️⃣ Losing streak logic
+    // Losing streak logic
     const { data: wallet } = await supabase
       .from("wallets")
       .select("*")
@@ -338,9 +358,8 @@ async function updatePendingOutcomes() {
       .single();
 
     if (wallet) {
-      if (result === "LOSS") {
+      if (finalOutcome === "LOSS") {
         const streak = (wallet.losing_streak || 0) + 1;
-
         await supabase
           .from("wallets")
           .update({ losing_streak: streak })
@@ -353,11 +372,10 @@ async function updatePendingOutcomes() {
             .eq("id", wallet.id);
 
           await sendTelegram(
-            `Wallet paused due to losing streak:\nWallet ID: ${wallet.id}\nLosses: ${streak}`
+            `⛔ Wallet paused\nWallet ID: ${wallet.id}\nLosing streak: ${streak}`
           );
         }
       } else {
-        // Reset streak on WIN
         await supabase
           .from("wallets")
           .update({ losing_streak: 0 })
@@ -365,16 +383,17 @@ async function updatePendingOutcomes() {
       }
     }
 
-    // 5️⃣ Send result message (uses getPick internally)
     await sendResultNotes(
-      { ...sig, resolved_outcome: resolvedOutcome },
-      result
+      sig,
+      finalOutcome,
+      sig.picked_outcome,
+      resolved_outcome
     );
   }
 
-  // 6️⃣ Re-evaluate majority signals after resolutions
   await sendMajoritySignals();
 }
+
 
 
 

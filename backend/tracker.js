@@ -388,11 +388,12 @@ await updateWalletWinRatesAndPauseJS();
 }
 
 /* ===========================
-   Update Wallet Win Rates & Quality Filters (30d, per market)
+   Update Wallet Win Rates & Losing Streak
+   (LIVE vs RESOLVED separated)
 =========================== */
 async function updateWalletWinRatesAndPauseJS() {
   try {
-    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const since30d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
 
     const { data: wallets } = await supabase
       .from("wallets")
@@ -402,87 +403,108 @@ async function updateWalletWinRatesAndPauseJS() {
 
     for (const wallet of wallets) {
 
-      // 1️⃣ Fetch resolved signals (last 30 days)
+      // Fetch last 30d signals
       const { data: signals } = await supabase
         .from("signals")
-        .select("market_id, outcome, pnl, avg_price, created_at")
+        .select("market_id, pnl, outcome, avg_price, created_at")
         .eq("wallet_id", wallet.id)
-        .in("outcome", ["WIN", "LOSS"])
-        .gte("created_at", since)
+        .gte("created_at", since30d)
         .order("created_at", { ascending: true });
 
       if (!signals?.length) {
         await supabase.from("wallets").update({
           win_rate: 0,
           losing_streak: 0,
-          paused: true
+          paused: true,
+          last_checked: new Date()
         }).eq("id", wallet.id);
         continue;
       }
 
-      // 2️⃣ Reduce to ONE result per market
+      // ------------------
+      // Split LIVE vs RESOLVED per market
+      // ------------------
       const markets = {};
+
       for (const s of signals) {
         markets[s.market_id] ??= {
-          outcome: s.outcome,
-          pnl: 0,
-          prices: []
+          resolved: false,
+          outcome: null,
+          realizedPnl: 0,
+          prices: [],
         };
 
-        markets[s.market_id].outcome = s.outcome; // last outcome wins
-        markets[s.market_id].pnl += s.pnl || 0;
-        if (s.avg_price != null) markets[s.market_id].prices.push(s.avg_price);
+        if (s.pnl !== null) {
+          markets[s.market_id].resolved = true;
+          markets[s.market_id].outcome = s.outcome;
+          markets[s.market_id].realizedPnl += s.pnl || 0;
+        }
+
+        if (s.avg_price != null) {
+          markets[s.market_id].prices.push(s.avg_price);
+        }
       }
 
-      const marketList = Object.values(markets);
+      const resolvedMarkets = Object.values(markets).filter(m => m.resolved);
+      const liveMarkets = Object.values(markets).filter(m => !m.resolved);
 
-      // 3️⃣ Market win rate (30d)
-      const wins = marketList.filter(m => m.outcome === "WIN").length;
-      const totalMarkets = marketList.length;
-      const marketWinRate = (wins / totalMarkets) * 100;
+      // ------------------
+      // RESOLVED METRICS
+      // ------------------
+      const resolvedCount = resolvedMarkets.length;
+      const wins = resolvedMarkets.filter(m => m.outcome === "WIN").length;
+      const marketWinRate = resolvedCount ? (wins / resolvedCount) * 100 : 0;
 
-      // 4️⃣ Avg entry price
-      const allPrices = marketList.flatMap(m => m.prices);
-      const avgEntryPrice = allPrices.length
-        ? allPrices.reduce((a, b) => a + b, 0) / allPrices.length
-        : 1;
+      const realizedPnl = resolvedMarkets.reduce((s, m) => s + m.realizedPnl, 0);
 
-      // 5️⃣ Realized PnL (net)
-      const realizedPnl = marketList.reduce((sum, m) => sum + m.pnl, 0);
-
-      // 6️⃣ Losing streak (per market)
+      // Consecutive losing streak (resolved only)
       let losingStreak = 0;
-      for (let i = marketList.length - 1; i >= 0; i--) {
-        if (marketList[i].outcome === "LOSS") losingStreak++;
+      for (let i = resolvedMarkets.length - 1; i >= 0; i--) {
+        if (resolvedMarkets[i].outcome === "LOSS") losingStreak++;
         else break;
       }
 
-      // 7️⃣ Quality gate
+      // ------------------
+      // LIVE METRICS
+      // ------------------
+      const livePrices = liveMarkets.flatMap(m => m.prices);
+      const avgEntryPriceLive = livePrices.length
+        ? livePrices.reduce((a, b) => a + b, 0) / livePrices.length
+        : null;
+
+      // ------------------
+      // QUALITY FILTER
+      // ------------------
       const passesQuality =
         marketWinRate >= 65 &&
-        avgEntryPrice <= 0.55 &&
+        avgEntryPriceLive !== null &&
+        avgEntryPriceLive <= 0.55 &&
         realizedPnl > 0;
 
       const paused =
         !passesQuality ||
         losingStreak >= LOSING_STREAK_THRESHOLD;
 
-      // 8️⃣ Update wallet
+      // ------------------
+      // UPDATE WALLET
+      // ------------------
       await supabase.from("wallets").update({
         win_rate: marketWinRate,
         losing_streak: losingStreak,
-        avg_entry_price: avgEntryPrice,
         realized_pnl: realizedPnl,
+        avg_entry_price_live: avgEntryPriceLive,
+        live_markets: liveMarkets.length,
         paused,
         last_checked: new Date()
       }).eq("id", wallet.id);
     }
 
-   console.log("✅ Wallet quality metrics updated");
+    console.log("✅ Wallet win rates & streaks updated (LIVE/RESOLVED separated)");
   } catch (err) {
-    console.error("Error updating wallet quality metrics:", err.message);
+    console.error("Error updating wallet metrics:", err.message);
   }
 }
+
 
 /* ===========================
    Send Result Notes

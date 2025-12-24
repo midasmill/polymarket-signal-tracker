@@ -34,6 +34,8 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
+
+
 /* ===========================
    Markdown helper
 =========================== */
@@ -185,7 +187,44 @@ function getMajorityConfidence(counts) {
 
 
 /* ===========================
-   Track Wallet Trades (Resolved + Pending with PnL-based outcome)
+   Helper to get actual pick
+=========================== */
+function getPick(sig) {
+  if (!sig.market_name || !sig.side) return "Pending";
+
+  const options = sig.market_name.split(" vs ").map(t => t.trim());
+  if (options.length < 2) return "Unknown";
+
+  // Resolved pick
+  if (sig.outcome) {
+    if (sig.side.toUpperCase() === "BUY") return sig.outcome;
+    if (sig.side.toUpperCase() === "SELL") return options.find(o => o !== sig.outcome) || "Unknown";
+  }
+
+  // Pending pick (before outcome)
+  if (sig.side.toUpperCase() === "BUY") return options[0];
+  if (sig.side.toUpperCase() === "SELL") return options[1];
+
+  return "Unknown";
+}
+
+/* ===========================
+   Format Signal for Telegram/Notes
+=========================== */
+function formatSignal(sig, confidence, emoji, eventType = "Signal Sent") {
+  const pick = getPick(sig);
+  const eventUrl = `https://polymarket.com/events/${sig.market_id}`;
+
+  return `${eventType}: ${new Date().toLocaleString()}
+Market Event: [${sig.signal}](${eventUrl})
+Prediction: ${pick}
+Confidence: ${confidence}
+Outcome: ${sig.outcome || "Pending"}
+Result: ${sig.outcome ? emoji : "⚪"}`;
+}
+
+/* ===========================
+   Track Wallet Trades (Resolved + Pending with pick)
 =========================== */
 async function trackWallet(wallet) {
   if (wallet.paused) return;
@@ -207,8 +246,6 @@ async function trackWallet(wallet) {
     await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
     return;
   }
-
-  let insertedCount = 0;
 
   for (const trade of trades) {
     if (identityUsed === "proxy" &&
@@ -250,13 +287,10 @@ async function trackWallet(wallet) {
       wallet_set: [String(wallet.id)],
       tx_hashes: [trade.transactionHash],
     });
-
-    insertedCount++;
   }
 
   await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
 }
-
 
 /* ===========================
    Update Pending Outcomes (PnL-based)
@@ -310,19 +344,6 @@ async function updatePendingOutcomes() {
 
 
 /* ===========================
-   Format Signal
-=========================== */
-function formatSignal(sig, confidence, emoji, eventType = "Signal Sent") {
-  const eventUrl = `https://polymarket.com/events/${sig.market_id}`;
-  return `${eventType}: ${new Date().toLocaleString()}
-Market Event: [${sig.signal}](${eventUrl})
-Prediction: ${sig.side}
-Confidence: ${confidence}
-Outcome: ${sig.outcome || "Pending"}
-Result: ${sig.outcome ? emoji : "⚪"}`;
-}
-
-/* ===========================
    Send Result Notes
 =========================== */
 async function sendResultNotes(sig, result) {
@@ -351,47 +372,93 @@ async function sendResultNotes(sig, result) {
 }
 
 
-/* ===========================
-   Send majority signals
-=========================== */
 async function sendMajoritySignals() {
-  const { data: markets } = await supabase.from("signals").select("market_id", { distinct: true });
-  if (!markets) return;
+  const { data: markets } = await supabase
+    .from("signals")
+    .select("market_id", { distinct: true });
+
+  if (!markets?.length) return;
 
   for (const { market_id } of markets) {
-    const counts = await getMarketVoteCounts(market_id);
-    const side = getMajoritySide(counts);
-    if (!side) continue;
+    const { data: signals } = await supabase
+      .from("signals")
+      .select("*")
+      .eq("market_id", market_id);
 
-    const confidence = getMajorityConfidence(counts);
-    if (!confidence) continue;
+    if (!signals || signals.length < MIN_WALLETS_FOR_SIGNAL) continue;
 
-    const { data: signals } = await supabase.from("signals").select("*").eq("market_id", market_id).eq("side", side);
-    if (!signals) continue;
-
+    // 1️⃣ Determine one pick per wallet
+    const perWalletPick = {};
     for (const sig of signals) {
-      if (!FORCE_SEND && sig.signal_sent_at) continue;
-
-      const emoji = RESULT_EMOJIS[sig.outcome] || "⚪";
-      const text = formatSignal(sig, confidence, emoji, "Signal Sent");
-
-      await sendTelegram(text);
-
-      const noteText = toBlockquote(text);
-      const { data: notes } = await supabase.from("notes").select("id, content").eq("slug", "polymarket-millionaires").maybeSingle();
-
-      let newContent = notes?.content || "";
-      const safeSignal = sig.signal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const regex = new RegExp(`.*\\[${safeSignal}\\]\\(.*\\).*`, "g");
-
-      if (regex.test(newContent)) newContent = newContent.replace(regex, noteText);
-      else newContent += newContent ? `\n\n${noteText}` : noteText;
-
-      await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", "polymarket-millionaires");
-      await supabase.from("signals").update({ signal_sent_at: new Date() }).eq("id", sig.id);
+      if (!sig.wallet_id) continue;
+      perWalletPick[sig.wallet_id] = getPick(sig);
     }
+
+    // 2️⃣ Count picks
+    const pickCounts = {};
+    for (const pick of Object.values(perWalletPick)) {
+      if (!pick || pick === "Unknown") continue;
+      pickCounts[pick] = (pickCounts[pick] || 0) + 1;
+    }
+
+    const entries = Object.entries(pickCounts).sort((a, b) => b[1] - a[1]);
+    if (entries.length === 0) continue;
+
+    // Tie check
+    if (entries.length > 1 && entries[0][1] === entries[1][1]) continue;
+
+    const [majorityPick, walletCount] = entries[0];
+    if (walletCount < MIN_WALLETS_FOR_SIGNAL) continue;
+
+    const confidence = getConfidenceEmoji(walletCount);
+
+    // 3️⃣ Send ONE representative signal
+    const sig = signals.find(s => getPick(s) === majorityPick);
+    if (!sig) continue;
+
+    if (!FORCE_SEND && sig.signal_sent_at) continue;
+
+    const emoji = RESULT_EMOJIS[sig.outcome] || "⚪";
+    const text = formatSignal(
+      { ...sig, side: majorityPick }, // override side for display
+      confidence,
+      emoji,
+      "Signal Sent"
+    );
+
+    await sendTelegram(text);
+
+    // Notes update
+    const noteText = toBlockquote(text);
+    const { data: notes } = await supabase
+      .from("notes")
+      .select("content")
+      .eq("slug", "polymarket-millionaires")
+      .maybeSingle();
+
+    let newContent = notes?.content || "";
+    const safeSignal = sig.signal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const regex = new RegExp(`.*\\[${safeSignal}\\]\\(.*\\).*`, "g");
+
+    if (regex.test(newContent)) {
+      newContent = newContent.replace(regex, noteText);
+    } else {
+      newContent += newContent ? `\n\n${noteText}` : noteText;
+    }
+
+    await supabase
+      .from("notes")
+      .update({ content: newContent, public: true })
+      .eq("slug", "polymarket-millionaires");
+
+    // Mark all signals in this market as sent
+    await supabase
+      .from("signals")
+      .update({ signal_sent_at: new Date() })
+      .eq("market_id", market_id);
   }
 }
+
 
 /* ===========================
    Pre-signals (near-threshold)

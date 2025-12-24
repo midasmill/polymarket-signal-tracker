@@ -66,7 +66,7 @@ async function sendTelegram(text, useBlockquote = false) {
   }
 }
 
-async function fetchAllBuyCashTrades(identity) {wallet
+async function fetchAllBuyCashTrades(wallet) {wallet
                                                 
 /* ===========================
    Polymarket API with retries + cache

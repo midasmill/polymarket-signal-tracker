@@ -804,9 +804,12 @@ cron.schedule("0 7 * * *", () => {
 /* ===========================
    Main Loop
 =========================== */
+
 async function main() {
   console.log("🚀 POLYMARKET TRACKER LIVE 🚀");
 
+await fixOldSignals();
+   
   // Insert new leaderboard wallets immediately on deploy
   await fetchAndInsertLeaderboardWallets();
 

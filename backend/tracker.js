@@ -231,15 +231,8 @@ async function fetchMarketResolution(conditionId) {
    Calculate Volume-Weighted Win Rate
 =========================== */
 async function calculateVolumeWeightedWinRate(wallet) {
-  let trades = [];
-  try {
-    trades = await fetchAllBuyCashTrades(wallet.polymarket_proxy_wallet || wallet.polymarket_username);
-  } catch (err) {
-    console.error(`Trade fetch failed for wallet ${wallet.id}:`, err.message);
-    return null; // skip this wallet for now
-  }
-
-  if (!trades.length) return null;
+  const trades = await fetchAllBuyCashTrades(wallet.polymarket_proxy_wallet || wallet.polymarket_username);
+  if (!trades || trades.length === 0) return null;
 
   let totalVolume = 0;
   let winningVolume = 0;
@@ -249,17 +242,24 @@ async function calculateVolumeWeightedWinRate(wallet) {
     try {
       resolvedSide = await fetchMarketResolution(t.conditionId);
     } catch (err) {
-      console.error(`Market resolution failed for ${t.conditionId}:`, err.message);
+      console.warn(`Failed to fetch resolution for trade ${t.transactionHash}: ${err.message}`);
+      continue; // skip this trade
+    }
+
+    if (!resolvedSide) {
+      console.warn(`Skipping unresolved or 404 trade ${t.transactionHash} with conditionId ${t.conditionId}`);
       continue;
     }
-    if (!resolvedSide) continue;
 
     totalVolume += t.size;
-    if (t.side.toUpperCase() === resolvedSide.toUpperCase()) winningVolume += t.size;
+    if (t.side.toUpperCase() === resolvedSide.toUpperCase()) {
+      winningVolume += t.size;
+    }
   }
 
   return totalVolume > 0 ? winningVolume / totalVolume : null;
 }
+
 
 
 /* ===========================

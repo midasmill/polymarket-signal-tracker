@@ -224,6 +224,26 @@ Result: ${sig.outcome ? emoji : "⚪"}`;
 }
 
 /* ===========================
+   Picked outcome helper
+=========================== */
+function derivePickedOutcome(trade) {
+  // Most Polymarket trades already contain the label (sports, yes/no, up/down)
+  if (trade.outcome && typeof trade.outcome === "string") {
+    return trade.outcome;
+  }
+
+  // Fallback: outcomeIndex exists but label missing
+  // DO NOT guess labels — just mark index
+  if (typeof trade.outcomeIndex === "number") {
+    return `OPTION_${trade.outcomeIndex}`;
+  }
+
+  // Unknown
+  return null;
+}
+
+
+/* ===========================
    Track Wallet Trades (Resolved + Pending with pick)
 =========================== */
 async function trackWallet(wallet) {

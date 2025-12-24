@@ -190,23 +190,23 @@ function getMajorityConfidence(counts) {
    Helper to get actual pick
 =========================== */
 function getPick(sig) {
-  if (!sig.market_name || !sig.side) return "Pending";
+  if (!sig.picked_outcome || !sig.side) return "Unknown";
 
-  const options = sig.market_name.split(" vs ").map(t => t.trim());
-  if (options.length < 2) return "Unknown";
-
-  // Resolved pick
-  if (sig.outcome) {
-    if (sig.side.toUpperCase() === "BUY") return sig.outcome;
-    if (sig.side.toUpperCase() === "SELL") return options.find(o => o !== sig.outcome) || "Unknown";
+  if (sig.side === "BUY") {
+    return sig.picked_outcome;
   }
 
-  // Pending pick (before outcome)
-  if (sig.side.toUpperCase() === "BUY") return options[0];
-  if (sig.side.toUpperCase() === "SELL") return options[1];
+  // SELL → opposite outcome
+  if (sig.side === "SELL") {
+    if (!sig.resolved_outcome) return `NOT ${sig.picked_outcome}`;
+    return sig.resolved_outcome === sig.picked_outcome
+      ? "Unknown"
+      : sig.resolved_outcome;
+  }
 
   return "Unknown";
 }
+
 
 /* ===========================
    Format Signal for Telegram/Notes
@@ -272,28 +272,28 @@ async function trackWallet(wallet) {
       outcome_at = new Date(trade.timestamp * 1000);
     }
 
-    await supabase.from("signals").insert({
-      wallet_id: wallet.id,
-      signal: trade.title,
-      market_name: trade.title,
-      market_id: trade.eventSlug,
-      side: trade.side?.toUpperCase() ?? "BUY",
-      tx_hash: trade.transactionHash,
-      outcome,
-      pnl,
-      created_at: new Date(trade.timestamp * 1000),
-      outcome_at,
-      wallet_count: 1,
-      wallet_set: [String(wallet.id)],
-      tx_hashes: [trade.transactionHash],
-    });
+await supabase.from("signals").insert({
+  wallet_id: wallet.id,
+  signal: trade.title,
+  market_name: trade.title,
+  market_id: trade.conditionId,
+  side: trade.side.toUpperCase(),
+  picked_outcome: trade.outcome,   // 🔥 NEW
+  tx_hash: trade.transactionHash,
+  outcome: "Pending",
+  created_at: new Date(trade.timestamp * 1000),
+  wallet_count: 1,
+  wallet_set: [String(wallet.id)],
+  tx_hashes: [trade.transactionHash],
+});
+
   }
 
   await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
 }
 
 /* ===========================
-   Update Pending Outcomes (PnL-based)
+   Update Pending Outcomes (SELL-safe, all markets)
 =========================== */
 async function updatePendingOutcomes() {
   const { data: pending } = await supabase
@@ -304,42 +304,78 @@ async function updatePendingOutcomes() {
   if (!pending?.length) return;
 
   for (const sig of pending) {
-    if (!sig.tx_hash) continue;
+    // 1️⃣ Fetch market resolution
+    const market = await fetchMarket(sig.market_id);
+    if (!market || !market.resolved || !market.winningOutcome) continue;
 
-    let trade = null;
-    try {
-      const trades = await fetchLatestTrades(sig.wallet_id);
-      trade = trades.find(t => t.transactionHash === sig.tx_hash);
-    } catch {
-      trade = null;
+    const resolvedOutcome = String(market.winningOutcome);
+
+    // 2️⃣ Determine WIN / LOSS (SELL-safe)
+    let result;
+    if (sig.side === "BUY") {
+      result = sig.picked_outcome === resolvedOutcome ? "WIN" : "LOSS";
+    } else if (sig.side === "SELL") {
+      result = sig.picked_outcome !== resolvedOutcome ? "WIN" : "LOSS";
+    } else {
+      continue;
     }
-    if (!trade || !trade.outcome) continue;
 
-    const pnl = trade.pnl ?? null;
-    const outcome = pnl !== null && pnl < 0 ? "LOSS" : "WIN";
-    const outcome_at = new Date(trade.timestamp * 1000);
+    // 3️⃣ Update signal row
+    await supabase
+      .from("signals")
+      .update({
+        outcome: result,
+        resolved_outcome: resolvedOutcome,
+        outcome_at: new Date()
+      })
+      .eq("id", sig.id);
 
-    await supabase.from("signals").update({ outcome, pnl, outcome_at }).eq("id", sig.id);
+    // 4️⃣ Losing streak logic
+    const { data: wallet } = await supabase
+      .from("wallets")
+      .select("*")
+      .eq("id", sig.wallet_id)
+      .single();
 
-    const { data: wallet } = await supabase.from("wallets").select("*").eq("id", sig.wallet_id).single();
     if (wallet) {
-      if (outcome === "LOSS") {
+      if (result === "LOSS") {
         const streak = (wallet.losing_streak || 0) + 1;
-        await supabase.from("wallets").update({ losing_streak: streak }).eq("id", wallet.id);
+
+        await supabase
+          .from("wallets")
+          .update({ losing_streak: streak })
+          .eq("id", wallet.id);
+
         if (streak >= LOSING_STREAK_THRESHOLD) {
-          await supabase.from("wallets").update({ paused: true }).eq("id", wallet.id);
-          await sendTelegram(`Wallet paused due to losing streak:\nWallet ID: ${wallet.id}\nLosses: ${streak}`);
+          await supabase
+            .from("wallets")
+            .update({ paused: true })
+            .eq("id", wallet.id);
+
+          await sendTelegram(
+            `Wallet paused due to losing streak:\nWallet ID: ${wallet.id}\nLosses: ${streak}`
+          );
         }
       } else {
-        await supabase.from("wallets").update({ losing_streak: 0 }).eq("id", wallet.id);
+        // Reset streak on WIN
+        await supabase
+          .from("wallets")
+          .update({ losing_streak: 0 })
+          .eq("id", wallet.id);
       }
     }
 
-    await sendResultNotes(sig, outcome);
+    // 5️⃣ Send result message (uses getPick internally)
+    await sendResultNotes(
+      { ...sig, resolved_outcome: resolvedOutcome },
+      result
+    );
   }
 
+  // 6️⃣ Re-evaluate majority signals after resolutions
   await sendMajoritySignals();
 }
+
 
 
 

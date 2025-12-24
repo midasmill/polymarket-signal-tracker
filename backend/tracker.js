@@ -205,14 +205,12 @@ async function updateNotes(slug, text) {
 /* ===========================
    Track Wallet Trades
 =========================== */
-
 async function trackWallet(wallet) {
   if (wallet.paused) return;
 
   const userId = wallet.polymarket_proxy_wallet || wallet.polymarket_username;
   if (!userId) return;
 
-  // Fetch positions
   let positions = [];
   try {
     const url = `https://data-api.polymarket.com/positions?user=${userId}&limit=100`;
@@ -228,11 +226,11 @@ async function trackWallet(wallet) {
     return;
   }
 
-  // Fetch existing signals to avoid duplicates
   const { data: existingSignals } = await supabase
     .from("signals")
     .select("id, tx_hash, market_id")
     .eq("wallet_id", wallet.id);
+
   const existingTxs = new Set(existingSignals?.map(s => s.tx_hash));
   const existingMarkets = new Set(existingSignals?.map(s => s.market_id));
 
@@ -243,67 +241,44 @@ async function trackWallet(wallet) {
     const outcome = cashPnl < 0 ? "LOSS" : "WIN";
     const resolved_outcome = cashPnl < 0 ? pos.oppositeOutcome || pickedOutcome : pickedOutcome;
 
-    // Check if signal exists
-    let sigId = null;
+    // Update existing signal or insert new
     const existingSig = existingSignals.find(s => s.market_id === pos.conditionId);
-    if (existingSig) {
-      sigId = existingSig.id;
-      // Update existing signal
-      try {
-        await supabase
-          .from("signals")
-          .update({
-            pnl: cashPnl,
-            outcome,
-            resolved_outcome,
-            outcome_at: new Date(),
-          })
-          .eq("id", sigId);
-      } catch (err) {
-        console.error("Failed to update existing signal:", err.message);
-      }
-    } else if (!existingTxs.has(pos.asset)) {
-      // Insert new signal
-      try {
-        const { data: inserted } = await supabase.from("signals").insert({
-          wallet_id: wallet.id,
-          signal: pos.title,
-          market_name: pos.title,
-          market_id: pos.conditionId,
-          event_slug: eventSlug,
-          side: pos.side?.toUpperCase() || "BUY",
-          picked_outcome: pickedOutcome,
-          tx_hash: pos.asset,
-          pnl: cashPnl,
-          outcome,
-          resolved_outcome,
-          outcome_at: new Date(),
-          created_at: new Date(pos.timestamp * 1000 || Date.now()),
-          wallet_count: 1,
-          wallet_set: [String(wallet.id)],
-          tx_hashes: [pos.asset],
-        }).select("id");
 
-        sigId = inserted?.[0]?.id;
-      } catch (err) {
-        console.error("Failed to insert new signal:", err.message);
-      }
+    if (existingSig) {
+      await supabase
+        .from("signals")
+        .update({ pnl: cashPnl, outcome, resolved_outcome, outcome_at: new Date() })
+        .eq("id", existingSig.id);
+    } else if (!existingTxs.has(pos.asset)) {
+      await supabase.from("signals").insert({
+        wallet_id: wallet.id,
+        signal: pos.title,
+        market_name: pos.title,
+        market_id: pos.conditionId,
+        event_slug: eventSlug,
+        side: pos.side?.toUpperCase() || "BUY",
+        picked_outcome: pickedOutcome,
+        tx_hash: pos.asset,
+        pnl: cashPnl,
+        outcome,
+        resolved_outcome,
+        outcome_at: new Date(),
+        created_at: new Date(pos.timestamp * 1000 || Date.now()),
+        wallet_count: 1,
+        wallet_set: [String(wallet.id)],
+        tx_hashes: [pos.asset],
+      });
     }
 
     // Update losing streak if LOSS
     if (cashPnl < 0) {
-      try {
-        const { data: walletData } = await supabase
-          .from("wallets")
-          .select("losing_streak")
-          .eq("id", wallet.id)
-          .maybeSingle();
-
-        const newStreak = (walletData?.losing_streak || 0) + 1;
-        await supabase.from("wallets").update({ losing_streak: newStreak }).eq("id", wallet.id);
-      } catch (err) {
-        console.error("Failed to update losing streak:", err.message);
-      }
+      const { data: walletData } = await supabase
+        .from("wallets")
+        .select("losing_streak")
+        .eq("id", wallet.id)
+        .maybeSingle();
+      const newStreak = (walletData?.losing_streak || 0) + 1;
+      await supabase.from("wallets").update({ losing_streak: newStreak }).eq("id", wallet.id);
     }
   }
 
@@ -311,11 +286,28 @@ async function trackWallet(wallet) {
   await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
 }
 
+// ---------------------- Main loop ----------------------
+async function main() {
+  console.log("🚀 POLYMARKET TRACKER LIVE 🚀");
 
-  // Update last_checked
-  await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
+  await fetchAndInsertLeaderboardWallets();
+
+  setInterval(async () => {
+    try {
+      const { data: wallets } = await supabase.from("wallets").select("*");
+      if (!wallets?.length) return;
+
+      console.log(`Wallets loaded: ${wallets.length}`);
+
+      await Promise.all(wallets.map(trackWallet));
+    } catch (err) {
+      console.error("Loop error:", err);
+      await sendTelegram(`Tracker loop error: ${err.message}`);
+    }
+  }, POLL_INTERVAL);
 }
 
+main();
 
 /* ===========================
    Send Result Notes
@@ -443,35 +435,6 @@ cron.schedule("0 7 * * *", () => {
   console.log("Running daily summary + leaderboard + new wallets fetch...");
   sendDailySummary();
 }, { timezone: TIMEZONE });
-
-/* ===========================
-   Main Loop
-=========================== */
-async function main() {
-  console.log("🚀 POLYMARKET TRACKER LIVE 🚀");
-
-  // Fetch leaderboard wallets once at startup
-  await fetchAndInsertLeaderboardWallets();
-
-  // Main polling loop
-  setInterval(async () => {
-    try {
-      const { data: wallets } = await supabase.from("wallets").select("*");
-      if (!wallets?.length) return;
-
-      console.log(`Wallets loaded: ${wallets.length}`);
-
-      // Process each wallet (insert new signals + resolve pending automatically)
-      await Promise.all(wallets.map(trackWallet));
-    } catch (err) {
-      console.error("Loop error:", err);
-      await sendTelegram(`Tracker loop error: ${err.message}`);
-    }
-  }, POLL_INTERVAL);
-}
-
-// Start the tracker
-main();
 
 
 /* ===========================

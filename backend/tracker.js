@@ -258,17 +258,24 @@ async function trackWallet(wallet) {
   const existingTxs = new Set(existingSignals?.map(s => s.tx_hash));
 
   for (const pos of positions) {
-    const pickedOutcome = pos.outcome || derivePickedOutcome(pos);
+    const pickedOutcome = pos.outcome || `OPTION_${pos.outcomeIndex}`;
     const eventSlug = pos.eventSlug || pos.slug;
     const cashPnl = pos.cashPnl ?? null;
 
-let outcome = "Pending";
+let outcome = "Pending"; // default
 let resolved_outcome = null;
 
-if (cashPnl !== null) {
-  outcome = cashPnl < 0 ? "LOSS" : "WIN";
-  resolved_outcome = cashPnl < 0 ? pos.oppositeOutcome || pickedOutcome : pickedOutcome;
+if (pos.cashPnl !== null) { // resolved
+  if (pos.cashPnl > 0) {
+    outcome = "WIN";
+    resolved_outcome = pickedOutcome; // correct prediction
+  } else {
+    outcome = "LOSS";
+    resolved_outcome = pos.oppositeOutcome || pickedOutcome; // lost prediction
+  }
 }
+
+const pnl = pos.cashPnl; // can be positive, negative, or null if unresolved
 
 
     const existingSig = existingSignals.find(s => s.market_id === pos.conditionId);
@@ -279,24 +286,24 @@ if (cashPnl !== null) {
         .update({ pnl: cashPnl, outcome, resolved_outcome, outcome_at: cashPnl !== null ? new Date() : null })
         .eq("id", existingSig.id);
     } else if (!existingTxs.has(pos.asset)) {
-      await supabase.from("signals").insert({
-        wallet_id: wallet.id,
-        signal: pos.title,
-        market_name: pos.title,
-        market_id: pos.conditionId,
-        event_slug: eventSlug,
-        side: pos.side?.toUpperCase() || "BUY",
-        picked_outcome: pickedOutcome,
-        tx_hash: pos.asset,
-        pnl: cashPnl,
-        outcome,
-        resolved_outcome,
-        outcome_at: cashPnl !== null ? new Date() : null,
-        created_at: new Date(pos.timestamp * 1000 || Date.now()),
-        wallet_count: 1,
-        wallet_set: [String(wallet.id)],
-        tx_hashes: [pos.asset],
-      });
+await supabase.from("signals").insert({
+  wallet_id: wallet.id,
+  signal: pos.title,
+  market_name: pos.title,
+  market_id: pos.conditionId,
+  event_slug: pos.eventSlug,
+  side: pos.side?.toUpperCase() || "BUY",
+  picked_outcome: pickedOutcome,
+  tx_hash: pos.asset,
+  pnl: pos.cashPnl,
+  outcome,             // "WIN", "LOSS", or "Pending"
+  resolved_outcome,
+  outcome_at: pos.cashPnl !== null ? new Date() : null,
+  created_at: new Date(pos.timestamp * 1000 || Date.now()),
+  wallet_count: 1,
+  wallet_set: [String(wallet.id)],
+  tx_hashes: [pos.asset],
+});
     }
 
     // Update losing streak

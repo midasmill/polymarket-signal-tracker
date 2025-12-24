@@ -116,6 +116,192 @@ async function fetchMarket(marketId) {
 }
 
 /* ===========================
+   VW Helpers
+=========================== */
+const resolutionCache = new Map();
+
+async function fetchAllBuyCashTrades(identity) {
+  let all = [];
+  let offset = 0;
+  const limit = 100;
+
+  while (true) {
+    const url =
+      `https://data-api.polymarket.com/trades` +
+      `?user=${identity}` +
+      `&side=BUY` +
+      `&takerOnly=true` +
+      `&filterType=CASH` +
+      `&limit=${limit}` +
+      `&offset=${offset}`;
+
+    const page = await fetchWithRetry(url, {
+      headers: { "User-Agent": "Mozilla/5.0" }
+    });
+
+    if (!Array.isArray(page) || page.length === 0) break;
+
+    all.push(...page);
+    if (page.length < limit) break;
+    offset += limit;
+  }
+
+  return all;
+}
+
+async function fetchMarketResolution(conditionId) {
+  if (marketResolutionCache.has(conditionId)) return marketResolutionCache.get(conditionId);
+
+  // 1️⃣ Check Supabase cache
+  const { data } = await supabase
+    .from("market_resolutions")
+    .select("winning_outcome")
+    .eq("market_id", conditionId)
+    .maybeSingle();
+
+  if (data?.winning_outcome) {
+    marketResolutionCache.set(conditionId, data.winning_outcome);
+    return data.winning_outcome;
+  }
+
+  // 2️⃣ Fetch from Gamma API
+  try {
+    const res = await fetch(`https://gamma-api.polymarket.com/public-search?q=${conditionId}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const gammaData = await res.json();
+    const winningOutcome = gammaData.results?.[0]?.winningOutcome || null;
+
+    if (winningOutcome) {
+      marketResolutionCache.set(conditionId, winningOutcome);
+      // persist in Supabase
+      await supabase
+        .from("market_resolutions")
+        .upsert({ market_id: conditionId, winning_outcome: winningOutcome });
+    }
+
+    return winningOutcome;
+
+  } catch (err) {
+    console.error(`Failed to fetch market resolution ${conditionId}:`, err.message);
+    return null;
+  }
+}
+
+/* ===========================
+   Fetch all buy/cash trades for VW
+=========================== */
+async function fetchAllBuyCashTrades(wallet) {
+  let trades = [];
+  if (wallet.polymarket_proxy_wallet) {
+    trades = await fetchLatestTrades(wallet.polymarket_proxy_wallet);
+  }
+  if (trades.length === 0 && wallet.polymarket_username) {
+    trades = await fetchLatestTrades(wallet.polymarket_username);
+  }
+
+  // Filter for BUY & CASH trades if needed
+  return trades.filter(t => t.side === "BUY" /* && t.filterType==="CASH" if available */);
+}
+
+/* ===========================
+   VW Calculation per Wallet
+=========================== */
+async function calculateVolumeWeightedWinRate(wallet) {
+  const trades = await fetchAllBuyCashTrades(wallet);
+  if (!trades || trades.length === 0) return null;
+
+  let totalVolume = 0;
+  let winningVolume = 0;
+
+  for (const t of trades) {
+    const resolvedSide = await fetchMarketResolution(t.conditionId);
+    if (!resolvedSide) continue;
+     
+    totalVolume += t.size;
+    if (t.side.toUpperCase() === resolvedSide.toUpperCase()) {
+      winningVolume += t.size;
+    }
+  }
+
+  return totalVolume > 0 ? winningVolume / totalVolume : null;
+}
+
+/* ===========================
+   Daily VW + Leaderboard + Pre-Signals
+=========================== */
+async function runDailyUpdate() {
+  const now = new Date();
+     console.log(`\n=== Daily Polymarket Update (${now.toLocaleString()}) ===`);
+
+  // 1️⃣ Update VW with progress & detailed info
+  const { data: wallets } = await supabase.from("wallets").select("*");
+  if (wallets?.length) {
+    console.log(`\n-- Updating Volume-Weighted Win Rates for ${wallets.length} wallets --`);
+    const total = wallets.length;
+    let processed = 0;
+     
+    for (const wallet of wallets) {
+      try {
+        const trades = await fetchAllBuyCashTrades(wallet);
+        const resolvedTrades = [];
+        let totalVolume = 0;
+        let winningVolume = 0;
+
+        for (const t of trades) {
+          const resolvedSide = await fetchMarketResolution(t.conditionId);
+          if (!resolvedSide) continue;
+          resolvedTrades.push(t);
+          totalVolume += t.size;
+          if (t.side.toUpperCase() === resolvedSide.toUpperCase()) winningVolume += t.size;
+        }
+
+         
+        const vw = totalVolume > 0 ? winningVolume / totalVolume : null;
+
+        if (vw === null) {
+          console.log(`Wallet ${wallet.id}: no resolved trades, skipping`);
+        } else {
+          const shouldPause = vw < 0.80;
+
+          await supabase
+            .from("wallets")
+            .update({ win_rate: vw, paused: shouldPause })
+            .eq("id", wallet.id);
+
+          console.log(
+                        `Wallet ${wallet.id}: VW=${(vw * 100).toFixed(2)}% | ` +
+            `Resolved Trades=${resolvedTrades.length} | Total Volume=${totalVolume.toFixed(2)} | ` +
+            `${shouldPause ? "PAUSED" : "ACTIVE"}`
+          );
+        }
+
+      } catch (err) {
+        console.error(`VW calc failed for wallet ${wallet.id}:`, err.message);
+      }
+
+      processed++;
+            const percent = ((processed / total) * 100).toFixed(1);
+      process.stdout.write(`Progress: ${processed}/${total} wallets (${percent}%)\r`);
+    }
+    console.log("\n-- VW Update Complete --\n");
+  }
+
+  // 2️⃣ Leaderboard fetch
+  console.log("-- Fetching new leaderboard wallets --");
+  await updateLeaderboard();
+  await fetchAndInsertLeaderboardWallets();
+  console.log("-- Leaderboard Update Complete --\n");
+
+  // 3️⃣ Pre-signals update
+    console.log("-- Updating Pre-Signals --");
+  await updatePreSignals();
+  console.log("-- Pre-Signals Update Complete --\n");
+
+  console.log(`=== Daily Update Complete (${new Date().toLocaleString()}) ===\n`);
+}
+
+
+/* ===========================
    Confidence helpers
 =========================== */
 function getConfidenceEmoji(count) {
@@ -169,7 +355,7 @@ function getMajorityConfidence(counts) {
 }
 
 /* ===========================
-   Track Wallet Trades
+   Track Wallet Trades (with conditionId)
 =========================== */
 async function trackWallet(wallet) {
   if (wallet.paused) return;
@@ -216,17 +402,17 @@ async function trackWallet(wallet) {
     if (existing) continue;
 
     await supabase.from("signals").insert({
-      wallet_id: wallet.id,
-      signal: trade.title,
-      market_name: trade.title,
-      market_id: trade.conditionId,
-      side: String(trade.outcome).toUpperCase(),
-      tx_hash: trade.transactionHash,
-      outcome: "Pending",
-      created_at: new Date(trade.timestamp * 1000),
-      wallet_count: 1,
-      wallet_set: [String(wallet.id)],
-      tx_hashes: [trade.transactionHash],
+  wallet_id: wallet.id,
+  signal: trade.title,
+  market_name: trade.title,
+  market_id: trade.conditionId,    // ✅ store conditionId
+  side: String(trade.outcome).toUpperCase(),
+  tx_hash: trade.transactionHash,
+  outcome: "Pending",
+  created_at: new Date(trade.timestamp * 1000),
+  wallet_count: 1,
+  wallet_set: [String(wallet.id)],
+  tx_hashes: [trade.transactionHash],
     });
 
     insertedCount++;
@@ -319,6 +505,55 @@ async function updatePendingOutcomes() {
 
   if (resolvedAny) await sendMajoritySignals();
 }
+
+
+
+
+/* ===========================
+   Daily wallet VW update + auto-pause
+=========================== */
+
+async function updateWalletWinRates() {
+  const { data: wallets } = await supabase.from("wallets").select("*");
+  if (!wallets?.length) return;
+
+  console.log(`\n=== Volume-Weighted Win Rate Update (${new Date().toLocaleString()}) ===`);
+
+  for (const wallet of wallets) {
+    try {
+      const vw = await calculateVolumeWeightedWinRate(wallet);
+
+      if (vw === null) {
+        console.log(`Wallet ${wallet.id}: no resolved trades, skipping`);
+        continue;
+      }
+
+      const shouldPause = vw < 0.80;
+
+      await supabase
+        .from("wallets")
+        .update({
+          win_rate: vw,
+          paused: shouldPause
+        })
+        .eq("id", wallet.id);
+
+      console.log(
+        `Wallet ${wallet.id}: VW=${(vw * 100).toFixed(2)}% | ` +
+        `${shouldPause ? "PAUSED" : "ACTIVE"}`
+      );
+
+    } catch (err) {
+      console.error(`VW calc failed for wallet ${wallet.id}:`, err.message);
+    }
+  }
+
+  console.log(`=== VW Update Complete ===\n`);
+}
+
+
+
+
 
 /* ===========================
    Send majority signals
@@ -504,7 +739,8 @@ async function sendDailySummary() {
     .update({ content: toBlockquote(summaryText), public: true })
     .eq("slug", "polymarket-millionaires");
 
-  // Update leaderboard and fetch new wallets
+  // Update wallet VW, leaderboard and fetch new wallets
+  await updateWalletWinRates();
   await updateLeaderboard();
   await fetchAndInsertLeaderboardWallets();
 }
@@ -513,6 +749,7 @@ async function sendDailySummary() {
    Cron daily at 7am ET
 =========================== */
 cron.schedule("0 7 * * *", () => {
+   runDailyUpdate().catch(err => console.error("Daily update failed:", err.message));
   console.log("Running daily summary + leaderboard + new wallets fetch...");
   sendDailySummary();
 }, { timezone: TIMEZONE });

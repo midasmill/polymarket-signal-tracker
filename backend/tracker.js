@@ -440,6 +440,27 @@ async function trackWallet(wallet) {
   else console.log(`Wallet ${wallet.id} — winRate: ${winRate.toFixed(2)}%, losingStreak: ${losingStreak}, livePicks: ${livePicks}, paused: ${paused}`);
 }
 
+// Clear old live picks for this wallet
+await supabase.from("wallet_live_picks").delete().eq("wallet_id", wallet.id);
+
+// Insert current unresolved / new picks
+const livePicks = positions.filter(pos => pos.cashPnl === null || pos.outcome === null);
+
+if (livePicks.length) {
+  const rows = livePicks.map(pos => ({
+    wallet_id: wallet.id,
+    market_id: pos.conditionId,
+    picked_outcome: pos.outcome || `OPTION_${pos.outcomeIndex}`,
+    side: pos.side?.toUpperCase() || "BUY",
+    pnl: pos.cashPnl ?? null,
+    outcome: pos.cashPnl !== null ? (pos.cashPnl > 0 ? "WIN" : "LOSS") : "Pending",
+    resolved_outcome: pos.oppositeOutcome || null,
+    fetched_at: new Date(),
+  }));
+  await supabase.from("wallet_live_picks").insert(rows);
+}
+
+
 /* ===========================
    Update Wallet Metrics
 ========================== */

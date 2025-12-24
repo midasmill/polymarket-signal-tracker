@@ -330,13 +330,13 @@ async function fetchWalletPositions(userId) {
 }
 
 /* ===========================
-   Track Wallet Trades (fixed losing streak + unresolved picks)
+   Track Wallet Trades (fixed losing streak + live/resolved)
 ========================== */
 async function trackWallet(wallet) {
   const userId = wallet.polymarket_proxy_wallet || wallet.polymarket_username;
   if (!userId) return;
 
-  // Fetch wallet positions safely
+  // 1️⃣ Fetch wallet positions safely
   const positions = await fetchWalletPositions(userId);
 
   if (!positions.length) {
@@ -344,7 +344,7 @@ async function trackWallet(wallet) {
     return;
   }
 
-  // Fetch existing signals for wallet
+  // 2️⃣ Fetch existing signals for wallet
   const { data: existingSignals } = await supabase
     .from("signals")
     .select("id, tx_hash, market_id, outcome")
@@ -352,9 +352,7 @@ async function trackWallet(wallet) {
 
   const existingTxs = new Set(existingSignals?.map(s => s.tx_hash));
 
-  // Map to track wins/losses per market for streak calculation
-  const marketMap = {};
-
+  // 3️⃣ Process positions into signals
   for (const pos of positions) {
     const marketId = pos.conditionId;
     const pickedOutcome = pos.outcome || `OPTION_${pos.outcomeIndex}`;
@@ -373,11 +371,7 @@ async function trackWallet(wallet) {
       }
     }
 
-    if (!marketMap[marketId]) marketMap[marketId] = { wins: 0, losses: 0 };
-    if (outcome === "WIN") marketMap[marketId].wins++;
-    else if (outcome === "LOSS") marketMap[marketId].losses++;
-
-    // Insert or update signals
+    // Insert or update signal
     const existingSig = existingSignals.find(s => s.market_id === marketId);
     if (existingSig) {
       await supabase
@@ -399,37 +393,53 @@ async function trackWallet(wallet) {
         resolved_outcome: resolvedOutcome,
         outcome_at: pnl !== null ? new Date() : null,
         created_at: new Date(pos.timestamp * 1000 || Date.now()),
-        wallet_count: 1,
-        wallet_set: [String(wallet.id)],
-        tx_hashes: [pos.asset],
       });
     }
   }
 
-  // Calculate losing streak: consecutive markets lost
-  const lostMarkets = Object.values(marketMap).filter(m => m.losses > m.wins).length;
-  const { data: walletData } = await supabase
+  // 4️⃣ Fetch all resolved signals to compute metrics correctly
+  const { data: resolvedSignals } = await supabase
+    .from("signals")
+    .select("outcome, created_at")
+    .eq("wallet_id", wallet.id)
+    .in("outcome", ["WIN", "LOSS"])
+    .order("created_at", { ascending: true });
+
+  // 5️⃣ Calculate consecutive losing streak
+  let losingStreak = 0;
+  if (resolvedSignals?.length) {
+    for (let i = resolvedSignals.length - 1; i >= 0; i--) {
+      if (resolvedSignals[i].outcome === "LOSS") losingStreak++;
+      else break;
+    }
+  }
+
+  // 6️⃣ Calculate win rate
+  const totalResolved = resolvedSignals?.length || 0;
+  const wins = resolvedSignals?.filter(s => s.outcome === "WIN").length || 0;
+  const winRate = totalResolved > 0 ? (wins / totalResolved) * 100 : 0;
+
+  // 7️⃣ Count live/unresolved signals
+  const { data: liveSignals } = await supabase
+    .from("signals")
+    .select("id")
+    .eq("wallet_id", wallet.id)
+    .eq("outcome", "Pending");
+  const livePicks = liveSignals?.length || 0;
+
+  // 8️⃣ Determine pause status
+  const paused = losingStreak >= LOSING_STREAK_THRESHOLD || winRate < 80;
+
+  // 9️⃣ Update wallet once
+  const { error } = await supabase
     .from("wallets")
-    .select("losing_streak, win_rate")
-    .eq("id", wallet.id)
-    .maybeSingle();
+    .update({ losing_streak: losingStreak, win_rate: winRate, live_picks: livePicks, paused, last_checked: new Date() })
+    .eq("id", wallet.id);
 
-  const prevStreak = walletData?.losing_streak || 0;
-  const newStreak = lostMarkets > 0 ? prevStreak + lostMarkets : 0;
-
-  // Calculate win rate
-  const totalResolved = Object.values(marketMap).reduce((sum, m) => sum + m.wins + m.losses, 0);
-  const totalWins = Object.values(marketMap).reduce((sum, m) => sum + m.wins, 0);
-  const winRate = totalResolved > 0 ? (totalWins / totalResolved) * 100 : 0;
-
-  // Update wallet
-  await supabase.from("wallets").update({
-    losing_streak: newStreak,
-    win_rate: winRate,
-    paused: newStreak >= LOSING_STREAK_THRESHOLD || winRate < 80,
-    last_checked: new Date(),
-  }).eq("id", wallet.id);
+  if (error) console.error(`Wallet ${wallet.id} update failed:`, error);
+  else console.log(`Wallet ${wallet.id} — winRate: ${winRate.toFixed(2)}%, losingStreak: ${losingStreak}, livePicks: ${livePicks}, paused: ${paused}`);
 }
+
 
 
 
@@ -473,53 +483,70 @@ async function main() {
 async function updateWalletMetricsJS() {
   try {
     // 1️⃣ Fetch all wallets
-    const { data: wallets } = await supabase.from("wallets").select("id");
-    if (!wallets?.length) return;
+    const { data: wallets, error: walletsErr } = await supabase.from("wallets").select("id");
+    if (walletsErr) {
+      console.error("Failed to fetch wallets:", walletsErr);
+      return;
+    }
+    if (!wallets?.length) return console.log("No wallets found");
 
     for (const wallet of wallets) {
-      // 2️⃣ Fetch all resolved signals for this wallet
-      const { data: resolvedSignals } = await supabase
+      // 2️⃣ Fetch resolved signals (WIN/LOSS) for this wallet
+      const { data: resolvedSignals, error: signalsErr } = await supabase
         .from("signals")
         .select("outcome, created_at")
         .eq("wallet_id", wallet.id)
         .in("outcome", ["WIN", "LOSS"])
         .order("created_at", { ascending: true });
 
+      if (signalsErr) {
+        console.error(`Failed to fetch resolved signals for wallet ${wallet.id}:`, signalsErr);
+        continue;
+      }
+
       // Win rate
       const totalResolved = resolvedSignals?.length || 0;
       const wins = resolvedSignals?.filter(s => s.outcome === "WIN").length || 0;
       const winRate = totalResolved > 0 ? (wins / totalResolved) * 100 : 0;
 
-      // Consecutive losing streak (from most recent resolved signal)
+      // Consecutive losing streak from most recent resolved signal
       let losingStreak = 0;
       if (resolvedSignals?.length) {
         for (let i = resolvedSignals.length - 1; i >= 0; i--) {
           if (resolvedSignals[i].outcome === "LOSS") losingStreak++;
-          else break;
+          else break; // streak ends at first WIN
         }
       }
 
-      // Live picks (unresolved signals)
-const { data: liveSignals } = await supabase
-  .from("signals")
-  .select("id")
-  .eq("wallet_id", wallet.id)
-  .eq("outcome", "Pending");
-const livePicks = liveSignals?.length || 0;
+      // Live/unresolved picks
+      const { data: liveSignals, error: liveErr } = await supabase
+        .from("signals")
+        .select("id")
+        .eq("wallet_id", wallet.id)
+        .eq("outcome", "Pending");
 
-      // Determine pause status
+      if (liveErr) {
+        console.error(`Failed to fetch live signals for wallet ${wallet.id}:`, liveErr);
+      }
+      const livePicks = liveSignals?.length || 0;
+
+      // Pause status
       const paused = losingStreak >= LOSING_STREAK_THRESHOLD || winRate < 80;
 
-      // 3️⃣ Update wallet
-      await supabase.from("wallets").update({
-        win_rate: winRate,
-        losing_streak: losingStreak,
-        live_picks: livePicks,
-        paused,
-        last_checked: new Date()
-      }).eq("id", wallet.id);
+      // 3️⃣ Update wallet with error check
+      const { data, error } = await supabase
+        .from("wallets")
+        .update({
+          win_rate: winRate,
+          losing_streak: losingStreak,
+          live_picks: livePicks,
+          paused,
+          last_checked: new Date()
+        })
+        .eq("id", wallet.id);
 
-      console.log(`Wallet ${wallet.id} — winRate: ${winRate.toFixed(2)}%, losingStreak: ${losingStreak}, livePicks: ${livePicks}, paused: ${paused}`);
+      if (error) console.error(`Wallet ${wallet.id} update failed:`, error);
+      else console.log(`Wallet ${wallet.id} — winRate: ${winRate.toFixed(2)}%, losingStreak: ${losingStreak}, livePicks: ${livePicks}, paused: ${paused}`);
     }
 
     console.log("✅ Wallet metrics updated successfully.");
@@ -527,6 +554,7 @@ const livePicks = liveSignals?.length || 0;
     console.error("Error updating wallet metrics:", err.message);
   }
 }
+
 
 
 

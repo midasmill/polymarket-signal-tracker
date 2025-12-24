@@ -581,7 +581,7 @@ async function fetchAndInsertLeaderboardWallets() {
 
   for (const period of timePeriods) {
     try {
-      const url = `https://data-api.polymarket.com/v1/leaderboard?category=OVERALL&timePeriod=${period}&orderBy=PNL&limit=100`;
+      const url = `https://data-api.polymarket.com/v1/leaderboard?category=OVERALL&timePeriod=${period}&orderBy=PNL&limit=50`;
       const data = await fetchWithRetry(url, { headers: { "User-Agent": "Mozilla/5.0" } });
       console.log(`[LEADERBOARD][${period}] Fetched=${data.length}`);
 
@@ -599,8 +599,8 @@ async function fetchAndInsertLeaderboardWallets() {
           totalSkipped++;
           continue;
         }
-        if (entry.vol >= 6 * entry.pnl) {
-          console.log(`Skipping wallet ${entry.proxyWallet}: vol ${entry.vol} >= 6 * pnl ${entry.pnl}`);
+        if (entry.vol >= 10 * entry.pnl) {
+          console.log(`Skipping wallet ${entry.proxyWallet}: vol ${entry.vol} >= 10 * pnl ${entry.pnl}`);
           totalSkipped++;
           continue;
         }

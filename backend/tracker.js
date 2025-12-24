@@ -703,21 +703,39 @@ setInterval(() => {
 ========================== */
 async function trackerLoop() {
   try {
-    // 1️⃣ Fetch wallets from DB
+    // 1️⃣ Fetch all wallets
     const { data: wallets } = await supabase.from("wallets").select("*");
-    if (!wallets?.length) return;
+    if (!wallets?.length) return console.log("No wallets found");
 
-    // 2️⃣ Track each wallet
-    await Promise.all(wallets.map(trackWallet));
+    console.log(`Tracking ${wallets.length} wallets...`);
 
-    // 3️⃣ Update wallet metrics (win_rate, losing streak, paused)
-   await updateWalletMetricsJS();
+    // 2️⃣ Track each wallet (fetch positions & update signals)
+    for (const wallet of wallets) {
+      try {
+        await trackWallet(wallet);
+      } catch (err) {
+        console.error(`Error tracking wallet ${wallet.id}:`, err.message);
+      }
+    }
+
+    // 3️⃣ Recalculate wallet metrics (win_rate, losing streak, paused)
+    try {
+      await updateWalletMetricsJS();
+    } catch (err) {
+      console.error("Error updating wallet metrics:", err.message);
+    }
 
     // 4️⃣ Send majority signals
-    await sendMajoritySignals();
+    try {
+      await sendMajoritySignals();
+    } catch (err) {
+      console.error("Error sending majority signals:", err.message);
+    }
+
+    console.log("✅ Tracker loop completed successfully");
   } catch (err) {
-    console.error("Loop error:", err);
-    // Telegram error messages are disabled
+    console.error("Loop error:", err.message);
+    // Telegram notifications disabled to avoid spamming
     // await sendTelegram(`Tracker loop error: ${err.message}`);
   }
 }
@@ -725,8 +743,8 @@ async function trackerLoop() {
 // Run immediately on startup
 trackerLoop();
 
-// Then repeat every 60 seconds
-setInterval(trackerLoop, 60_000);
+// Repeat every POLL_INTERVAL milliseconds
+setInterval(trackerLoop, POLL_INTERVAL);
 
    
 /* ===========================

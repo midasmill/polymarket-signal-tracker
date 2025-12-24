@@ -630,12 +630,21 @@ async function sendDailySummary() {
 }
 
 /* ===========================
-   Cron daily at 7am ET
+   Cron daily at 7am
 =========================== */
 cron.schedule("0 7 * * *", () => {
   console.log("Running daily summary + leaderboard + new wallets fetch...");
   sendDailySummary();
 }, { timezone: TIMEZONE });
+
+
+/* ===========================
+   Heartbeat
+=========================== */
+
+setInterval(() => {
+  console.log(`[HEARTBEAT] Tracker alive @ ${new Date().toISOString()}`);
+}, 60_000); // every 60 seconds
 
 
 /* ===========================
@@ -646,3 +655,5 @@ http.createServer((req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain" });
   res.end("Polymarket tracker running\n");
 }).listen(PORT, () => console.log(`Tracker listening on port ${PORT}`));
+
+

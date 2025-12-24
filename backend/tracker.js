@@ -719,7 +719,7 @@ async function updatePreSignals() {
    Fetch new leaderboard wallets from Polymarket (Bootstrap + VW)
 =========================== */
 async function fetchAndInsertLeaderboardWallets() {
-  const timePeriod = ["DAY", "WEEK"];
+  const timePeriod = ["DAY", "WEEK", "MONTH", "ALL"];
   const pageSize = 200; // fetch up to 100 at once
   let totalInserted = 0;
 

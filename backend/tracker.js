@@ -432,7 +432,9 @@ async function main() {
       }
 
       // ✅ Update win rates and losing streaks after all wallets processed
-await updateWalletMetricsJS();
+await trackWallet(wallet);        // fetch live/resolved picks
+await updateWalletMetricsJS();    // recalc win rate & losing streak
+
 
 } catch (err) {
   console.error("Loop error:", err);

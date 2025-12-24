@@ -802,6 +802,79 @@ async function fetchAndInsertLeaderboardWallets() {
 
 
 
+/* ===========================
+   Fetch resolved trades in last 7 days
+=========================== */
+async function fetchResolvedTradesLast7Days(identity) {
+  const allTrades = [];
+  const limit = 100;
+  let offset = 0;
+  const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+
+  while (true) {
+    const url = `https://data-api.polymarket.com/trades` +
+                `?user=${identity}` +
+                `&takerOnly=true` +
+                `&side=BUY` +
+                `&limit=${limit}&offset=${offset}`;
+
+    let tradesPage;
+    try {
+      tradesPage = await fetchWithRetry(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+    } catch (err) {
+      console.error(`Failed fetching trades for ${identity}: ${err.message}`);
+      break;
+    }
+
+    if (!Array.isArray(tradesPage) || tradesPage.length === 0) break;
+
+    // Filter by date (last 7 days)
+    const recentTrades = tradesPage.filter(t => t.timestamp * 1000 >= sevenDaysAgo);
+    if (recentTrades.length === 0) break;
+
+    allTrades.push(...recentTrades);
+
+    if (tradesPage.length < limit) break; // last page
+    offset += limit;
+  }
+
+  // Fetch resolutions for each trade and only keep resolved ones
+  const resolvedTrades = [];
+  for (const t of allTrades) {
+    let resolvedSide;
+    try {
+      resolvedSide = await fetchMarketResolution(t.conditionId);
+    } catch (err) {
+      console.warn(`Skipping trade ${t.transactionHash} - market not found or unresolved`);
+      continue;
+    }
+    if (!resolvedSide) continue;
+    resolvedTrades.push({ ...t, resolvedSide });
+  }
+
+  return resolvedTrades;
+}
+
+/* ===========================
+   Calculate VW using resolved trades
+=========================== */
+async function calculateVWLast7Days(wallet) {
+  const identity = wallet.polymarket_proxy_wallet || wallet.polymarket_username;
+  const trades = await fetchResolvedTradesLast7Days(identity);
+  if (!trades || trades.length === 0) return null;
+
+  let totalVolume = 0;
+  let winningVolume = 0;
+
+  for (const t of trades) {
+    totalVolume += t.size;
+    if (t.side.toUpperCase() === t.resolvedSide.toUpperCase()) {
+      winningVolume += t.size;
+    }
+  }
+
+  return totalVolume > 0 ? winningVolume / totalVolume : null;
+}
 
 
 

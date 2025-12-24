@@ -65,8 +65,6 @@ async function sendTelegram(text, useBlockquote = false) {
     console.error("Telegram send failed:", err.message);
   }
 }
-
-async function fetchAllBuyCashTrades(wallet) {wallet
                                                 
 /* ===========================
    Polymarket API with retries + cache

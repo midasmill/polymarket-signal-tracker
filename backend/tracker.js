@@ -115,39 +115,6 @@ async function recalcAllWalletStats() {
 }
 
 /* ===========================
-   Loop function
-=========================== */
-async function trackerLoop() {
-  try {
-    console.log("🔄 Tracker loop start");
-
-    // fetch active wallets
-    const { data: wallets } = await supabase
-      .from("wallets")
-      .select("*")
-      .eq("paused", false);
-
-    if (!wallets?.length) {
-      console.log("No active wallets");
-      return;
-    }
-
-    for (const wallet of wallets) {
-      await trackWallet(wallet);
-    }
-
-    // update metrics AFTER processing trades
-    await updateWalletWinRatesAndPauseJS();
-
-    console.log("✅ Tracker loop complete");
-} catch (err) {
-  console.error("Loop error:", err);
-
-  // ❌ Do NOT send loop-level errors to Telegram
-  // await sendTelegram(`Tracker loop error: ${err.message}`);
-}
-
-/* ===========================
    Markdown helper
 =========================== */
 function toBlockquote(text) {
@@ -631,7 +598,37 @@ setInterval(() => {
   console.log(`[HEARTBEAT] Tracker alive @ ${new Date().toISOString()}`);
 }, 60_000); // every 60 seconds
 
+/* ===========================
+   Tracker loop
+========================== */
+async function trackerLoop() {
+  try {
+    // 1️⃣ Fetch wallets from DB
+    const { data: wallets } = await supabase.from("wallets").select("*");
+    if (!wallets?.length) return;
 
+    // 2️⃣ Track each wallet
+    await Promise.all(wallets.map(trackWallet));
+
+    // 3️⃣ Update wallet metrics (win_rate, losing streak, paused)
+    await updateWalletMetricsJS();
+
+    // 4️⃣ Send majority signals
+    await sendMajoritySignals();
+  } catch (err) {
+    console.error("Loop error:", err);
+    // Telegram error messages are disabled
+    // await sendTelegram(`Tracker loop error: ${err.message}`);
+  }
+}
+
+// Run immediately on startup
+trackerLoop();
+
+// Then repeat every 60 seconds
+setInterval(trackerLoop, 60_000);
+
+   
 /* ===========================
    Keep Render happy
 =========================== */
@@ -641,12 +638,3 @@ http.createServer((req, res) => {
   res.end("Polymarket tracker running\n");
 }).listen(PORT, () => console.log(`Tracker listening on port ${PORT}`));
 
-/* ===========================
-   Tracker loop
-========================== */
-
-// Run immediately on startup
-trackerLoop();
-
-// Then repeat every 60 seconds
-setInterval(trackerLoop, 60_000);

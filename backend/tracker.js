@@ -575,38 +575,69 @@ async function sendMajoritySignals() {
 =========================== */
 async function fetchAndInsertLeaderboardWallets() {
   const timePeriods = ["DAY", "WEEK", "MONTH", "ALL"];
+  let totalFetched = 0;
   let totalInserted = 0;
+  let totalSkipped = 0;
 
   for (const period of timePeriods) {
     try {
       const url = `https://data-api.polymarket.com/v1/leaderboard?category=OVERALL&timePeriod=${period}&orderBy=PNL&limit=50`;
       const data = await fetchWithRetry(url, { headers: { "User-Agent": "Mozilla/5.0" } });
-      console.log(`[LEADERBOARD][${period}] Fetched=${data.length}`);
+      console.log(`[LEADERBOARD][${period}] Fetched raw: ${data.length} entries`);
+
+      totalFetched += data.length;
 
       for (const entry of data) {
-        if (!entry.proxyWallet || entry.pnl < 1000 || entry.vol >= 6 * entry.pnl) continue;
+        // Skip wallets without proxyWallet or failing filters
+        if (!entry.proxyWallet) {
+          console.log(`[LEADERBOARD][${period}] Skipped: missing proxyWallet`);
+          totalSkipped++;
+          continue;
+        }
+        if (entry.pnl < 1000) {
+          console.log(`[LEADERBOARD][${period}] Skipped: pnl ${entry.pnl} < 1000`);
+          totalSkipped++;
+          continue;
+        }
+        if (entry.vol >= 6 * entry.pnl) {
+          console.log(`[LEADERBOARD][${period}] Skipped: vol ${entry.vol} >= 6 * pnl ${entry.pnl}`);
+          totalSkipped++;
+          continue;
+        }
 
-        const { data: existing } = await supabase.from("wallets").select("id")
-          .or(`polymarket_proxy_wallet.eq.${entry.proxyWallet},polymarket_username.eq.${entry.userName}`).maybeSingle();
-        if (existing) continue;
+        // Check if wallet already exists
+        const { data: existing } = await supabase.from("wallets")
+          .select("id")
+          .or(`polymarket_proxy_wallet.eq.${entry.proxyWallet},polymarket_username.eq.${entry.userName}`)
+          .maybeSingle();
+        if (existing) {
+          console.log(`[LEADERBOARD][${period}] Skipped: already in DB - ${entry.proxyWallet}`);
+          totalSkipped++;
+          continue;
+        }
 
-        // Insert wallet paused by default
+        // Insert wallet (start paused)
         await supabase.from("wallets").insert({
           polymarket_proxy_wallet: entry.proxyWallet,
           polymarket_username: entry.userName,
           last_checked: new Date(),
-          paused: true,      // start paused
+          paused: true,
           losing_streak: 0,
           win_rate: 0
         });
+
+        console.log(`[LEADERBOARD][${period}] Inserted: ${entry.proxyWallet} (pnl: ${entry.pnl}, vol: ${entry.vol})`);
         totalInserted++;
       }
     } catch (err) {
-      console.error(`Failed to fetch leaderboard (${period}):`, err.message);
+      console.error(`[LEADERBOARD][${period}] Failed to fetch leaderboard:`, err.message);
     }
   }
 
-  console.log(`Leaderboard fetch complete. Total new wallets inserted: ${totalInserted}`);
+  console.log(`Leaderboard fetch complete.
+    Total fetched: ${totalFetched}
+    Total inserted: ${totalInserted}
+    Total skipped: ${totalSkipped}`);
 }
 
 

@@ -62,6 +62,63 @@ async function sendTelegram(text, useBlockquote = false) {
   }
 }
 
+
+/* ===========================
+   Backfill EventSlug
+=========================== */
+
+async function backfillEventSlugs() {
+  // Fetch all signals with missing event_slug
+  const { data: signals } = await supabase
+    .from("signals")
+    .select("id, market_id")
+    .is("event_slug", null);
+
+  if (!signals || signals.length === 0) {
+    console.log("No signals need backfilling.");
+    return;
+  }
+
+  console.log(`Backfilling ${signals.length} signals...`);
+
+  for (const sig of signals) {
+    try {
+      // Fetch market info from Polymarket API using conditionId
+      const res = await fetch(`https://data-api.polymarket.com/markets/${sig.market_id}`, {
+        headers: { "User-Agent": "Mozilla/5.0" },
+      });
+
+      if (!res.ok) {
+        console.log(`Market not found for conditionId: ${sig.market_id} (status ${res.status})`);
+        continue;
+      }
+
+      const marketData = await res.json();
+      const slug = marketData.slug || marketData.eventSlug;
+
+      if (!slug) {
+        console.log(`No slug found for market: ${sig.market_id}`);
+        continue;
+      }
+
+      // Update the signal row
+      await supabase
+        .from("signals")
+        .update({ event_slug: slug })
+        .eq("id", sig.id);
+
+      console.log(`Updated signal ${sig.id} with slug: ${slug}`);
+    } catch (err) {
+      console.error(`Failed to backfill signal ${sig.id}:`, err.message);
+    }
+  }
+
+  console.log("Backfill complete!");
+}
+
+backfillEventSlugs();
+
+
 /* ===========================
    Polymarket API with retries + cache
 =========================== */

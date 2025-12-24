@@ -377,7 +377,7 @@ async function main() {
       }
 
       // ✅ Update win rates and losing streaks after all wallets processed
-      await updateWalletWinRatesAndPause();
+await updateWalletWinRatesAndPauseJS();
 
     } catch (err) {
       console.error("Loop error:", err.message);
@@ -388,61 +388,56 @@ async function main() {
 
 
 /* ===========================
-   Update Wallet Win Rates & Pause/Unpause (JS-only)
+   Update Wallet Win Rates & Losing Streak
 =========================== */
-async function updateWalletWinRatesAndPause() {
+async function updateWalletWinRatesAndPauseJS() {
   try {
-    const { data: wallets } = await supabase.from("wallets").select("*");
+    // 1️⃣ Fetch all wallets
+    const { data: wallets } = await supabase.from("wallets").select("id");
     if (!wallets?.length) return;
 
     for (const wallet of wallets) {
-      // Fetch all signals for this wallet
-      const { data: signals } = await supabase.from("signals")
+      // 2️⃣ Fetch wallet's resolved signals (WIN/LOSS)
+      const { data: signals } = await supabase
+        .from("signals")
         .select("market_id, outcome, created_at")
         .eq("wallet_id", wallet.id)
+        .in("outcome", ["WIN", "LOSS"])
         .order("created_at", { ascending: true });
 
       if (!signals?.length) {
-        await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
+        await supabase.from("wallets").update({ win_rate: 0, losing_streak: 0 }).eq("id", wallet.id);
         continue;
       }
 
-      // Map outcomes per market (unique markets only)
-      const marketMap = {};
-      for (const s of signals) {
-        if (!(s.market_id in marketMap)) marketMap[s.market_id] = s.outcome;
+      // 3️⃣ Calculate win rate
+      const wins = signals.filter(s => s.outcome === "WIN").length;
+      const total = signals.length;
+      const winRate = (wins / total) * 100;
+
+      // 4️⃣ Calculate current consecutive losing streak
+      let losingStreak = 0;
+      for (let i = signals.length - 1; i >= 0; i--) {
+        if (signals[i].outcome === "LOSS") losingStreak++;
+        else break; // streak stops at first WIN
       }
 
-      const outcomes = Object.values(marketMap);
+      // 5️⃣ Determine pause status
+      const paused = losingStreak >= LOSING_STREAK_THRESHOLD || winRate < 80;
 
-      // Calculate true consecutive losing streak
-      let streak = 0, maxStreak = 0;
-      let wins = 0;
-      for (const o of outcomes) {
-        if (o === "LOSS") streak++;
-        else streak = 0;
-        if (streak > maxStreak) maxStreak = streak;
-        if (o === "WIN") wins++;
-      }
-
-      const totalMarkets = outcomes.filter(o => o === "WIN" || o === "LOSS").length;
-      const winRate = totalMarkets > 0 ? (wins / totalMarkets) * 100 : 0;
-
-      const paused = maxStreak >= LOSING_STREAK_THRESHOLD || winRate < 80;
-
-      await supabase.from("wallets").update({
-        losing_streak: maxStreak,
-        win_rate: winRate,
-        paused,
-        last_checked: new Date()
-      }).eq("id", wallet.id);
+      // 6️⃣ Update wallet
+      await supabase
+        .from("wallets")
+        .update({ win_rate: winRate, losing_streak: losingStreak, paused, last_checked: new Date() })
+        .eq("id", wallet.id);
     }
 
-    console.log("Wallet win rates + losing streaks updated successfully.");
+    console.log("✅ Wallet win rates and losing streaks updated successfully.");
   } catch (err) {
-    console.error("Failed to update wallet stats:", err.message);
+    console.error("Error updating wallet win rates & streaks:", err.message);
   }
 }
+
 
 
 /* ===========================

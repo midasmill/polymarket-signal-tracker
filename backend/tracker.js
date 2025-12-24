@@ -719,8 +719,8 @@ async function updatePreSignals() {
    Fetch new leaderboard wallets from Polymarket (Bootstrap + VW)
 =========================== */
 async function fetchAndInsertLeaderboardWallets() {
-  const timePeriod = ["DAY", "WEEK", "MONTH", "ALL"];
-  const pageSize = 100; // fetch up to 100 at once
+  const timePeriod = "DAY";
+  const pageSize = 200; // fetch up to 100 at once
   let totalInserted = 0;
 
   for (const period of timePeriod) {
@@ -742,7 +742,7 @@ async function fetchAndInsertLeaderboardWallets() {
           if (!entry.proxyWallet) continue;
 
           // PnL / volume filter
-          if (entry.pnl >= 1000 && entry.vol < 6 * entry.pnl) {
+          if (entry.pnl >= 10000 && entry.vol < 6 * entry.pnl) {
             passed++;
 
             // Insert wallet if not exists

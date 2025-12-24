@@ -183,8 +183,9 @@ function getMajorityConfidence(counts) {
   return getConfidenceEmoji(Math.max(...Object.values(counts)));
 }
 
+
 /* ===========================
-   Track Wallet Trades (Resolved + Pending)
+   Track Wallet Trades (Resolved + Pending with PnL-based outcome)
 =========================== */
 async function trackWallet(wallet) {
   if (wallet.paused) return;
@@ -192,27 +193,20 @@ async function trackWallet(wallet) {
   let trades = [];
   let identityUsed = null;
 
-  // Try proxy wallet first
   if (wallet.polymarket_proxy_wallet) {
-    console.log(`Wallet ${wallet.id}: trying proxy wallet ${wallet.polymarket_proxy_wallet}`);
     trades = await fetchLatestTrades(wallet.polymarket_proxy_wallet);
     if (trades.length > 0) identityUsed = "proxy";
   }
 
-  // If no trades from proxy, try username
   if (trades.length === 0 && wallet.polymarket_username) {
-    console.log(`Wallet ${wallet.id}: proxy empty, trying username ${wallet.polymarket_username}`);
     trades = await fetchLatestTrades(wallet.polymarket_username);
     if (trades.length > 0) identityUsed = "username";
   }
 
   if (trades.length === 0) {
-    console.log(`Wallet ${wallet.id}: skipped (no trades via proxy or username)`);
     await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
     return;
   }
-
-  console.log(`Wallet ${wallet.id}: ${trades.length} trades found using ${identityUsed}`);
 
   let insertedCount = 0;
 
@@ -223,7 +217,6 @@ async function trackWallet(wallet) {
       continue;
     }
 
-    // Skip duplicates
     const { data: existing } = await supabase
       .from("signals")
       .select("id")
@@ -233,24 +226,21 @@ async function trackWallet(wallet) {
       .maybeSingle();
     if (existing) continue;
 
-    // Determine outcome from trade object
-    let outcome = "Pending";
     let pnl = trade.pnl ?? null;
+    let outcome = "Pending";
     let outcome_at = null;
 
     if (trade.outcome) {
-      // If trade resolved, mark as WIN
-      outcome = "WIN";
+      outcome = pnl !== null && pnl < 0 ? "LOSS" : "WIN";
       outcome_at = new Date(trade.timestamp * 1000);
-      pnl = trade.pnl ?? null;
     }
 
     await supabase.from("signals").insert({
       wallet_id: wallet.id,
       signal: trade.title,
       market_name: trade.title,
-      market_id: trade.eventSlug, // use eventSlug as unique market identifier
-      side: trade.outcome ?? trade.side?.toUpperCase() ?? "BUY",
+      market_id: trade.eventSlug,
+      side: trade.side?.toUpperCase() ?? "BUY",
       tx_hash: trade.transactionHash,
       outcome,
       pnl,
@@ -264,14 +254,12 @@ async function trackWallet(wallet) {
     insertedCount++;
   }
 
-  if (insertedCount > 0) console.log(`Inserted ${insertedCount} new trades for wallet ${wallet.id}`);
-
   await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
 }
 
 
 /* ===========================
-   Update Pending Outcomes
+   Update Pending Outcomes (PnL-based)
 =========================== */
 async function updatePendingOutcomes() {
   const { data: pending } = await supabase
@@ -281,35 +269,27 @@ async function updatePendingOutcomes() {
 
   if (!pending?.length) return;
 
-  let resolvedAny = false;
-
   for (const sig of pending) {
     if (!sig.tx_hash) continue;
 
-    // Fetch the latest trade info to get outcome/pnl
     let trade = null;
     try {
-      const trades = await fetchLatestTrades(sig.wallet_id); // fetch all trades for wallet
+      const trades = await fetchLatestTrades(sig.wallet_id);
       trade = trades.find(t => t.transactionHash === sig.tx_hash);
     } catch {
       trade = null;
     }
     if (!trade || !trade.outcome) continue;
 
-    const result = "WIN"; // Any resolved trade from Polymarket is a WIN for that user
     const pnl = trade.pnl ?? null;
+    const outcome = pnl !== null && pnl < 0 ? "LOSS" : "WIN";
     const outcome_at = new Date(trade.timestamp * 1000);
 
-    await supabase.from("signals").update({
-      outcome: result,
-      pnl,
-      outcome_at,
-    }).eq("id", sig.id);
+    await supabase.from("signals").update({ outcome, pnl, outcome_at }).eq("id", sig.id);
 
-    // Update wallet losing streak
     const { data: wallet } = await supabase.from("wallets").select("*").eq("id", sig.wallet_id).single();
     if (wallet) {
-      if (pnl !== null && pnl < 0) {
+      if (outcome === "LOSS") {
         const streak = (wallet.losing_streak || 0) + 1;
         await supabase.from("wallets").update({ losing_streak: streak }).eq("id", wallet.id);
         if (streak >= LOSING_STREAK_THRESHOLD) {
@@ -317,16 +297,14 @@ async function updatePendingOutcomes() {
           await sendTelegram(`Wallet paused due to losing streak:\nWallet ID: ${wallet.id}\nLosses: ${streak}`);
         }
       } else {
-        // Reset losing streak on WIN
         await supabase.from("wallets").update({ losing_streak: 0 }).eq("id", wallet.id);
       }
     }
 
-    await sendResultNotes(sig, result);
-    resolvedAny = true;
+    await sendResultNotes(sig, outcome);
   }
 
-  if (resolvedAny) await sendMajoritySignals();
+  await sendMajoritySignals();
 }
 
 

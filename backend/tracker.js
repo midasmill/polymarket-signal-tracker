@@ -263,6 +263,7 @@ async function trackWallet(wallet) {
   let trades = [];
   let identityUsed = null;
 
+  // Fetch trades via proxy or username
   if (wallet.polymarket_proxy_wallet) {
     trades = await fetchLatestTrades(wallet.polymarket_proxy_wallet);
     if (trades.length) identityUsed = "proxy";
@@ -286,23 +287,41 @@ async function trackWallet(wallet) {
 
   const existingTxs = new Set(existingSignals?.map(s => s.tx_hash) || []);
 
-  const newSignals = trades
-    .filter(trade => {
-      // Skip trades not matching proxy wallet
-      if (identityUsed === "proxy" && trade.proxyWallet?.toLowerCase() !== wallet.polymarket_proxy_wallet?.toLowerCase())
-        return false;
-      if (existingTxs.has(trade.transactionHash)) return false;
-      return true;
-    })
-    .map(trade => {
-      const pickedOutcome = derivePickedOutcome(trade);
-      console.log("[INSERT PICK]", trade.transactionHash, trade.outcome, trade.outcomeIndex, pickedOutcome);
+  for (const trade of trades) {
+    // Skip duplicates or mismatched proxy wallet
+    if (identityUsed === "proxy" && trade.proxyWallet?.toLowerCase() !== wallet.polymarket_proxy_wallet?.toLowerCase()) continue;
+    if (existingTxs.has(trade.transactionHash)) continue;
 
-      return {
+    const pickedOutcome = derivePickedOutcome(trade);
+
+    // Fetch eventSlug from trade or fallback to API using conditionId
+    let eventSlug = trade.eventSlug || null;
+    if (!eventSlug) {
+      try {
+        const res = await fetch(`https://data-api.polymarket.com/markets/${trade.conditionId}`, {
+          headers: { "User-Agent": "Mozilla/5.0" },
+        });
+        if (res.ok) {
+          const marketData = await res.json();
+          eventSlug = marketData.slug || marketData.eventSlug || null;
+        } else {
+          console.log(`Market not found for conditionId: ${trade.conditionId} (status ${res.status})`);
+        }
+      } catch (err) {
+        console.error(`Failed to fetch slug for market ${trade.conditionId}:`, err.message);
+      }
+    }
+
+    console.log("[INSERT PICK]", trade.transactionHash, trade.outcome, trade.outcomeIndex, pickedOutcome, eventSlug);
+
+    // Insert signal
+    try {
+      await supabase.from("signals").insert({
         wallet_id: wallet.id,
         signal: trade.title,
         market_name: trade.title,
         market_id: trade.conditionId,
+        event_slug: eventSlug,           // ✅ Added
         side: trade.side.toUpperCase(),
         picked_outcome: pickedOutcome,
         tx_hash: trade.transactionHash,
@@ -311,19 +330,16 @@ async function trackWallet(wallet) {
         wallet_count: 1,
         wallet_set: [String(wallet.id)],
         tx_hashes: [trade.transactionHash],
-      };
-    });
-
-  if (newSignals.length) {
-    try {
-      await supabase.from("signals").insert(newSignals);
+      });
     } catch (err) {
-      console.error("Batch insert failed:", err.message);
+      console.error("Insert failed:", err.message);
     }
   }
 
+  // Update last_checked
   await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
 }
+
 
 /* ===========================
    Resolve Outcomes

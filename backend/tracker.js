@@ -300,66 +300,116 @@ async function unpauseAndFetchWallet(wallet) {
 }
 
 /* ===========================
-   Track Wallet Trades (fixed losing streak + win rate)
-=========================== */
+   Fetch wallet positions safely
+========================== */
+async function fetchWalletPositions(userId) {
+  if (!userId) return [];
+  const url = `https://data-api.polymarket.com/positions?user=${userId}&limit=100&sizeThreshold=1&sortBy=CURRENT&sortDirection=DESC`;
+  try {
+    const data = await fetchWithRetry(
+      url,
+      { headers: { "User-Agent": "Mozilla/5.0" } },
+      3, // retries
+      2000 // 2s delay
+    );
+    return Array.isArray(data) ? data : [];
+  } catch (err) {
+    console.error(`Failed to fetch positions for wallet ${userId}:`, err.message);
+    return [];
+  }
+}
+
+/* ===========================
+   Track Wallet Trades
+========================== */
 async function trackWallet(wallet) {
   const userId = wallet.polymarket_proxy_wallet || wallet.polymarket_username;
   if (!userId) return;
 
-  let positions = [];
-  try {
-    const url = `https://data-api.polymarket.com/positions?user=${userId}&limit=100&sizeThreshold=1&sortBy=CURRENT&sortDirection=DESC`;
-    const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
-    if (res.ok) positions = await res.json();
-    else console.log(`Failed to fetch positions for wallet ${wallet.id}, status: ${res.status}`);
-  } catch (err) {
-    console.error(`Failed to fetch positions for wallet ${wallet.id}:`, err.message);
-  }
-
+  // Fetch positions safely with retry
+  const positions = await fetchWalletPositions(userId);
   if (!positions.length) {
     await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
     return;
   }
 
-  // Aggregate outcomes per unique market
-  const marketMap = {}; // { marketId: { wins, losses } }
+  // Fetch existing signals once
+  const { data: existingSignals } = await supabase
+    .from("signals")
+    .select("id, tx_hash, market_id")
+    .eq("wallet_id", wallet.id);
+  const existingTxs = new Set(existingSignals?.map(s => s.tx_hash));
+
+  const marketMap = {}; // track wins/losses per market
 
   for (const pos of positions) {
     const marketId = pos.conditionId;
     const pickedOutcome = pos.outcome || `OPTION_${pos.outcomeIndex}`;
+    const eventSlug = pos.eventSlug || pos.slug;
     const pnl = pos.cashPnl ?? null;
 
     let outcome = "Pending";
-    if (pnl !== null) outcome = pnl > 0 ? "WIN" : "LOSS";
+    let resolved_outcome = null;
+
+    if (pnl !== null) {
+      if (pnl > 0) {
+        outcome = "WIN";
+        resolved_outcome = pickedOutcome;
+      } else {
+        outcome = "LOSS";
+        resolved_outcome = pos.oppositeOutcome || pickedOutcome;
+      }
+    }
 
     if (!marketMap[marketId]) marketMap[marketId] = { wins: 0, losses: 0 };
     if (outcome === "WIN") marketMap[marketId].wins++;
     else if (outcome === "LOSS") marketMap[marketId].losses++;
+
+    // Insert or update signals
+    const existingSig = existingSignals.find(s => s.market_id === marketId);
+    if (existingSig) {
+      await supabase
+        .from("signals")
+        .update({ pnl, outcome, resolved_outcome, outcome_at: pnl !== null ? new Date() : null })
+        .eq("id", existingSig.id);
+    } else if (!existingTxs.has(pos.asset)) {
+      await supabase.from("signals").insert({
+        wallet_id: wallet.id,
+        signal: pos.title,
+        market_name: pos.title,
+        market_id: marketId,
+        event_slug: eventSlug,
+        side: pos.side?.toUpperCase() || "BUY",
+        picked_outcome: pickedOutcome,
+        tx_hash: pos.asset,
+        pnl,
+        outcome,
+        resolved_outcome,
+        outcome_at: pnl !== null ? new Date() : null,
+        created_at: new Date(pos.timestamp * 1000 || Date.now()),
+        wallet_count: 1,
+        wallet_set: [String(wallet.id)],
+        tx_hashes: [pos.asset],
+      });
+    }
   }
 
-  // ✅ Calculate losing streak: count **consecutive losing markets**, not trades
-  const marketIds = Object.keys(marketMap).sort(); // sort to keep chronological order if needed
-  let losingStreak = 0;
-  for (const mid of marketIds) {
-    const { wins, losses } = marketMap[mid];
-    if (losses > wins) losingStreak++;
-    else losingStreak = 0; // reset on win or tie
-  }
+  // Calculate losing streak
+  const lostMarkets = Object.values(marketMap).filter(m => m.losses > m.wins).length;
+  const { data: walletData } = await supabase
+    .from("wallets")
+    .select("losing_streak")
+    .eq("id", wallet.id)
+    .maybeSingle();
+  const prevStreak = walletData?.losing_streak || 0;
+  const newStreak = lostMarkets > 0 ? prevStreak + lostMarkets : 0;
+  const pause = newStreak >= LOSING_STREAK_THRESHOLD;
 
-  // Calculate win rate
-  const totalMarkets = Object.keys(marketMap).length;
-  const totalWins = Object.values(marketMap).reduce((sum, m) => sum + m.wins, 0);
-  const winRate = totalMarkets > 0 ? (totalWins / totalMarkets) * 100 : 0;
-
-  // Update wallet
-  await supabase.from("wallets").update({
-    losing_streak: losingStreak,
-    win_rate: winRate,
-    paused: losingStreak >= LOSING_STREAK_THRESHOLD || winRate < 80,
-    last_checked: new Date(),
-  }).eq("id", wallet.id);
+  await supabase
+    .from("wallets")
+    .update({ losing_streak: newStreak, paused: pause, last_checked: new Date() })
+    .eq("id", wallet.id);
 }
-
 
 // ---------------------- Main loop ----------------------
 async function main() {

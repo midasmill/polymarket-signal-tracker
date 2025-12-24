@@ -70,13 +70,32 @@ async function sendTelegram(text, useBlockquote = false) {
 
 
 /* ===========================
-   Mirgration fix
+   Migration Helper
 =========================== */
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 async function fixOldSignals() {
-  const { data: oldSignals } = await supabase
+// Example
+const { data: oldSignals } = await supabase
+  .from("signals")
+  .select("*")
+  .or("picked_outcome.is.null,picked_outcome.eq.''");
+
+for (const sig of oldSignals) {
+  // fetch trade
+  const trades = await fetch(`https://data-api.polymarket.com/trades?user=${sig.wallet_id}&limit=100`).then(r => r.json());
+  const trade = trades.find(t => t.transactionHash === sig.tx_hash);
+  if (!trade) continue;
+
+  await supabase.from("signals").update({
+    picked_outcome: derivePickedOutcome(trade),
+    outcome: "Pending",
+  }).eq("id", sig.id);
+}
+
+   
+   const { data: oldSignals } = await supabase
     .from("signals")
     .select("*")
     .or("picked_outcome.is.null,picked_outcome.eq.''");

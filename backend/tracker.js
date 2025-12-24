@@ -364,6 +364,55 @@ async function main() {
 // Start the tracker
 main();
 
+/* ===========================
+   Update Wallet Win Rates & Pause/Unpause
+=========================== */
+async function updateWalletWinRatesAndPause() {
+  try {
+    // 1️⃣ Calculate win rate per wallet
+    const query = `
+      UPDATE wallets w
+      SET 
+        win_rate = sub.wr,
+        paused = CASE
+                  WHEN sub.wr >= 80 THEN false   -- unpause if win_rate ≥ 80%
+                  WHEN sub.wr < 80 THEN true     -- pause if win_rate < 80%
+                  ELSE w.paused
+                 END
+      FROM (
+        SELECT wallet_id,
+               CASE 
+                 WHEN COUNT(DISTINCT market_id) = 0 THEN 0
+                 ELSE SUM(CASE WHEN outcome='WIN' THEN 1 ELSE 0 END)::float / COUNT(DISTINCT market_id) * 100
+               END AS wr
+        FROM signals
+        WHERE outcome IN ('WIN','LOSS')
+        GROUP BY wallet_id
+      ) AS sub
+      WHERE w.id = sub.wallet_id
+      RETURNING id, paused, win_rate
+    `;
+
+    const { data: updatedWallets, error } = await supabase.rpc('execute_sql', { sql: query });
+    if (error) {
+      console.error("Batch win rate + pause update failed:", error.message);
+      return;
+    }
+    console.log("Batch win rate + pause update complete.");
+
+    // 2️⃣ Fetch unresolved picks for wallets that just got unpaused
+    if (updatedWallets?.length) {
+      for (const wallet of updatedWallets) {
+        if (!wallet.paused && wallet.win_rate >= 80) {
+          console.log(`Wallet ${wallet.id} just unpaused — fetching unresolved picks...`);
+          await trackWallet(wallet);
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Batch win rate + pause update error:", err.message);
+  }
+}
 
 
 /* ===========================

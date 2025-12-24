@@ -431,123 +431,65 @@ await updateWalletWinRatesAndPauseJS();
 }
 
 /* ===========================
-   Update Wallet Win Rates & Losing Streak
-   (LIVE vs RESOLVED separated)
+   Update Wallet Metrics: Resolved vs Live
 =========================== */
-async function updateWalletWinRatesAndPauseJS() {
+async function updateWalletMetricsJS() {
   try {
-    const since30d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-
-    const { data: wallets } = await supabase
-      .from("wallets")
-      .select("id");
-
+    // 1️⃣ Fetch all wallets
+    const { data: wallets } = await supabase.from("wallets").select("id");
     if (!wallets?.length) return;
 
     for (const wallet of wallets) {
-
-      // Fetch last 30d signals
-      const { data: signals } = await supabase
+      // 2️⃣ Fetch resolved signals (WIN/LOSS only)
+      const { data: resolvedSignals } = await supabase
         .from("signals")
-        .select("market_id, pnl, outcome, avg_price, created_at")
+        .select("market_id, outcome, created_at")
         .eq("wallet_id", wallet.id)
-        .gte("created_at", since30d)
+        .in("outcome", ["WIN", "LOSS"])
         .order("created_at", { ascending: true });
 
-      if (!signals?.length) {
-        await supabase.from("wallets").update({
-          win_rate: 0,
-          losing_streak: 0,
-          paused: true,
-          last_checked: new Date()
-        }).eq("id", wallet.id);
-        continue;
-      }
+      // 3️⃣ Fetch live/pending signals
+      const { data: liveSignals } = await supabase
+        .from("signals")
+        .select("market_id")
+        .eq("wallet_id", wallet.id)
+        .eq("outcome", "Pending");
 
-      // ------------------
-      // Split LIVE vs RESOLVED per market
-      // ------------------
-      const markets = {};
+      // 4️⃣ Calculate resolved win rate
+      const resolvedWins = resolvedSignals.filter(s => s.outcome === "WIN").length;
+      const totalResolved = resolvedSignals.length;
+      const resolvedWinRate = totalResolved > 0 ? (resolvedWins / totalResolved) * 100 : null;
 
-      for (const s of signals) {
-        markets[s.market_id] ??= {
-          resolved: false,
-          outcome: null,
-          realizedPnl: 0,
-          prices: [],
-        };
-
-        if (s.pnl !== null) {
-          markets[s.market_id].resolved = true;
-          markets[s.market_id].outcome = s.outcome;
-          markets[s.market_id].realizedPnl += s.pnl || 0;
-        }
-
-        if (s.avg_price != null) {
-          markets[s.market_id].prices.push(s.avg_price);
-        }
-      }
-
-      const resolvedMarkets = Object.values(markets).filter(m => m.resolved);
-      const liveMarkets = Object.values(markets).filter(m => !m.resolved);
-
-      // ------------------
-      // RESOLVED METRICS
-      // ------------------
-      const resolvedCount = resolvedMarkets.length;
-      const wins = resolvedMarkets.filter(m => m.outcome === "WIN").length;
-      const marketWinRate = resolvedCount ? (wins / resolvedCount) * 100 : 0;
-
-      const realizedPnl = resolvedMarkets.reduce((s, m) => s + m.realizedPnl, 0);
-
-      // Consecutive losing streak (resolved only)
-      let losingStreak = 0;
-      for (let i = resolvedMarkets.length - 1; i >= 0; i--) {
-        if (resolvedMarkets[i].outcome === "LOSS") losingStreak++;
+      // 5️⃣ Calculate current consecutive losing streak (resolved only)
+      let resolvedLosingStreak = 0;
+      for (let i = resolvedSignals.length - 1; i >= 0; i--) {
+        if (resolvedSignals[i].outcome === "LOSS") resolvedLosingStreak++;
         else break;
       }
 
-      // ------------------
-      // LIVE METRICS
-      // ------------------
-      const livePrices = liveMarkets.flatMap(m => m.prices);
-      const avgEntryPriceLive = livePrices.length
-        ? livePrices.reduce((a, b) => a + b, 0) / livePrices.length
-        : null;
+      // 6️⃣ Determine pause status
+      const paused = (resolvedLosingStreak >= LOSING_STREAK_THRESHOLD) || (resolvedWinRate !== null && resolvedWinRate < 80);
 
-      // ------------------
-      // QUALITY FILTER
-      // ------------------
-      const passesQuality =
-        marketWinRate >= 65 &&
-        avgEntryPriceLive !== null &&
-        avgEntryPriceLive <= 0.55 &&
-        realizedPnl > 0;
+      // 7️⃣ Update wallet
+      await supabase
+        .from("wallets")
+        .update({
+          resolved_win_rate: resolvedWinRate,
+          resolved_losing_streak: resolvedLosingStreak,
+          live_trades_count: liveSignals?.length || 0,
+          paused,
+          last_checked: new Date()
+        })
+        .eq("id", wallet.id);
 
-      const paused =
-        !passesQuality ||
-        losingStreak >= LOSING_STREAK_THRESHOLD;
-
-      // ------------------
-      // UPDATE WALLET
-      // ------------------
-      await supabase.from("wallets").update({
-        win_rate: marketWinRate,
-        losing_streak: losingStreak,
-        realized_pnl: realizedPnl,
-        avg_entry_price_live: avgEntryPriceLive,
-        live_markets: liveMarkets.length,
-        paused,
-        last_checked: new Date()
-      }).eq("id", wallet.id);
+      console.log(`Wallet ${wallet.id} — resolvedWinRate: ${resolvedWinRate?.toFixed(2) || "N/A"}%, resolvedStreak: ${resolvedLosingStreak}, live: ${liveSignals?.length || 0}, paused: ${paused}`);
     }
 
-    console.log("✅ Wallet win rates & streaks updated (LIVE/RESOLVED separated)");
+    console.log("✅ All wallets updated with resolved & live metrics.");
   } catch (err) {
     console.error("Error updating wallet metrics:", err.message);
   }
 }
-
 
 /* ===========================
    Send Result Notes
@@ -699,11 +641,12 @@ http.createServer((req, res) => {
   res.end("Polymarket tracker running\n");
 }).listen(PORT, () => console.log(`Tracker listening on port ${PORT}`));
 
-async function trackerLoop() {
-  try {
-    // ... your loop code
-  } catch (err) {
-    console.error("Loop error:", err);
-    // await sendTelegram(...) // commented out
-  }
-} // <-- Make sure this closing brace exists
+/* ===========================
+   Tracker loop
+========================== */
+
+// Run immediately on startup
+trackerLoop();
+
+// Then repeat every 60 seconds
+setInterval(trackerLoop, 60_000);

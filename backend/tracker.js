@@ -336,11 +336,14 @@ async function calculateVolumeWeightedWinRate(wallet) {
 
 
 /* ===========================
-   Track Wallet Trades (updated for VW filter)
+   Track Wallet Trades (Debug-Friendly)
 =========================== */
 async function trackWallet(wallet) {
   // Skip paused wallets or wallets below 80% VW
-  if (wallet.paused) return;
+  if (wallet.paused) {
+    console.log(`Wallet ${wallet.id} skipped: paused`);
+    return;
+  }
   if (wallet.win_rate != null && wallet.win_rate < 0.8) {
     console.log(`Wallet ${wallet.id} skipped due to low VW win rate (${Math.round(wallet.win_rate * 100)}%)`);
     return;
@@ -349,12 +352,14 @@ async function trackWallet(wallet) {
   let trades = [];
   let identityUsed = null;
 
+  // Try fetching trades via proxy wallet
   if (wallet.polymarket_proxy_wallet) {
     console.log(`Wallet ${wallet.id}: trying proxy wallet ${wallet.polymarket_proxy_wallet}`);
     trades = await fetchLatestTrades(wallet.polymarket_proxy_wallet);
     if (trades.length > 0) identityUsed = "proxy";
   }
 
+  // If no trades via proxy, try username
   if (trades.length === 0 && wallet.polymarket_username) {
     console.log(`Wallet ${wallet.id}: proxy empty, trying username ${wallet.polymarket_username}`);
     trades = await fetchLatestTrades(wallet.polymarket_username);
@@ -362,20 +367,32 @@ async function trackWallet(wallet) {
   }
 
   if (trades.length === 0) {
-    console.log(`Wallet ${wallet.id}: skipped (no trades via proxy or username)`);
+    console.log(`Wallet ${wallet.id}: skipped (no trades found)`);
     await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
     return;
   }
 
-  console.log(`Wallet ${wallet.id}: ${trades.length} trades found using ${identityUsed}`);
+  // Log raw trades for debugging
+  console.log(`Wallet ${wallet.id}: ${trades.length} trades fetched using ${identityUsed}`);
+  console.log(trades.map(t => ({
+    tx: t.transactionHash,
+    conditionId: t.conditionId,
+    side: t.side,
+    title: t.title,
+    size: t.size
+  })));
 
   let insertedCount = 0;
+
   for (const trade of trades) {
-    if (identityUsed === "proxy" &&
-        trade.proxyWallet &&
-        trade.proxyWallet.toLowerCase() !== wallet.polymarket_proxy_wallet.toLowerCase()) {
+    // Skip trades missing key fields
+    if (!trade.conditionId || !trade.transactionHash) {
+      console.warn(`Skipping trade with missing conditionId or transactionHash:`, trade);
       continue;
     }
+
+    // Temporarily bypass strict proxyWallet check for debugging
+    // if (identityUsed === "proxy" && trade.proxyWallet && trade.proxyWallet.toLowerCase() !== wallet.polymarket_proxy_wallet.toLowerCase()) continue;
 
     const { data: existing } = await supabase
       .from("signals")
@@ -387,26 +404,100 @@ async function trackWallet(wallet) {
 
     if (existing) continue;
 
-    await supabase.from("signals").insert({
-      wallet_id: wallet.id,
-      signal: trade.title,
-      market_name: trade.title,
-      market_id: trade.conditionId,
-      side: String(trade.outcome).toUpperCase(),
-      tx_hash: trade.transactionHash,
-      outcome: "Pending",
-      created_at: new Date(trade.timestamp * 1000),
-      wallet_count: 1,
-      wallet_set: [String(wallet.id)],
-      tx_hashes: [trade.transactionHash],
-    });
-
-    insertedCount++;
+    try {
+      await supabase.from("signals").insert({
+        wallet_id: wallet.id,
+        signal: trade.title || "Unknown Market",
+        market_name: trade.title || "Unknown Market",
+        market_id: trade.conditionId,
+        side: trade.outcome ? String(trade.outcome).toUpperCase() : "UNKNOWN",
+        tx_hash: trade.transactionHash,
+        outcome: "Pending",
+        created_at: trade.timestamp ? new Date(trade.timestamp * 1000) : new Date(),
+        wallet_count: 1,
+        wallet_set: [String(wallet.id)],
+        tx_hashes: [trade.transactionHash],
+      });
+      insertedCount++;
+    } catch (err) {
+      console.error(`Insert failed for trade ${trade.transactionHash}:`, err.message);
+    }
   }
 
   if (insertedCount > 0) console.log(`Inserted ${insertedCount} new trades for wallet ${wallet.id}`);
 
+  // Update last_checked timestamp
   await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
+}
+
+/* ===========================
+   Bootstrap: Populate signals table
+=========================== */
+async function bootstrapSignalsForLeaderboardWallets() {
+  console.log("Bootstrapping signals for leaderboard wallets...");
+
+  // Fetch all wallets currently in the wallets table
+  const { data: wallets } = await supabase.from("wallets").select("*");
+  if (!wallets || wallets.length === 0) {
+    console.log("No wallets found in DB. Please fetch leaderboard wallets first.");
+    return;
+  }
+
+  for (const wallet of wallets) {
+    console.log(`Fetching trades for wallet ${wallet.id} (${wallet.polymarket_proxy_wallet || wallet.polymarket_username})`);
+    
+    let trades = [];
+    let identityUsed = null;
+
+    // Try proxy wallet first
+    if (wallet.polymarket_proxy_wallet) {
+      trades = await fetchLatestTrades(wallet.polymarket_proxy_wallet);
+      if (trades.length > 0) identityUsed = "proxy";
+    }
+
+    // Fallback to username
+    if (trades.length === 0 && wallet.polymarket_username) {
+      trades = await fetchLatestTrades(wallet.polymarket_username);
+      if (trades.length > 0) identityUsed = "username";
+    }
+
+    if (trades.length === 0) {
+      console.log(`No trades found for wallet ${wallet.id}`);
+      continue;
+    }
+
+    console.log(`Found ${trades.length} trades for wallet ${wallet.id} using ${identityUsed}`);
+
+    for (const trade of trades) {
+      // Skip if trade already exists
+      const { data: existing } = await supabase
+        .from("signals")
+        .select("id")
+        .eq("market_id", trade.conditionId)
+        .eq("wallet_id", wallet.id)
+        .eq("tx_hash", trade.transactionHash)
+        .maybeSingle();
+
+      if (existing) continue;
+
+      // Insert trade into signals table
+      await supabase.from("signals").insert({
+        wallet_id: wallet.id,
+        signal: trade.title,
+        market_name: trade.title,
+        market_id: trade.conditionId,
+        side: String(trade.outcome).toUpperCase(),
+        tx_hash: trade.transactionHash,
+        outcome: "Pending",
+        created_at: new Date(trade.timestamp * 1000),
+        wallet_count: 1,
+        wallet_set: [String(wallet.id)],
+        tx_hashes: [trade.transactionHash],
+      });
+    }
+  }
+
+  console.log("Bootstrap complete. Signals table populated.");
 }
 
 

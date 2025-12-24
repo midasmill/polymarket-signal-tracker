@@ -62,63 +62,6 @@ async function sendTelegram(text, useBlockquote = false) {
   }
 }
 
-
-/* ===========================
-   Backfill EventSlug
-=========================== */
-
-async function backfillEventSlugs() {
-  // Fetch all signals with missing event_slug
-  const { data: signals } = await supabase
-    .from("signals")
-    .select("id, market_id")
-    .is("event_slug", null);
-
-  if (!signals || signals.length === 0) {
-    console.log("No signals need backfilling.");
-    return;
-  }
-
-  console.log(`Backfilling ${signals.length} signals...`);
-
-  for (const sig of signals) {
-    try {
-      // Fetch market info from Polymarket API using conditionId
-      const res = await fetch(`https://data-api.polymarket.com/markets/${sig.market_id}`, {
-        headers: { "User-Agent": "Mozilla/5.0" },
-      });
-
-      if (!res.ok) {
-        console.log(`Market not found for conditionId: ${sig.market_id} (status ${res.status})`);
-        continue;
-      }
-
-      const marketData = await res.json();
-      const slug = marketData.slug || marketData.eventSlug;
-
-      if (!slug) {
-        console.log(`No slug found for market: ${sig.market_id}`);
-        continue;
-      }
-
-      // Update the signal row
-      await supabase
-        .from("signals")
-        .update({ event_slug: slug })
-        .eq("id", sig.id);
-
-      console.log(`Updated signal ${sig.id} with slug: ${slug}`);
-    } catch (err) {
-      console.error(`Failed to backfill signal ${sig.id}:`, err.message);
-    }
-  }
-
-  console.log("Backfill complete!");
-}
-
-backfillEventSlugs();
-
-
 /* ===========================
    Polymarket API with retries + cache
 =========================== */
@@ -260,21 +203,21 @@ async function updateNotes(slug, text) {
 async function trackWallet(wallet) {
   if (wallet.paused) return;
 
-  let trades = [];
-  let identityUsed = null;
+  // Fetch positions (user’s actual picks)
+  let positions = [];
+  const userId = wallet.polymarket_proxy_wallet || wallet.polymarket_username;
+  if (!userId) return;
 
-  // Fetch trades via proxy or username
-  if (wallet.polymarket_proxy_wallet) {
-    trades = await fetchLatestTrades(wallet.polymarket_proxy_wallet);
-    if (trades.length) identityUsed = "proxy";
+  try {
+    const url = `https://data-api.polymarket.com/positions?user=${userId}&limit=100`;
+    const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+    if (res.ok) positions = await res.json();
+    else console.log(`Failed to fetch positions for wallet ${wallet.id}, status: ${res.status}`);
+  } catch (err) {
+    console.error(`Failed to fetch positions for wallet ${wallet.id}:`, err.message);
   }
 
-  if (!trades.length && wallet.polymarket_username) {
-    trades = await fetchLatestTrades(wallet.polymarket_username);
-    if (trades.length) identityUsed = "username";
-  }
-
-  if (!trades.length) {
+  if (!positions.length) {
     await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
     return;
   }
@@ -282,54 +225,35 @@ async function trackWallet(wallet) {
   // Fetch existing tx_hashes for this wallet to avoid duplicates
   const { data: existingSignals } = await supabase
     .from("signals")
-    .select("tx_hash")
+    .select("tx_hash, market_id")
     .eq("wallet_id", wallet.id);
+  const existingTxs = new Set(existingSignals?.map(s => s.tx_hash));
+  const existingMarkets = new Set(existingSignals?.map(s => s.market_id));
 
-  const existingTxs = new Set(existingSignals?.map(s => s.tx_hash) || []);
+  for (const pos of positions) {
+    // Skip duplicates
+    if (existingTxs.has(pos.asset) || existingMarkets.has(pos.conditionId)) continue;
 
-  for (const trade of trades) {
-    // Skip duplicates or mismatched proxy wallet
-    if (identityUsed === "proxy" && trade.proxyWallet?.toLowerCase() !== wallet.polymarket_proxy_wallet?.toLowerCase()) continue;
-    if (existingTxs.has(trade.transactionHash)) continue;
+    const pickedOutcome = pos.outcome || derivePickedOutcome(pos);
+    const eventSlug = pos.eventSlug || pos.slug;
 
-    const pickedOutcome = derivePickedOutcome(trade);
+    console.log("[INSERT PICK]", pos.asset, pickedOutcome, eventSlug);
 
-    // Fetch eventSlug from trade or fallback to API using conditionId
-    let eventSlug = trade.eventSlug || null;
-    if (!eventSlug) {
-      try {
-        const res = await fetch(`https://data-api.polymarket.com/markets/${trade.conditionId}`, {
-          headers: { "User-Agent": "Mozilla/5.0" },
-        });
-        if (res.ok) {
-          const marketData = await res.json();
-          eventSlug = marketData.slug || marketData.eventSlug || null;
-        } else {
-          console.log(`Market not found for conditionId: ${trade.conditionId} (status ${res.status})`);
-        }
-      } catch (err) {
-        console.error(`Failed to fetch slug for market ${trade.conditionId}:`, err.message);
-      }
-    }
-
-    console.log("[INSERT PICK]", trade.transactionHash, trade.outcome, trade.outcomeIndex, pickedOutcome, eventSlug);
-
-    // Insert signal
     try {
       await supabase.from("signals").insert({
         wallet_id: wallet.id,
-        signal: trade.title,
-        market_name: trade.title,
-        market_id: trade.conditionId,
-        event_slug: eventSlug,           // ✅ Added
-        side: trade.side.toUpperCase(),
+        signal: pos.title,
+        market_name: pos.title,
+        market_id: pos.conditionId,
+        event_slug: eventSlug,
+        side: pos.side?.toUpperCase() || "BUY",
         picked_outcome: pickedOutcome,
-        tx_hash: trade.transactionHash,
+        tx_hash: pos.asset,
         outcome: "Pending",
-        created_at: new Date(trade.timestamp * 1000),
+        created_at: new Date(pos.timestamp * 1000 || Date.now()),
         wallet_count: 1,
         wallet_set: [String(wallet.id)],
-        tx_hashes: [trade.transactionHash],
+        tx_hashes: [pos.asset],
       });
     } catch (err) {
       console.error("Insert failed:", err.message);
@@ -339,6 +263,7 @@ async function trackWallet(wallet) {
   // Update last_checked
   await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
 }
+
 
 
 /* ===========================
@@ -356,17 +281,14 @@ async function resolvePendingOutcomes() {
   console.log(`Resolving ${pendingSignals.length} pending signals...`);
 
   for (const sig of pendingSignals) {
-    if (!sig.tx_hash) continue;
-
-    // Must have event_slug to fetch outcome
     const eventSlug = sig.event_slug;
     if (!eventSlug) {
       console.log(`Skipping signal ${sig.id}, missing event_slug`);
       continue;
     }
 
-    // Fetch event data from Polymarket API
-    let eventData = null;
+    // Fetch event data
+    let eventData;
     try {
       const res = await fetch(`https://data-api.polymarket.com/events/${eventSlug}`, {
         headers: { "User-Agent": "Mozilla/5.0" },
@@ -383,32 +305,25 @@ async function resolvePendingOutcomes() {
 
     if (!eventData) continue;
 
-    // Determine winning outcome label
-    let winningOutcome = eventData.outcomeName || 
-                         (eventData.winningOutcomeIndex !== undefined ? `OPTION_${eventData.winningOutcomeIndex}` : null);
+    // Determine winning outcome
+    const winningOutcome =
+      eventData.outcomeName ||
+      (eventData.winningOutcomeIndex !== undefined ? `OPTION_${eventData.winningOutcomeIndex}` : null);
     if (!winningOutcome) continue;
 
     // Determine result
     const picked = sig.picked_outcome;
-    const result = picked && picked === winningOutcome ? "WIN" : "LOSS";
+    const result = picked === winningOutcome ? "WIN" : "LOSS";
 
     // Update signal row
-    await supabase
-      .from("signals")
-      .update({
-        resolved_outcome: winningOutcome,
-        outcome: result,
-        outcome_at: new Date(),
-      })
-      .eq("id", sig.id);
+    await supabase.from("signals").update({
+      resolved_outcome: winningOutcome,
+      outcome: result,
+      outcome_at: new Date(),
+    }).eq("id", sig.id);
 
     // Update wallet losing streak
-    const { data: wallet } = await supabase
-      .from("wallets")
-      .select("*")
-      .eq("id", sig.wallet_id)
-      .maybeSingle();
-
+    const { data: wallet } = await supabase.from("wallets").select("*").eq("id", sig.wallet_id).maybeSingle();
     if (wallet) {
       if (result === "LOSS") {
         const streak = (wallet.losing_streak || 0) + 1;
@@ -430,6 +345,7 @@ async function resolvePendingOutcomes() {
 
   console.log("Pending outcome resolution complete!");
 }
+
 
 /* ===========================
    Send Result Notes

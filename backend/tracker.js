@@ -458,7 +458,6 @@ async function main() {
       console.log("Wallets loaded:", wallets.length);
 
       await Promise.all(wallets.map(trackWallet));
-      await resolvePendingOutcomes();
     } catch (e) {
       console.error("Loop error:", e);
       await sendTelegram(`Tracker loop error: ${e.message}`);

@@ -422,35 +422,10 @@ async function trackWallet(wallet) {
   const wins = resolvedSignals?.filter(s => s.outcome === "WIN").length || 0;
   const winRate = totalResolved > 0 ? (wins / totalResolved) * 100 : 0;
 
-  // 7️⃣ Count live/unresolved signals
-  const { data: liveSignals } = await supabase
-    .from("signals")
-    .select("id")
-    .eq("wallet_id", wallet.id)
-    .eq("outcome", "Pending");
-  const livePicks = liveSignals?.length || 0;
-
-  // 8️⃣ Determine pause status
-  const paused = losingStreak >= LOSING_STREAK_THRESHOLD || winRate < 80;
-
-  // 9️⃣ Update wallet once
-  const { error } = await supabase
-    .from("wallets")
-    .update({ losing_streak: losingStreak, win_rate: winRate, live_picks: livePicks, paused, last_checked: new Date() })
-    .eq("id", wallet.id);
-
-  if (error) console.error(`Wallet ${wallet.id} update failed:`, error);
-  else console.log(`Wallet ${wallet.id} — winRate: ${winRate.toFixed(2)}%, losingStreak: ${losingStreak}, livePicks: ${livePicks}, paused: ${paused}`);
-}
-
-// Clear old live picks for this wallet
-await supabase.from("wallet_live_picks").delete().eq("wallet_id", wallet.id);
-
-// Insert current unresolved / new picks
-const livePicks = positions.filter(pos => pos.cashPnl === null || pos.outcome === null);
-
-if (livePicks.length) {
-  const rows = livePicks.map(pos => ({
+ // 7️⃣ Count live/unresolved signals and prepare live picks rows
+const livePicksRows = positions
+  .filter(pos => pos.cashPnl === null || pos.outcome === null)
+  .map(pos => ({
     wallet_id: wallet.id,
     market_id: pos.conditionId,
     picked_outcome: pos.outcome || `OPTION_${pos.outcomeIndex}`,
@@ -460,8 +435,36 @@ if (livePicks.length) {
     resolved_outcome: pos.oppositeOutcome || null,
     fetched_at: new Date(),
   }));
-  await supabase.from("wallet_live_picks").insert(rows);
+
+// Clear old live picks for this wallet
+await supabase.from("wallet_live_picks").delete().eq("wallet_id", wallet.id);
+
+// Insert current unresolved / new picks
+if (livePicksRows.length) {
+  await supabase.from("wallet_live_picks").insert(livePicksRows);
 }
+
+// Count number of live picks for wallet metrics
+const livePicksCount = livePicksRows.length;
+
+// 8️⃣ Determine pause status
+const paused = losingStreak >= LOSING_STREAK_THRESHOLD || winRate < 80;
+
+// 9️⃣ Update wallet once with metrics + live picks count
+const { error } = await supabase
+  .from("wallets")
+  .update({
+    losing_streak: losingStreak,
+    win_rate: winRate,
+    live_picks: livePicksCount,
+    paused,
+    last_checked: new Date()
+  })
+  .eq("id", wallet.id);
+
+if (error) console.error(`Wallet ${wallet.id} update failed:`, error);
+else console.log(`Wallet ${wallet.id} — winRate: ${winRate.toFixed(2)}%, losingStreak: ${losingStreak}, livePicks: ${livePicksCount}, paused: ${paused}`);
+
 
 
 /* ===========================
@@ -653,20 +656,17 @@ async function fetchAndInsertLeaderboardWallets() {
 
         console.log(`Inserted wallet ${entry.proxyWallet} (user=${entry.userName})`);
         totalInserted++;
-
-           console.log(`Leaderboard fetch complete.
-  Total fetched: ${totalFetched}
-  Total inserted: ${totalInserted}
-  Total skipped: ${totalSkipped}`);
-}
-      }
+      } // end inner for
     } catch (err) {
       console.error(`Failed to fetch leaderboard (${period}):`, err.message);
     }
-  }
+  } // end outer for
 
-
-
+  console.log(`Leaderboard fetch complete.
+Total fetched: ${totalFetched}
+Total inserted: ${totalInserted}
+Total skipped: ${totalSkipped}`);
+}
 
 /* ===========================
    Daily Summary

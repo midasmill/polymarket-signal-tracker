@@ -34,6 +34,77 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 /* ===========================
+   Recalc All Wallet Stats
+=========================== */
+async function recalcAllWalletStats() {
+  try {
+    // Fetch all wallets
+    const { data: wallets } = await supabase.from("wallets").select("id");
+    if (!wallets?.length) return console.log("No wallets found");
+
+    for (const wallet of wallets) {
+      // Fetch all signals for this wallet
+      const { data: signals } = await supabase
+        .from("signals")
+        .select("market_id, outcome")
+        .eq("wallet_id", wallet.id);
+
+      if (!signals?.length) {
+        // No signals, reset stats
+        await supabase.from("wallets").update({
+          losing_streak: 0,
+          win_rate: 0,
+          paused: true,
+          last_checked: new Date(),
+        }).eq("id", wallet.id);
+        continue;
+      }
+
+      // Aggregate per market
+      const marketMap = {};
+      for (const s of signals) {
+        if (!marketMap[s.market_id]) marketMap[s.market_id] = { wins: 0, losses: 0 };
+        if (s.outcome === "WIN") marketMap[s.market_id].wins++;
+        else if (s.outcome === "LOSS") marketMap[s.market_id].losses++;
+      }
+
+      // Compute losing streak
+      const marketIds = Object.keys(marketMap).sort(); // chronological order if needed
+      let losingStreak = 0;
+      let maxStreak = 0;
+      for (const mid of marketIds) {
+        const { wins, losses } = marketMap[mid];
+        if (losses > wins) {
+          losingStreak++;
+          if (losingStreak > maxStreak) maxStreak = losingStreak;
+        } else {
+          losingStreak = 0;
+        }
+      }
+
+      // Compute win rate
+      const totalMarkets = Object.keys(marketMap).length;
+      const totalWins = Object.values(marketMap).reduce((sum, m) => sum + m.wins, 0);
+      const winRate = totalMarkets > 0 ? (totalWins / totalMarkets) * 100 : 0;
+
+      // Update wallet
+      await supabase.from("wallets").update({
+        losing_streak: maxStreak,
+        win_rate: winRate,
+        paused: maxStreak >= LOSING_STREAK_THRESHOLD || winRate < 80,
+        last_checked: new Date(),
+      }).eq("id", wallet.id);
+    }
+
+    console.log("All wallet stats recalculated successfully.");
+  } catch (err) {
+    console.error("Failed to recalc wallet stats:", err.message);
+  }
+}
+
+
+
+/* ===========================
    Markdown helper
 =========================== */
 function toBlockquote(text) {

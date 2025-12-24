@@ -104,6 +104,8 @@ async function fetchLatestTrades(user) {
 }
 
 async function fetchMarket(marketId) {
+  if (!marketId) return null;
+
   if (marketCache.has(marketId)) return marketCache.get(marketId);
 
   const url = `https://data-api.polymarket.com/markets/${marketId}`;
@@ -119,10 +121,15 @@ async function fetchMarket(marketId) {
     if (market) marketCache.set(marketId, market);
     return market;
   } catch (err) {
-    console.error(`Market fetch error (${marketId}):`, err.message);
+    if (err.message.includes("404")) {
+      console.log(`Market ${marketId} not found (404)`);
+    } else {
+      console.error(`Market fetch error (${marketId}):`, err.message);
+    }
     return null;
   }
 }
+
 
 
 /* ===========================

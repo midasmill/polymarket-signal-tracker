@@ -667,7 +667,7 @@ async function trackerLoop() {
     await Promise.all(wallets.map(trackWallet));
 
     // 3️⃣ Update wallet metrics (win_rate, losing streak, paused)
-    await updateWalletMetricsJS();
+   await updateWalletWinRatesAndPauseJS();
 
     // 4️⃣ Send majority signals
     await sendMajoritySignals();

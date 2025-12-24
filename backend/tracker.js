@@ -719,7 +719,7 @@ async function updatePreSignals() {
 =========================== */
 async function fetchAndInsertLeaderboardWallets() {
   const timePeriod = ["DAY", "WEEK", "MONTH", "ALL"];
-  const pageSize = 200; // fetch up to 100 at once
+  const pageSize = 100; // fetch up to 100 at once
   let offset = 0;
   let totalInserted = 0;
 

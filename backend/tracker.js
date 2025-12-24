@@ -97,7 +97,10 @@ async function recalcAllWalletStats() {
       // Compute win rate
       const totalMarkets = Object.keys(marketMap).length;
       const totalWins = Object.values(marketMap).reduce((sum, m) => sum + m.wins, 0);
-      winRate = (totalWinsInDB / totalResolvedSignalsInDB) * 100
+      const totalResolvedSignalsInDB = resolvedSignals?.length || 0;
+const totalWinsInDB = resolvedSignals?.filter(s => s.outcome === "WIN").length || 0;
+const winRate = totalResolvedSignalsInDB > 0 ? (totalWinsInDB / totalResolvedSignalsInDB) * 100 : 0;
+
 
       // Update wallet
 await supabase.from("wallets").update({
@@ -650,17 +653,19 @@ async function fetchAndInsertLeaderboardWallets() {
 
         console.log(`Inserted wallet ${entry.proxyWallet} (user=${entry.userName})`);
         totalInserted++;
+
+           console.log(`Leaderboard fetch complete.
+  Total fetched: ${totalFetched}
+  Total inserted: ${totalInserted}
+  Total skipped: ${totalSkipped}`);
+}
       }
     } catch (err) {
       console.error(`Failed to fetch leaderboard (${period}):`, err.message);
     }
   }
 
-  console.log(`Leaderboard fetch complete.
-  Total fetched: ${totalFetched}
-  Total inserted: ${totalInserted}
-  Total skipped: ${totalSkipped}`);
-}
+
 
 
 /* ===========================

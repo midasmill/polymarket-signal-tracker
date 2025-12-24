@@ -40,6 +40,7 @@ function toBlockquote(text) {
   return text.split("\n").map(line => `> ${line}`).join("\n");
 }
 
+
 /* ===========================
    Telegram helper
 =========================== */
@@ -320,6 +321,8 @@ async function resolvePendingOutcomes() {
       resolved_outcome: winningOutcome,
       outcome: result,
       outcome_at: new Date(),
+         pnl: trade?.cashPnl ?? null,
+  outcome_id: eventData?.winningOutcomeIndex ?? null,
     }).eq("id", sig.id);
 
     // Update wallet losing streak

@@ -101,6 +101,51 @@ async function fetchMarket(marketId) {
 }
 
 /* ===========================
+   One-time populate VW for all wallets + auto-pause
+=========================== */
+async function populateAllWalletWinRates() {
+  console.log("Starting VW population for all wallets...");
+
+  const { data: wallets } = await supabase.from("wallets").select("*");
+  if (!wallets || wallets.length === 0) {
+    console.log("No wallets found.");
+    return;
+  }
+
+  for (const wallet of wallets) {
+    try {
+      const vw = await calculateVolumeWeightedWinRate(wallet);
+      if (vw === null) {
+        console.log(`Wallet ${wallet.id}: no resolved trades found.`);
+        continue;
+      }
+
+      // Update wallet's win_rate
+      await supabase
+        .from("wallets")
+        .update({ win_rate: vw })
+        .eq("id", wallet.id);
+
+      console.log(`Wallet ${wallet.id}: VW updated to ${(vw * 100).toFixed(1)}%`);
+
+      // Auto-pause if VW < 80%
+      if (vw < 0.8 && !wallet.paused) {
+        await supabase
+          .from("wallets")
+          .update({ paused: true })
+          .eq("id", wallet.id);
+        console.log(`Wallet ${wallet.id} paused due to VW < 80%`);
+      }
+
+    } catch (err) {
+      console.error(`Failed to calculate VW for wallet ${wallet.id}:`, err.message);
+    }
+  }
+
+  console.log("VW population complete.");
+}
+
+/* ===========================
    VW Helpers
 =========================== */
 const resolutionCache = new Map();
@@ -724,6 +769,12 @@ async function main() {
 }
 
 main();
+
+// Run once on deploy / manually
+populateAllWalletWinRates()
+  .then(() => console.log("All wallets processed"))
+  .catch(err => console.error("Error populating VW:", err));
+
 
 /* ===========================
    Keep Render happy by binding to a port

@@ -65,12 +65,27 @@ async function sendTelegram(text, useBlockquote = false) {
     console.error("Telegram send failed:", err.message);
   }
 }
-                                                
+
 /* ===========================
    Polymarket API with retries + cache
 =========================== */
 const marketCache = new Map();
 
+async function fetchWithRetry(url, options = {}, retries = 3, delay = 1000) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const res = await fetch(url, options);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
+    } catch (err) {
+      if (i < retries - 1) {
+        await new Promise(r => setTimeout(r, delay));
+      } else {
+        throw err;
+      }
+    }
+  }
+}
 
 async function fetchLatestTrades(user) {
   const url = `https://data-api.polymarket.com/trades?limit=100&takerOnly=true&user=${user}`;
@@ -99,457 +114,6 @@ async function fetchMarket(marketId) {
     return null;
   }
 }
-
-/* ===========================
-   Populate VW and autopause wallets
-=========================== */
-async function updateWalletVolumeWeightedWinRates() {
-  const { data: wallets } = await supabase.from("wallets").select("*");
-  if (!wallets?.length) return;
-
-  console.log(`Calculating VW win rates for ${wallets.length} wallets...`);
-
-  for (const wallet of wallets) {
-    const identity = wallet.polymarket_proxy_wallet || wallet.polymarket_username;
-    if (!identity) continue;
-
-    let trades;
-    try {
-      trades = await fetchAllBuyCashTrades(identity);
-    } catch (err) {
-      console.error(`Failed to fetch trades for wallet ${wallet.id}:`, err.message);
-      continue;
-    }
-
-    if (!trades || trades.length === 0) {
-      console.log(`Wallet ${wallet.id}: no trades found`);
-      continue;
-    }
-
-    let totalVolume = 0;
-    let winningVolume = 0;
-
-    for (const t of trades) {
-      let resolvedSide;
-      try {
-        resolvedSide = await fetchMarketResolution(t.conditionId);
-      } catch (err) {
-        console.warn(`Wallet ${wallet.id}: fetch resolution failed for trade ${t.transactionHash}: ${err.message}`);
-        continue;
-      }
-
-      if (!resolvedSide) {
-        console.warn(`Wallet ${wallet.id}: skipping unresolved/404 trade ${t.transactionHash} (${t.conditionId})`);
-        continue;
-      }
-
-      totalVolume += t.size;
-      if (t.side.toUpperCase() === resolvedSide.toUpperCase()) winningVolume += t.size;
-    }
-
-    const vwWinRate = totalVolume > 0 ? winningVolume / totalVolume : 0;
-
-    try {
-      await supabase.from("wallets").update({ win_rate: vwWinRate }).eq("id", wallet.id);
-
-      if (vwWinRate < 0.8 && !wallet.paused) {
-        await supabase.from("wallets").update({ paused: true }).eq("id", wallet.id);
-        console.log(`Wallet ${wallet.id} paused due to VW win rate ${Math.round(vwWinRate*100)}%`);
-      } else {
-        console.log(`Wallet ${wallet.id}: VW win rate = ${Math.round(vwWinRate*100)}%`);
-      }
-    } catch (err) {
-      console.error(`Failed to update wallet ${wallet.id}:`, err.message);
-    }
-  }
-
-  console.log("VW win rate update complete.");
-}
-
-
-/* ===========================
-   One-time populate VW for all wallets + auto-pause
-=========================== */
-async function populateAllWalletWinRates() {
-  console.log("Starting VW population for all wallets...");
-
-  const { data: wallets } = await supabase.from("wallets").select("*");
-  if (!wallets || wallets.length === 0) {
-    console.log("No wallets found.");
-    return;
-  }
-
-  for (const wallet of wallets) {
-    try {
-      const vw = await calculateVolumeWeightedWinRate(wallet);
-      if (vw === null) {
-        console.log(`Wallet ${wallet.id}: no resolved trades found.`);
-        continue;
-      }
-
-      // Update wallet's win_rate
-      await supabase
-        .from("wallets")
-        .update({ win_rate: vw })
-        .eq("id", wallet.id);
-
-      console.log(`Wallet ${wallet.id}: VW updated to ${(vw * 100).toFixed(1)}%`);
-
-      // Auto-pause if VW < 80%
-      if (vw < 0.8 && !wallet.paused) {
-        await supabase
-          .from("wallets")
-          .update({ paused: true })
-          .eq("id", wallet.id);
-        console.log(`Wallet ${wallet.id} paused due to VW < 80%`);
-      }
-
-    } catch (err) {
-      console.error(`Failed to calculate VW for wallet ${wallet.id}:`, err.message);
-    }
-  }
-
-  console.log("VW population complete.");
-}
-
-/* ===========================
-   VW Helpers
-=========================== */
-const resolutionCache = new Map();
-
-/* ===========================
-   Fetch trades with retries
-=========================== */
-async function fetchWithRetry(url, options = {}, retries = 3, delay = 1000) {
-  for (let i = 0; i < retries; i++) {
-    try {
-      const res = await fetch(url, options);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return await res.json();
-    } catch (err) {
-      if (i < retries - 1) await new Promise(r => setTimeout(r, delay));
-      else throw err;
-    }
-  }
-}
-
-/* ===========================
-   Fetch all BUY CASH trades for a wallet/identity
-=========================== */
-
-async function fetchAllBuyCashTrades(identity) {
-  if (!identity) return [];
-
-  let all = [];
-  let offset = 0;
-  const limit = 100;
-
-  while (true) {
-    const url =
-      `https://data-api.polymarket.com/trades?user=${identity}` +
-      `&side=BUY&takerOnly=true&filterType=CASH&limit=${limit}&offset=${offset}`;
-
-    let page;
-    try {
-      // Use your existing fetchWithRetry helper: retries 5x, 1500ms delay
-      page = await fetchWithRetry(url, { headers: { "User-Agent": "Mozilla/5.0" } }, 5, 1500);
-    } catch (err) {
-      console.error(`Failed to fetch trades for identity ${identity} (offset ${offset}):`, err.message);
-      break; // skip this identity for now
-    }
-
-    if (!Array.isArray(page) || page.length === 0) break;
-
-    all.push(...page);
-    if (page.length < limit) break;
-    offset += limit;
-
-    // slight delay to reduce connection drops
-    await new Promise(r => setTimeout(r, 200));
-  }
-
-  return all;
-}
-
-
-/* ===========================
-   Fetch market resolution
-=========================== */
-const marketResolutionCache = new Map();
-
-async function fetchMarketResolution(conditionId) {
-  try {
-    const market = await fetchWithRetry(`https://polymarket.com/api/markets/${conditionId}`);
-    if (!market || !market.resolved) return null; // not resolved yet
-
-    return String(market.winningOutcome || "").toUpperCase();
-  } catch (err) {
-    if (err.message.includes("404")) {
-      console.warn(`Market resolution not found for conditionId ${conditionId} (404)`);
-      return null; // skip this trade
-    }
-    console.error(`Error fetching market ${conditionId}:`, err.message);
-    return null;
-  }
-}
-
-
-/* ===========================
-   Calculate Volume-Weighted Win Rate
-=========================== */
-async function calculateVolumeWeightedWinRate(wallet) {
-
-  const trades = await fetchAllBuyCashTrades(wallet.polymarket_proxy_wallet || wallet.polymarket_username);
-  if (!trades || trades.length === 0) return null;
-
-  const now = Date.now();
-  const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
-
-  let totalVolume = 0;
-  let winningVolume = 0;
-
-  for (const t of trades) {
-    if (t.timestamp * 1000 < sevenDaysAgo) continue; // skip trades older than 7 days
-
-    let resolvedSide;
-    try {
-      resolvedSide = await fetchMarketResolution(t.conditionId);
-    } catch (err) {
-      console.warn(`Failed to fetch resolution for trade ${t.transactionHash}: ${err.message}`);
-      continue; // skip this trade
-    }
-
-    if (!resolvedSide) {
-      console.warn(`Skipping unresolved or 404 trade ${t.transactionHash} with conditionId ${t.conditionId}`);
-      continue;
-    }
-
-    totalVolume += t.size;
-    if (t.side.toUpperCase() === resolvedSide.toUpperCase()) {
-      winningVolume += t.size;
-    }
-  }
-
-  return totalVolume > 0 ? winningVolume / totalVolume : null;
-}
-
-
-
-/* ===========================
-   Track Wallet Trades (Debug-Friendly)
-=========================== */
-async function trackWallet(wallet) {
-  // Skip paused wallets or wallets below 80% VW
-  if (wallet.paused) {
-    console.log(`Wallet ${wallet.id} skipped: paused`);
-    return;
-  }
-  if (wallet.win_rate != null && wallet.win_rate < 0.8) {
-    console.log(`Wallet ${wallet.id} skipped due to low VW win rate (${Math.round(wallet.win_rate * 100)}%)`);
-    return;
-  }
-
-  let trades = [];
-  let identityUsed = null;
-
-  // Try fetching trades via proxy wallet
-  if (wallet.polymarket_proxy_wallet) {
-    console.log(`Wallet ${wallet.id}: trying proxy wallet ${wallet.polymarket_proxy_wallet}`);
-    trades = await fetchLatestTrades(wallet.polymarket_proxy_wallet);
-    if (trades.length > 0) identityUsed = "proxy";
-  }
-
-  // If no trades via proxy, try username
-  if (trades.length === 0 && wallet.polymarket_username) {
-    console.log(`Wallet ${wallet.id}: proxy empty, trying username ${wallet.polymarket_username}`);
-    trades = await fetchLatestTrades(wallet.polymarket_username);
-    if (trades.length > 0) identityUsed = "username";
-  }
-
-  if (trades.length === 0) {
-    console.log(`Wallet ${wallet.id}: skipped (no trades found)`);
-    await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
-    return;
-  }
-
-  // Log raw trades for debugging
-  console.log(`Wallet ${wallet.id}: ${trades.length} trades fetched using ${identityUsed}`);
-  console.log(trades.map(t => ({
-    tx: t.transactionHash,
-    conditionId: t.conditionId,
-    side: t.side,
-    title: t.title,
-    size: t.size
-  })));
-
-  let insertedCount = 0;
-
-  for (const trade of trades) {
-    // Skip trades missing key fields
-    if (!trade.conditionId || !trade.transactionHash) {
-      console.warn(`Skipping trade with missing conditionId or transactionHash:`, trade);
-      continue;
-    }
-
-    // Temporarily bypass strict proxyWallet check for debugging
-    // if (identityUsed === "proxy" && trade.proxyWallet && trade.proxyWallet.toLowerCase() !== wallet.polymarket_proxy_wallet.toLowerCase()) continue;
-
-    const { data: existing } = await supabase
-      .from("signals")
-      .select("id")
-      .eq("market_id", trade.conditionId)
-      .eq("wallet_id", wallet.id)
-      .eq("tx_hash", trade.transactionHash)
-      .maybeSingle();
-
-    if (existing) continue;
-
-    try {
-      await supabase.from("signals").insert({
-        wallet_id: wallet.id,
-        signal: trade.title || "Unknown Market",
-        market_name: trade.title || "Unknown Market",
-        market_id: trade.conditionId,
-        side: trade.outcome ? String(trade.outcome).toUpperCase() : "UNKNOWN",
-        tx_hash: trade.transactionHash,
-        outcome: "Pending",
-        created_at: trade.timestamp ? new Date(trade.timestamp * 1000) : new Date(),
-        wallet_count: 1,
-        wallet_set: [String(wallet.id)],
-        tx_hashes: [trade.transactionHash],
-      });
-      insertedCount++;
-    } catch (err) {
-      console.error(`Insert failed for trade ${trade.transactionHash}:`, err.message);
-    }
-  }
-
-  if (insertedCount > 0) console.log(`Inserted ${insertedCount} new trades for wallet ${wallet.id}`);
-
-  // Update last_checked timestamp
-  await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
-}
-
-/* ===========================
-   Bootstrap: Populate signals table
-=========================== */
-async function bootstrapSignalsForLeaderboardWallets() {
-  console.log("Bootstrapping signals for leaderboard wallets...");
-
-  // Fetch all wallets currently in the wallets table
-  const { data: wallets } = await supabase.from("wallets").select("*");
-  if (!wallets || wallets.length === 0) {
-    console.log("No wallets found in DB. Please fetch leaderboard wallets first.");
-    return;
-  }
-
-  for (const wallet of wallets) {
-    console.log(`Fetching trades for wallet ${wallet.id} (${wallet.polymarket_proxy_wallet || wallet.polymarket_username})`);
-    
-    let trades = [];
-    let identityUsed = null;
-
-    // Try proxy wallet first
-    if (wallet.polymarket_proxy_wallet) {
-      trades = await fetchLatestTrades(wallet.polymarket_proxy_wallet);
-      if (trades.length > 0) identityUsed = "proxy";
-    }
-
-    // Fallback to username
-    if (trades.length === 0 && wallet.polymarket_username) {
-      trades = await fetchLatestTrades(wallet.polymarket_username);
-      if (trades.length > 0) identityUsed = "username";
-    }
-
-    if (trades.length === 0) {
-      console.log(`No trades found for wallet ${wallet.id}`);
-      continue;
-    }
-
-    console.log(`Found ${trades.length} trades for wallet ${wallet.id} using ${identityUsed}`);
-
-    for (const trade of trades) {
-      // Skip if trade already exists
-      const { data: existing } = await supabase
-        .from("signals")
-        .select("id")
-        .eq("market_id", trade.conditionId)
-        .eq("wallet_id", wallet.id)
-        .eq("tx_hash", trade.transactionHash)
-        .maybeSingle();
-
-      if (existing) continue;
-
-      // Insert trade into signals table
-      await supabase.from("signals").insert({
-        wallet_id: wallet.id,
-        signal: trade.title,
-        market_name: trade.title,
-        market_id: trade.conditionId,
-        side: String(trade.outcome).toUpperCase(),
-        tx_hash: trade.transactionHash,
-        outcome: "Pending",
-        created_at: new Date(trade.timestamp * 1000),
-        wallet_count: 1,
-        wallet_set: [String(wallet.id)],
-        tx_hashes: [trade.transactionHash],
-      });
-    }
-  }
-
-  console.log("Bootstrap complete. Signals table populated.");
-}
-
-
-/* ===========================
-   Daily VW Calculation + Auto-pause
-=========================== */
-async function dailyVolumeWeightedCheck() {
-  const { data: wallets } = await supabase.from("wallets").select("*");
-  if (!wallets?.length) return;
-
-  console.log(`Calculating VW for ${wallets.length} wallets...`);
-
-  for (const wallet of wallets) {
-    const vw = await calculateVolumeWeightedWinRate(wallet);
-    if (vw === null) continue;
-
-    console.log(`Wallet ${wallet.id}: VW = ${(vw * 100).toFixed(2)}%`);
-
-    if (vw < 0.8) {
-      console.log(`Wallet ${wallet.id} paused (VW < 80%)`);
-      await supabase.from("wallets").update({ paused: true, win_rate: vw }).eq("id", wallet.id);
-    } else {
-      await supabase.from("wallets").update({ win_rate: vw }).eq("id", wallet.id);
-    }
-  }
-}
-
-
-
-
-/* ===========================
-   Daily Leaderboard + Pre-Signals
-=========================== */
-async function runDailyUpdate() {
-  const now = new Date();
-     console.log(`\n=== Daily Polymarket Update (${now.toLocaleString()}) ===`);
-
-   
-  // 1️⃣ Leaderboard fetch
-  console.log("-- Fetching new leaderboard wallets --");
-  await updateLeaderboard();
-  await fetchAndInsertLeaderboardWallets();
-  console.log("-- Leaderboard Update Complete --\n");
-
-  // 2️⃣ Pre-signals update
-    console.log("-- Updating Pre-Signals --");
-  await updatePreSignals();
-  console.log("-- Pre-Signals Update Complete --\n");
-
-  console.log(`=== Daily Update Complete (${new Date().toLocaleString()}) ===\n`);
-}
-
 
 /* ===========================
    Confidence helpers
@@ -604,6 +168,95 @@ function getMajorityConfidence(counts) {
   return getConfidenceEmoji(Math.max(...Object.values(counts)));
 }
 
+/* ===========================
+   Track Wallet Trades (Resolved + Unresolved)
+=========================== */
+async function trackWallet(wallet) {
+  if (wallet.paused) return;
+
+  let trades = [];
+  let identityUsed = null;
+
+  // Try proxy wallet first
+  if (wallet.polymarket_proxy_wallet) {
+    console.log(`Wallet ${wallet.id}: trying proxy wallet ${wallet.polymarket_proxy_wallet}`);
+    trades = await fetchLatestTrades(wallet.polymarket_proxy_wallet);
+    if (trades.length > 0) identityUsed = "proxy";
+  }
+
+  // If no trades from proxy, try username
+  if (trades.length === 0 && wallet.polymarket_username) {
+    console.log(`Wallet ${wallet.id}: proxy empty, trying username ${wallet.polymarket_username}`);
+    trades = await fetchLatestTrades(wallet.polymarket_username);
+    if (trades.length > 0) identityUsed = "username";
+  }
+
+  if (trades.length === 0) {
+    console.log(`Wallet ${wallet.id}: skipped (no trades via proxy or username)`);
+    await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
+    return;
+  }
+
+  console.log(`Wallet ${wallet.id}: ${trades.length} trades found using ${identityUsed}`);
+
+  let insertedCount = 0;
+
+  for (const trade of trades) {
+    // Only allow proxy wallet if identity used is proxy
+    if (identityUsed === "proxy" &&
+        trade.proxyWallet &&
+        trade.proxyWallet.toLowerCase() !== wallet.polymarket_proxy_wallet.toLowerCase()) {
+      continue;
+    }
+
+    // Skip duplicates
+    const { data: existing } = await supabase
+      .from("signals")
+      .select("id")
+      .eq("market_id", trade.conditionId)
+      .eq("wallet_id", wallet.id)
+      .eq("tx_hash", trade.transactionHash)
+      .maybeSingle();
+    if (existing) continue;
+
+    // Fetch market to check if resolved
+    const market = await fetchMarket(trade.conditionId);
+    let outcome = "Pending";
+    let pnl = null;
+    let outcome_at = null;
+
+    if (market?.resolved) {
+      const winningSide = String(market.winningOutcome || "").toUpperCase();
+      outcome = String(trade.outcome).toUpperCase() === winningSide ? "WIN" : market.cancelled ? "PUSH" : "LOSS";
+      pnl = trade.pnl ?? null; // Use trade.pnl if available
+      outcome_at = new Date(trade.timestamp * 1000); // Use trade timestamp for resolved
+    }
+
+    await supabase.from("signals").insert({
+      wallet_id: wallet.id,
+      signal: trade.title,
+      market_name: trade.title,
+      market_id: trade.conditionId,
+      side: String(trade.outcome).toUpperCase(),
+      tx_hash: trade.transactionHash,
+      outcome,
+      pnl,
+      created_at: new Date(trade.timestamp * 1000),
+      outcome_at,
+      wallet_count: 1,
+      wallet_set: [String(wallet.id)],
+      tx_hashes: [trade.transactionHash],
+    });
+
+    insertedCount++;
+  }
+
+  if (insertedCount > 0) console.log(`Inserted ${insertedCount} new trades for wallet ${wallet.id}`);
+
+  // Update last_checked for wallet
+  await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
+}
+
 
 /* ===========================
    Format Signal
@@ -647,13 +300,21 @@ async function sendResultNotes(sig, result) {
 }
 
 /* ===========================
-   Resolve outcomes & losing streaks
+   Resolve pending outcomes (auto-fill pnl)
 =========================== */
 async function updatePendingOutcomes() {
-  const { data: pending } = await supabase.from("signals").select("*").eq("outcome", "Pending");
+  // Fetch all pending signals
+  const { data: pending } = await supabase
+    .from("signals")
+    .select("*")
+    .eq("outcome", "Pending");
+
   if (!pending?.length) return;
 
+  // Get unique market IDs
   const marketIds = [...new Set(pending.map(s => s.market_id))];
+
+  // Fetch all markets
   const markets = await Promise.all(marketIds.map(id => fetchMarket(id)));
   const marketMap = Object.fromEntries(markets.map(m => [m?.id, m]));
 
@@ -666,67 +327,59 @@ async function updatePendingOutcomes() {
     const winningSide = String(market.winningOutcome || "").toUpperCase();
     if (!winningSide) continue;
 
+    // Determine outcome
     const result = sig.side === winningSide ? "WIN" : market.cancelled ? "PUSH" : "LOSS";
 
-    await supabase.from("signals").update({ outcome: result, outcome_at: new Date() }).eq("id", sig.id);
+    // Calculate pnl if available
+    let pnl = sig.pnl ?? null;
+    if (!pnl && sig.side && market) {
+      // Attempt to calculate pnl: trade amount * (odds if win, 0 if loss)
+      // Here, we assume market.trades contains trade info if needed
+      const trade = market.trades?.find(t => t.transactionHash === sig.tx_hash);
+      if (trade) pnl = trade.pnl ?? null;
+    }
 
-    const { data: wallet } = await supabase.from("wallets").select("*").eq("id", sig.wallet_id).single();
+    // Update signal
+    await supabase
+      .from("signals")
+      .update({
+        outcome: result,
+        outcome_at: new Date(),
+        pnl,
+      })
+      .eq("id", sig.id);
 
-    if (result === "LOSS") {
-      const streak = (wallet.losing_streak || 0) + 1;
-      await supabase.from("wallets").update({ losing_streak: streak }).eq("id", wallet.id);
+    // Update wallet losing streak
+    const { data: wallet } = await supabase
+      .from("wallets")
+      .select("*")
+      .eq("id", sig.wallet_id)
+      .single();
 
-      if (streak >= LOSING_STREAK_THRESHOLD) {
-        await supabase.from("wallets").update({ paused: true }).eq("id", wallet.id);
-        await sendTelegram(`Wallet paused due to losing streak:\nWallet ID: ${wallet.id}\nLosses: ${streak}`);
+    if (wallet) {
+      if (result === "LOSS") {
+        const streak = (wallet.losing_streak || 0) + 1;
+        await supabase.from("wallets").update({ losing_streak: streak }).eq("id", wallet.id);
+
+        if (streak >= LOSING_STREAK_THRESHOLD) {
+          await supabase.from("wallets").update({ paused: true }).eq("id", wallet.id);
+          await sendTelegram(`Wallet paused due to losing streak:\nWallet ID: ${wallet.id}\nLosses: ${streak}`);
+        }
+      } else if (result === "WIN") {
+        // Reset losing streak if win
+        await supabase.from("wallets").update({ losing_streak: 0 }).eq("id", wallet.id);
       }
     }
+
+    // Send result notification
+    await sendResultNotes(sig, result);
 
     resolvedAny = true;
-    await sendResultNotes(sig, result);
   }
 
+  // After resolving, update majority signals
   if (resolvedAny) await sendMajoritySignals();
 }
-
-
-
-/* ===========================
-   Daily Volume-Weighted Win Rate Update
-=========================== */
-async function updateWalletVW() {
-  const { data: wallets } = await supabase.from("wallets").select("*");
-
-  if (!wallets?.length) return;
-
-  for (const wallet of wallets) {
-    try {
-      const vw = await calculateVolumeWeightedWinRate(wallet);
-      if (vw == null) continue;
-
-      // Update wallet with VW
-      await supabase
-        .from("wallets")
-        .update({ win_rate: vw })
-        .eq("id", wallet.id);
-
-       
-      // Autopause wallets with VW < 80%
-      if (vw < 0.8 && !wallet.paused) {
-        await supabase.from("wallets").update({ paused: true }).eq("id", wallet.id);
-        console.log(`Wallet ${wallet.id} paused (VW=${(vw*100).toFixed(1)}%)`);
-      } else {
-        console.log(`Wallet ${wallet.id} VW updated: ${(vw*100).toFixed(1)}%`);
-      }
-    } catch (err) {
-      console.error(`Error updating VW for wallet ${wallet.id}:`, err.message);
-    }
-  }
-}
-
-
-
-
 
 /* ===========================
    Send majority signals
@@ -805,167 +458,75 @@ async function updatePreSignals() {
 }
 
 
-
 /* ===========================
-   Fetch new leaderboard wallets from Polymarket (Bootstrap + VW)
+   Fetch new leaderboard wallets from Polymarket
 =========================== */
 async function fetchAndInsertLeaderboardWallets() {
-  const timePeriod = ["DAY", "WEEK", "MONTH", "ALL"];
-  const pageSize = 200; // fetch up to 100 at once
+  const timePeriods = ["DAY", "WEEK", "MONTH", "ALL"];
   let totalInserted = 0;
 
-  for (const period of timePeriod) {
-    let offset = 0;
+  for (const period of timePeriods) {
+    let fetched = 0;
+    let passed = 0;
+    let inserted = 0;
+    let duplicates = 0;
 
-    while (true) {
-      try {
-        const url = `https://data-api.polymarket.com/v1/leaderboard?category=OVERALL&timePeriod=${period}&orderBy=PNL&limit=${pageSize}&offset=${offset}`;
-        const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        if (!Array.isArray(data) || data.length === 0) break;
+    try {
+      const url = `https://data-api.polymarket.com/v1/leaderboard?category=OVERALL&timePeriod=${period}&orderBy=PNL&limit=50`;
+      const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      fetched = data.length;
+      console.log(`[LEADERBOARD][${period}] Fetched=${fetched}`);
 
-        console.log(`[LEADERBOARD][${period}] Fetched=${data.length}, Offset=${offset}`);
+      for (const entry of data) {
+        // Skip entries without proxyWallet
+        if (!entry.proxyWallet) continue;
 
-        let passed = 0, inserted = 0, duplicates = 0;
+        // PnL and volume filter
+        if (entry.pnl >= 100 && entry.vol < 6 * entry.pnl) {
+          passed++;
 
-        for (const entry of data) {
-          if (!entry.proxyWallet) continue;
+          // Insert only if not already in wallets table
+          const { data: existing } = await supabase
+            .from("wallets")
+            .select("id")
+            .or(
+              `polymarket_proxy_wallet.eq.${entry.proxyWallet},polymarket_username.eq.${entry.userName}`
+            )
+            .maybeSingle();
 
-          // PnL / volume filter
-          if (entry.pnl >= 10000 && entry.vol < 6 * entry.pnl) {
-            passed++;
+          if (existing) {
+            duplicates++;
+            continue;
+          }
 
-            // Insert wallet if not exists
-            const { data: existing } = await supabase
-              .from("wallets")
-              .select("id")
-              .or(`polymarket_proxy_wallet.eq.${entry.proxyWallet},polymarket_username.eq.${entry.userName}`)
-              .maybeSingle();
-
-            if (existing) {
-              duplicates++;
-              continue;
-            }
-
-            try {
-              const { data: insertedWallet } = await supabase.from("wallets").insert({
-                polymarket_proxy_wallet: entry.proxyWallet,
-                polymarket_username: entry.userName,
-                last_checked: new Date(),
-                paused: false,
-              }).select().single();
-
-              inserted++;
-              totalInserted++;
-
-              // Calculate VW for this wallet after inserting
-              const vw = await calculateVolumeWeightedWinRate(insertedWallet);
-              if (vw === null) {
-                console.log(`VW not available yet for wallet ${entry.proxyWallet}`);
-              } else if (vw < 0.8) {
-                console.log(`Pausing wallet ${entry.proxyWallet} due to VW < 80% (${(vw*100).toFixed(1)}%)`);
-                await supabase.from("wallets").update({ paused: true }).eq("id", insertedWallet.id);
-              } else {
-                console.log(`Wallet ${entry.proxyWallet} has VW ${(vw*100).toFixed(1)}%`);
-              }
-
-            } catch (err) {
-              console.error("Insert wallet failed:", err.message);
-            }
+          try {
+            await supabase.from("wallets").insert({
+              polymarket_proxy_wallet: entry.proxyWallet,
+              polymarket_username: entry.userName,
+              last_checked: new Date(),
+              paused: false,
+            });
+            inserted++;
+            totalInserted++;
+          } catch (err) {
+            console.error("Insert wallet failed:", err.message);
           }
         }
-
-        console.log(`[LEADERBOARD][${period}] Passed=${passed} Inserted=${inserted} Duplicates=${duplicates}`);
-
-        if (data.length < pageSize) break; // last page reached
-        offset += pageSize;
-
-      } catch (err) {
-        console.error(`Failed to fetch leaderboard (${period}):`, err.message);
-        break;
       }
+    } catch (err) {
+      console.error(`Failed to fetch leaderboard (${period}):`, err.message);
     }
+
+    console.log(
+      `[LEADERBOARD][${period}] Passed=${passed} Inserted=${inserted} Duplicates=${duplicates}`
+    );
   }
 
   console.log(`Leaderboard fetch complete. Total new wallets inserted: ${totalInserted}`);
 }
 
-
-
-/* ===========================
-   Fetch resolved trades in last 7 days
-=========================== */
-async function fetchResolvedTradesLast7Days(identity) {
-  const allTrades = [];
-  const limit = 100;
-  let offset = 0;
-  const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-
-  while (true) {
-    const url = `https://data-api.polymarket.com/trades` +
-                `?user=${identity}` +
-                `&takerOnly=true` +
-                `&side=BUY` +
-                `&limit=${limit}&offset=${offset}`;
-
-    let tradesPage;
-    try {
-      tradesPage = await fetchWithRetry(url, { headers: { "User-Agent": "Mozilla/5.0" } });
-    } catch (err) {
-      console.error(`Failed fetching trades for ${identity}: ${err.message}`);
-      break;
-    }
-
-    if (!Array.isArray(tradesPage) || tradesPage.length === 0) break;
-
-    // Filter by date (last 7 days)
-    const recentTrades = tradesPage.filter(t => t.timestamp * 1000 >= sevenDaysAgo);
-    if (recentTrades.length === 0) break;
-
-    allTrades.push(...recentTrades);
-
-    if (tradesPage.length < limit) break; // last page
-    offset += limit;
-  }
-
-  // Fetch resolutions for each trade and only keep resolved ones
-  const resolvedTrades = [];
-  for (const t of allTrades) {
-    let resolvedSide;
-    try {
-      resolvedSide = await fetchMarketResolution(t.conditionId);
-    } catch (err) {
-      console.warn(`Skipping trade ${t.transactionHash} - market not found or unresolved`);
-      continue;
-    }
-    if (!resolvedSide) continue;
-    resolvedTrades.push({ ...t, resolvedSide });
-  }
-
-  return resolvedTrades;
-}
-
-/* ===========================
-   Calculate VW using resolved trades
-=========================== */
-async function calculateVWLast7Days(wallet) {
-  const identity = wallet.polymarket_proxy_wallet || wallet.polymarket_username;
-  const trades = await fetchResolvedTradesLast7Days(identity);
-  if (!trades || trades.length === 0) return null;
-
-  let totalVolume = 0;
-  let winningVolume = 0;
-
-  for (const t of trades) {
-    totalVolume += t.size;
-    if (t.side.toUpperCase() === t.resolvedSide.toUpperCase()) {
-      winningVolume += t.size;
-    }
-  }
-
-  return totalVolume > 0 ? winningVolume / totalVolume : null;
-}
 
 
 
@@ -1004,8 +565,7 @@ async function sendDailySummary() {
     .update({ content: toBlockquote(summaryText), public: true })
     .eq("slug", "polymarket-millionaires");
 
-  // Update wallet VW, leaderboard and fetch new wallets
-  await updateWalletWinRates();
+  // Update leaderboard and fetch new wallets
   await updateLeaderboard();
   await fetchAndInsertLeaderboardWallets();
 }
@@ -1016,11 +576,6 @@ async function sendDailySummary() {
 cron.schedule("0 7 * * *", () => {
   console.log("Running daily summary + leaderboard + new wallets fetch...");
   sendDailySummary();
-}, { timezone: TIMEZONE });
-
-cron.schedule("30 6 * * *", async () => {
-  console.log("Running daily VW calculation...");
-  await updateWalletVW();
 }, { timezone: TIMEZONE });
 
 /* ===========================
@@ -1039,9 +594,6 @@ async function main() {
 
       console.log("Wallets loaded:", wallets.length);
 
-           // trackWallet now automatically skips paused or low-VW wallets
-    await Promise.all(wallets.map(trackWallet));
-       
       await Promise.all(wallets.map(trackWallet));
       await updatePendingOutcomes();
       await updatePreSignals();
@@ -1053,12 +605,6 @@ async function main() {
 }
 
 main();
-
-// Run once on deploy / manually
-populateAllWalletWinRates()
-  .then(() => console.log("All wallets processed"))
-  .catch(err => console.error("Error populating VW:", err));
-
 
 /* ===========================
    Keep Render happy by binding to a port

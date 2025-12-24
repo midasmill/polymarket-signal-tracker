@@ -44,6 +44,7 @@ function toBlockquote(text) {
     .join("\n");
 }
 
+async function sendTelegram(text, useBlockquote = false) {
 /* ===========================
    Telegram helper
 =========================== */

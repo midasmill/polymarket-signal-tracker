@@ -34,6 +34,18 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 /* ===========================
+   Global Crash Logger
+=========================== */
+
+process.on("unhandledRejection", err => {
+  console.error("🔥 Unhandled rejection:", err);
+});
+
+process.on("uncaughtException", err => {
+  console.error("🔥 Uncaught exception:", err);
+});
+
+/* ===========================
    Recalc All Wallet Stats
 =========================== */
 async function recalcAllWalletStats() {
@@ -128,9 +140,11 @@ async function trackerLoop() {
     await updateWalletWinRatesAndPauseJS();
 
     console.log("✅ Tracker loop complete");
-  } catch (err) {
-    console.error("Tracker loop error:", err.message);
-  }
+} catch (err) {
+  console.error("Loop error:", err);
+
+  // ❌ Do NOT send loop-level errors to Telegram
+  // await sendTelegram(`Tracker loop error: ${err.message}`);
 }
 
 /* ===========================

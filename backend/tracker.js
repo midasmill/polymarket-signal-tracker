@@ -231,53 +231,63 @@ async function trackWallet(wallet) {
   const existingTxs = new Set(existingSignals?.map(s => s.tx_hash));
   const existingMarkets = new Set(existingSignals?.map(s => s.market_id));
 
-  for (const pos of positions) {
-    const pickedOutcome = pos.outcome || derivePickedOutcome(pos);
-    const eventSlug = pos.eventSlug || pos.slug;
-    const cashPnl = pos.cashPnl ?? 0;
-    const outcome = cashPnl < 0 ? "LOSS" : "WIN";
-    const resolved_outcome = cashPnl < 0 ? pos.oppositeOutcome || pickedOutcome : pickedOutcome;
+for (const pos of positions) {
+  const pickedOutcome = pos.outcome || derivePickedOutcome(pos);
+  const eventSlug = pos.eventSlug || pos.slug;
+  const cashPnl = pos.cashPnl ?? null;
 
-    // Update existing signal or insert new
-    const existingSig = existingSignals.find(s => s.market_id === pos.conditionId);
+  let outcome = "Pending";
+  let resolved_outcome = null;
 
-    if (existingSig) {
-      await supabase
-        .from("signals")
-        .update({ pnl: cashPnl, outcome, resolved_outcome, outcome_at: new Date() })
-        .eq("id", existingSig.id);
-    } else if (!existingTxs.has(pos.asset)) {
-      await supabase.from("signals").insert({
-        wallet_id: wallet.id,
-        signal: pos.title,
-        market_name: pos.title,
-        market_id: pos.conditionId,
-        event_slug: eventSlug,
-        side: pos.side?.toUpperCase() || "BUY",
-        picked_outcome: pickedOutcome,
-        tx_hash: pos.asset,
-        pnl: cashPnl,
-        outcome,
-        resolved_outcome,
-        outcome_at: new Date(),
-        created_at: new Date(pos.timestamp * 1000 || Date.now()),
-        wallet_count: 1,
-        wallet_set: [String(wallet.id)],
-        tx_hashes: [pos.asset],
-      });
-    }
-
-    // Update losing streak if LOSS
-    if (cashPnl < 0) {
-      const { data: walletData } = await supabase
-        .from("wallets")
-        .select("losing_streak")
-        .eq("id", wallet.id)
-        .maybeSingle();
-      const newStreak = (walletData?.losing_streak || 0) + 1;
-      await supabase.from("wallets").update({ losing_streak: newStreak }).eq("id", wallet.id);
-    }
+  if (cashPnl !== null) {
+    outcome = cashPnl < 0 ? "LOSS" : "WIN";
+    resolved_outcome = cashPnl < 0 ? pos.oppositeOutcome || pickedOutcome : pickedOutcome;
   }
+
+  // Update existing signal or insert new
+  const existingSig = existingSignals.find(s => s.market_id === pos.conditionId);
+
+  if (existingSig) {
+    await supabase
+      .from("signals")
+      .update({ pnl: cashPnl, outcome, resolved_outcome, outcome_at: cashPnl !== null ? new Date() : null })
+      .eq("id", existingSig.id);
+  } else if (!existingTxs.has(pos.asset)) {
+    await supabase.from("signals").insert({
+      wallet_id: wallet.id,
+      signal: pos.title,
+      market_name: pos.title,
+      market_id: pos.conditionId,
+      event_slug: eventSlug,
+      side: pos.side?.toUpperCase() || "BUY",
+      picked_outcome: pickedOutcome,
+      tx_hash: pos.asset,
+      pnl: cashPnl,
+      outcome,
+      resolved_outcome,
+      outcome_at: cashPnl !== null ? new Date() : null,
+      created_at: new Date(pos.timestamp * 1000 || Date.now()),
+      wallet_count: 1,
+      wallet_set: [String(wallet.id)],
+      tx_hashes: [pos.asset],
+    });
+  }
+
+  // Update losing streak only if outcome is known and LOSS
+  if (outcome === "LOSS") {
+    const { data: walletData } = await supabase
+      .from("wallets")
+      .select("losing_streak")
+      .eq("id", wallet.id)
+      .maybeSingle();
+
+    const newStreak = (walletData?.losing_streak || 0) + 1;
+    await supabase.from("wallets").update({ losing_streak: newStreak }).eq("id", wallet.id);
+  } else if (outcome === "WIN") {
+    // Reset losing streak if WIN
+    await supabase.from("wallets").update({ losing_streak: 0 }).eq("id", wallet.id);
+  }
+}
 
   // Update last_checked
   await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);

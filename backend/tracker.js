@@ -607,7 +607,7 @@ async function fetchAndInsertLeaderboardWallets() {
       console.log(`[LEADERBOARD][${period}] Fetched=${data.length}`);
 
       for (const entry of data) {
-        if (!entry.proxyWallet || entry.pnl < 10000 || entry.vol >= 6 * entry.pnl) continue;
+        if (!entry.proxyWallet || entry.pnl < 1000 || entry.vol >= 6 * entry.pnl) continue;
 
         const { data: existing } = await supabase.from("wallets").select("id")
           .or(`polymarket_proxy_wallet.eq.${entry.proxyWallet},polymarket_username.eq.${entry.userName}`).maybeSingle();

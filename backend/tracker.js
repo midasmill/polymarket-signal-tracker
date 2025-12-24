@@ -199,9 +199,6 @@ async function updateNotes(slug, text) {
   await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", slug);
 }
 
-
-
-
 /* ===========================
    Track Wallet Trades
 =========================== */
@@ -286,12 +283,46 @@ async function trackWallet(wallet) {
   await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
 }
 
+async function updateWalletWinRatesAndPause() {
+  try {
+    // Calculate win rate per wallet and update, then pause if win_rate < 80%
+    const query = `
+      UPDATE wallets w
+      SET 
+        win_rate = sub.wr,
+        paused = CASE WHEN sub.wr < 80 THEN true ELSE w.paused END
+      FROM (
+        SELECT wallet_id,
+               CASE 
+                 WHEN COUNT(*) = 0 THEN 0
+                 ELSE SUM(CASE WHEN outcome='WIN' THEN 1 ELSE 0 END)::float / COUNT(*) * 100
+               END AS wr
+        FROM signals
+        WHERE outcome IN ('WIN','LOSS')
+        GROUP BY wallet_id
+      ) AS sub
+      WHERE w.id = sub.wallet_id
+    `;
+
+    const { error } = await supabase.rpc('execute_sql', { sql: query }); // use your RPC or SQL editor
+    if (error) console.error("Batch win rate + pause update failed:", error.message);
+    else console.log("Batch win rate + pause update complete.");
+  } catch (err) {
+    console.error("Batch win rate + pause update error:", err.message);
+  }
+}
+
 // ---------------------- Main loop ----------------------
 async function main() {
   console.log("🚀 POLYMARKET TRACKER LIVE 🚀");
 
+  // Fetch leaderboard wallets once at startup
   await fetchAndInsertLeaderboardWallets();
 
+  await Promise.all(wallets.map(trackWallet));
+  await updateWalletWinRatesAndPause();
+
+  // Polling loop
   setInterval(async () => {
     try {
       const { data: wallets } = await supabase.from("wallets").select("*");
@@ -299,7 +330,11 @@ async function main() {
 
       console.log(`Wallets loaded: ${wallets.length}`);
 
+      // Process each wallet (insert new signals + resolve pending automatically)
       await Promise.all(wallets.map(trackWallet));
+
+      // Update win rates after processing
+      await updateWalletWinRates();
     } catch (err) {
       console.error("Loop error:", err);
       await sendTelegram(`Tracker loop error: ${err.message}`);
@@ -307,7 +342,9 @@ async function main() {
   }, POLL_INTERVAL);
 }
 
+// Start the tracker
 main();
+
 
 /* ===========================
    Send Result Notes

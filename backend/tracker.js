@@ -14,14 +14,14 @@ const TIMEZONE = process.env.TIMEZONE || "America/New_York";
 
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || "30000", 10);
 const LOSING_STREAK_THRESHOLD = parseInt(process.env.LOSING_STREAK_THRESHOLD || "3", 10);
-const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "2", 10);
+const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "1", 10);
 const FORCE_SEND = process.env.FORCE_SEND === "true";
 
 const CONFIDENCE_THRESHOLDS = {
   "⭐": MIN_WALLETS_FOR_SIGNAL,
-  "⭐⭐": parseInt(process.env.CONF_2 || "15"),
-  "⭐⭐⭐": parseInt(process.env.CONF_3 || "25"),
-  "⭐⭐⭐⭐": parseInt(process.env.CONF_4 || "35"),
+  "⭐⭐": parseInt(process.env.CONF_2 || "5"),
+  "⭐⭐⭐": parseInt(process.env.CONF_3 || "10"),
+  "⭐⭐⭐⭐": parseInt(process.env.CONF_4 || "20"),
   "⭐⭐⭐⭐⭐": parseInt(process.env.CONF_5 || "50"),
 };
 

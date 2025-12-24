@@ -272,22 +272,31 @@ async function trackWallet(wallet) {
       outcome_at = new Date(trade.timestamp * 1000);
     }
 
-     console.log("[TRADE DEBUG]", {
-  tx: trade.transactionHash,
-  outcome: trade.outcome,
-  side: trade.side,
-  title: trade.title,
-  conditionId: trade.conditionId
-});
+     function derivePickedOutcome(trade) {
+  // Best case (sports, yes/no, most markets)
+  if (trade.outcome) return trade.outcome;
 
-     
+  // outcomeIndex-based fallback (generic)
+  if (typeof trade.outcomeIndex === "number") {
+    // Common 2-outcome markets
+    if (trade.outcomeIndex === 0) return "Option 0";
+    if (trade.outcomeIndex === 1) return "Option 1";
+  }
+
+  // Unknown — do NOT guess
+  return null;
+}
+
+   
+const pickedOutcome = derivePickedOutcome(trade);
+
 await supabase.from("signals").insert({
   wallet_id: wallet.id,
   signal: trade.title,
   market_name: trade.title,
   market_id: trade.conditionId,
   side: trade.side.toUpperCase(),
-  picked_outcome: trade.outcome,   // 🔥 NEW
+  picked_outcome: pickedOutcome,   // ✅ SAFE
   tx_hash: trade.transactionHash,
   outcome: "Pending",
   created_at: new Date(trade.timestamp * 1000),
@@ -295,6 +304,8 @@ await supabase.from("signals").insert({
   wallet_set: [String(wallet.id)],
   tx_hashes: [trade.transactionHash],
 });
+
+
 
   }
 

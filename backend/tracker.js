@@ -447,7 +447,7 @@ await updateWalletWinRatesAndPauseJS();    // recalc win rate & losing streak
 /* ===========================
    Update Wallet Metrics (Win Rate + Losing Streak)
 ========================== */
-async function updateWalletMetrics() {
+async function updateWalletWinRatesAndPauseJS() {
   try {
     // 1️⃣ Fetch all wallets
     const { data: wallets } = await supabase.from("wallets").select("*");

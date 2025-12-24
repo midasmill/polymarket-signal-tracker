@@ -277,8 +277,14 @@ async function resolvePendingOutcomes() {
 
   console.log(`Resolving ${pendingSignals.length} pending signals...`);
 
+  const eventCache = new Map();
+  const walletStreaks = {}; // Track streak updates per wallet
+  const updates = []; // Collect all signal updates for batch
+
+  // Fetch all trades for wallets in one go (optional optimization could fetch per wallet)
   for (const sig of pendingSignals) {
     if (!sig.tx_hash) continue;
+
     let trade = null;
     try {
       const trades = await fetchLatestTrades(sig.wallet_id);
@@ -290,36 +296,67 @@ async function resolvePendingOutcomes() {
     const eventSlug = trade.eventSlug || trade.slug;
     if (!eventSlug) continue;
 
-    let eventData = await fetchMarket(eventSlug);
-    if (!eventData) continue;
+    // Fetch market once per eventSlug
+    if (!eventCache.has(eventSlug)) {
+      const eventData = await fetchMarket(eventSlug);
+      if (!eventData) continue;
+      eventCache.set(eventSlug, eventData);
+    }
 
+    const eventData = eventCache.get(eventSlug);
     const winningOutcome = eventData.outcomeName || (eventData.winningOutcomeIndex !== undefined ? `OPTION_${eventData.winningOutcomeIndex}` : null);
     if (!winningOutcome) continue;
 
     const picked = sig.picked_outcome;
     const result = !picked ? "LOSS" : picked === winningOutcome ? "WIN" : "LOSS";
 
-    await supabase.from("signals").update({
+    updates.push({
+      id: sig.id,
       resolved_outcome: winningOutcome,
       outcome: result,
       outcome_at: new Date(),
-    }).eq("id", sig.id);
+    });
 
-    const { data: wallet } = await supabase.from("wallets").select("*").eq("id", sig.wallet_id).single();
-    if (wallet) {
-      if (result === "LOSS") {
-        const streak = (wallet.losing_streak || 0) + 1;
-        await supabase.from("wallets").update({ losing_streak: streak }).eq("id", wallet.id);
-        if (streak >= LOSING_STREAK_THRESHOLD) {
-          await supabase.from("wallets").update({ paused: true }).eq("id", wallet.id);
-          await sendTelegram(`Wallet paused due to losing streak:\nWallet ID: ${wallet.id}\nLosses: ${streak}`);
-        }
-      } else {
-        await supabase.from("wallets").update({ losing_streak: 0 }).eq("id", wallet.id);
-      }
+    // Track losing streaks per wallet
+    if (!walletStreaks[sig.wallet_id]) walletStreaks[sig.wallet_id] = 0;
+    if (result === "LOSS") walletStreaks[sig.wallet_id]++;
+    else walletStreaks[sig.wallet_id] = 0;
+  }
+
+  // Batch update signals
+  if (updates.length) {
+    const promises = updates.map(u =>
+      supabase.from("signals").update({
+        resolved_outcome: u.resolved_outcome,
+        outcome: u.outcome,
+        outcome_at: u.outcome_at,
+      }).eq("id", u.id)
+    );
+    await Promise.all(promises);
+  }
+
+  // Batch update wallets losing streaks and pause if necessary
+  for (const [walletId, streak] of Object.entries(walletStreaks)) {
+    const { data: wallet } = await supabase.from("wallets").select("*").eq("id", walletId).single();
+    if (!wallet) continue;
+
+    const newStreak = streak >= LOSING_STREAK_THRESHOLD ? streak : streak;
+    const pause = streak >= LOSING_STREAK_THRESHOLD ? true : wallet.paused;
+
+    await supabase.from("wallets").update({
+      losing_streak: newStreak,
+      paused: pause,
+    }).eq("id", walletId);
+
+    if (pause && streak >= LOSING_STREAK_THRESHOLD) {
+      await sendTelegram(`Wallet paused due to losing streak:\nWallet ID: ${wallet.id}\nLosses: ${streak}`);
     }
+  }
 
-    await sendResultNotes(sig, result);
+  // Send result notes for all updated signals
+  for (const sig of pendingSignals) {
+    const updated = updates.find(u => u.id === sig.id);
+    if (updated) await sendResultNotes(sig, updated.outcome);
   }
 
   console.log("Pending outcome resolution complete!");

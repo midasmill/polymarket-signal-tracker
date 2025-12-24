@@ -319,22 +319,21 @@ async function main() {
   // Fetch leaderboard wallets once at startup
   await fetchAndInsertLeaderboardWallets();
 
-  await Promise.all(wallets.map(trackWallet));
-  await updateWalletWinRatesAndPause();
-
   // Polling loop
   setInterval(async () => {
     try {
+      // Fetch wallets from DB
       const { data: wallets } = await supabase.from("wallets").select("*");
       if (!wallets?.length) return;
 
       console.log(`Wallets loaded: ${wallets.length}`);
 
-      // Process each wallet (insert new signals + resolve pending automatically)
+      // Process each wallet
       await Promise.all(wallets.map(trackWallet));
 
-      // Update win rates after processing
-      await updateWalletWinRates();
+      // Update win rates and pause wallets if needed
+      await updateWalletWinRatesAndPause();
+
     } catch (err) {
       console.error("Loop error:", err);
       await sendTelegram(`Tracker loop error: ${err.message}`);
@@ -344,6 +343,7 @@ async function main() {
 
 // Start the tracker
 main();
+
 
 
 /* ===========================

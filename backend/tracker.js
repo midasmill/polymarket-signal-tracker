@@ -169,28 +169,41 @@ async function fetchWithRetry(url, options = {}, retries = 3, delay = 1000) {
 /* ===========================
    Fetch all BUY CASH trades for a wallet/identity
 =========================== */
+
 async function fetchAllBuyCashTrades(identity) {
+  if (!identity) return [];
+
   let all = [];
   let offset = 0;
   const limit = 100;
 
   while (true) {
     const url =
-      `https://data-api.polymarket.com/trades?user=${identity}&side=BUY&takerOnly=true&filterType=CASH&limit=${limit}&offset=${offset}`;
+      `https://data-api.polymarket.com/trades?user=${identity}` +
+      `&side=BUY&takerOnly=true&filterType=CASH&limit=${limit}&offset=${offset}`;
 
-    const page = await fetchWithRetry(url, {
-      headers: { "User-Agent": "Mozilla/5.0" }
-    });
+    let page;
+    try {
+      // Use your existing fetchWithRetry helper: retries 5x, 1500ms delay
+      page = await fetchWithRetry(url, { headers: { "User-Agent": "Mozilla/5.0" } }, 5, 1500);
+    } catch (err) {
+      console.error(`Failed to fetch trades for identity ${identity} (offset ${offset}):`, err.message);
+      break; // skip this identity for now
+    }
 
     if (!Array.isArray(page) || page.length === 0) break;
 
     all.push(...page);
     if (page.length < limit) break;
     offset += limit;
+
+    // slight delay to reduce connection drops
+    await new Promise(r => setTimeout(r, 200));
   }
 
   return all;
 }
+
 
 /* ===========================
    Fetch market resolution

@@ -342,94 +342,90 @@ async function trackWallet(wallet) {
 
 
 /* ===========================
-   Resolve Outcomes
+   Resolve Outcomes using event_slug
 =========================== */
 async function resolvePendingOutcomes() {
-  const { data: pendingSignals } = await supabase.from("signals").select("*").eq("outcome", "Pending");
+  // Fetch all pending signals
+  const { data: pendingSignals } = await supabase
+    .from("signals")
+    .select("*")
+    .eq("outcome", "Pending");
+
   if (!pendingSignals?.length) return;
 
   console.log(`Resolving ${pendingSignals.length} pending signals...`);
 
-  const eventCache = new Map();
-  const walletStreaks = {}; // Track streak updates per wallet
-  const updates = []; // Collect all signal updates for batch
-
-  // Fetch all trades for wallets in one go (optional optimization could fetch per wallet)
   for (const sig of pendingSignals) {
     if (!sig.tx_hash) continue;
 
-    let trade = null;
-    try {
-      const trades = await fetchLatestTrades(sig.wallet_id);
-      trade = trades.find(t => t.transactionHash === sig.tx_hash);
-    } catch {}
-
-    if (!trade) continue;
-
-    const eventSlug = trade.eventSlug || trade.slug;
-    if (!eventSlug) continue;
-
-    // Fetch market once per eventSlug
-    if (!eventCache.has(eventSlug)) {
-      const eventData = await fetchMarket(eventSlug);
-      if (!eventData) continue;
-      eventCache.set(eventSlug, eventData);
+    // Must have event_slug to fetch outcome
+    const eventSlug = sig.event_slug;
+    if (!eventSlug) {
+      console.log(`Skipping signal ${sig.id}, missing event_slug`);
+      continue;
     }
 
-    const eventData = eventCache.get(eventSlug);
-    const winningOutcome = eventData.outcomeName || (eventData.winningOutcomeIndex !== undefined ? `OPTION_${eventData.winningOutcomeIndex}` : null);
+    // Fetch event data from Polymarket API
+    let eventData = null;
+    try {
+      const res = await fetch(`https://data-api.polymarket.com/events/${eventSlug}`, {
+        headers: { "User-Agent": "Mozilla/5.0" },
+      });
+      if (!res.ok) {
+        console.log(`Event fetch failed for ${eventSlug}: HTTP ${res.status}`);
+        continue;
+      }
+      eventData = await res.json();
+    } catch (err) {
+      console.error(`Event fetch failed for ${eventSlug}:`, err.message);
+      continue;
+    }
+
+    if (!eventData) continue;
+
+    // Determine winning outcome label
+    let winningOutcome = eventData.outcomeName || 
+                         (eventData.winningOutcomeIndex !== undefined ? `OPTION_${eventData.winningOutcomeIndex}` : null);
     if (!winningOutcome) continue;
 
+    // Determine result
     const picked = sig.picked_outcome;
-    const result = !picked ? "LOSS" : picked === winningOutcome ? "WIN" : "LOSS";
+    const result = picked && picked === winningOutcome ? "WIN" : "LOSS";
 
-    updates.push({
-      id: sig.id,
-      resolved_outcome: winningOutcome,
-      outcome: result,
-      outcome_at: new Date(),
-    });
+    // Update signal row
+    await supabase
+      .from("signals")
+      .update({
+        resolved_outcome: winningOutcome,
+        outcome: result,
+        outcome_at: new Date(),
+      })
+      .eq("id", sig.id);
 
-    // Track losing streaks per wallet
-    if (!walletStreaks[sig.wallet_id]) walletStreaks[sig.wallet_id] = 0;
-    if (result === "LOSS") walletStreaks[sig.wallet_id]++;
-    else walletStreaks[sig.wallet_id] = 0;
-  }
+    // Update wallet losing streak
+    const { data: wallet } = await supabase
+      .from("wallets")
+      .select("*")
+      .eq("id", sig.wallet_id)
+      .maybeSingle();
 
-  // Batch update signals
-  if (updates.length) {
-    const promises = updates.map(u =>
-      supabase.from("signals").update({
-        resolved_outcome: u.resolved_outcome,
-        outcome: u.outcome,
-        outcome_at: u.outcome_at,
-      }).eq("id", u.id)
-    );
-    await Promise.all(promises);
-  }
-
-  // Batch update wallets losing streaks and pause if necessary
-  for (const [walletId, streak] of Object.entries(walletStreaks)) {
-    const { data: wallet } = await supabase.from("wallets").select("*").eq("id", walletId).single();
-    if (!wallet) continue;
-
-    const newStreak = streak >= LOSING_STREAK_THRESHOLD ? streak : streak;
-    const pause = streak >= LOSING_STREAK_THRESHOLD ? true : wallet.paused;
-
-    await supabase.from("wallets").update({
-      losing_streak: newStreak,
-      paused: pause,
-    }).eq("id", walletId);
-
-    if (pause && streak >= LOSING_STREAK_THRESHOLD) {
-      await sendTelegram(`Wallet paused due to losing streak:\nWallet ID: ${wallet.id}\nLosses: ${streak}`);
+    if (wallet) {
+      if (result === "LOSS") {
+        const streak = (wallet.losing_streak || 0) + 1;
+        await supabase.from("wallets").update({ losing_streak: streak }).eq("id", wallet.id);
+        if (streak >= LOSING_STREAK_THRESHOLD && !wallet.paused) {
+          await supabase.from("wallets").update({ paused: true }).eq("id", wallet.id);
+          await sendTelegram(
+            `Wallet paused due to losing streak:\nWallet ID: ${wallet.id}\nLosses: ${streak}`
+          );
+        }
+      } else {
+        await supabase.from("wallets").update({ losing_streak: 0 }).eq("id", wallet.id);
+      }
     }
-  }
 
-  // Send result notes for all updated signals
-  for (const sig of pendingSignals) {
-    const updated = updates.find(u => u.id === sig.id);
-    if (updated) await sendResultNotes(sig, updated.outcome);
+    // Send result notes / telegram
+    await sendResultNotes(sig, result);
   }
 
   console.log("Pending outcome resolution complete!");

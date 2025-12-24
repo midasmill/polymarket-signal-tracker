@@ -458,10 +458,6 @@ async function main() {
         }
       }
 
-      // ✅ Update win rates and losing streaks after all wallets processed
-await trackWallet(wallet);        // fetch live/resolved picks
-await updateWalletWinRatesAndPauseJS();    // recalc win rate & losing streak
-
 
 } catch (err) {
   console.error("Loop error:", err);
@@ -504,12 +500,12 @@ async function updateWalletMetricsJS() {
       }
 
       // Live picks (unresolved signals)
-      const { data: liveSignals } = await supabase
-        .from("signals")
-        .select("id")
-        .eq("wallet_id", wallet.id)
-        .eq("outcome", "Pending");
-      const livePicks = liveSignals?.length || 0;
+const { data: liveSignals } = await supabase
+  .from("signals")
+  .select("id")
+  .eq("wallet_id", wallet.id)
+  .eq("outcome", "Pending");
+const livePicks = liveSignals?.length || 0;
 
       // Determine pause status
       const paused = losingStreak >= LOSING_STREAK_THRESHOLD || winRate < 80;

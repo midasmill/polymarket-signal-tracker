@@ -733,7 +733,7 @@ async function fetchAndInsertLeaderboardWallets() {
         if (!entry.proxyWallet) continue;
 
         // PnL and volume filter
-        if (entry.pnl >= 100 && entry.vol < 6 * entry.pnl) {
+        if (entry.pnl >= 10000 && entry.vol < 8 * entry.pnl) {
           passed++;
 
           // Insert only if not already in wallets table

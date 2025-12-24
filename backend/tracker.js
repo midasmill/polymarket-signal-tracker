@@ -184,7 +184,7 @@ function getMajorityConfidence(counts) {
 }
 
 /* ===========================
-   Track Wallet Trades (Resolved + Unresolved)
+   Track Wallet Trades (Resolved + Pending)
 =========================== */
 async function trackWallet(wallet) {
   if (wallet.paused) return;
@@ -217,7 +217,6 @@ async function trackWallet(wallet) {
   let insertedCount = 0;
 
   for (const trade of trades) {
-    // Only allow proxy wallet if identity used is proxy
     if (identityUsed === "proxy" &&
         trade.proxyWallet &&
         trade.proxyWallet.toLowerCase() !== wallet.polymarket_proxy_wallet.toLowerCase()) {
@@ -228,51 +227,104 @@ async function trackWallet(wallet) {
     const { data: existing } = await supabase
       .from("signals")
       .select("id")
-      .eq("market_id", trade.conditionId)
+      .eq("market_id", trade.eventSlug)
       .eq("wallet_id", wallet.id)
       .eq("tx_hash", trade.transactionHash)
       .maybeSingle();
     if (existing) continue;
 
-    // Fetch market to check if resolved
-const market = await fetchMarket(trade.eventSlug);
-let outcome = "Pending";
-let pnl = null;
-let outcome_at = null;
+    // Determine outcome directly from trade object
+    let outcome = "Pending";
+    let pnl = trade.pnl ?? null;
+    let outcome_at = null;
 
-if (market?.resolved) {
-  // Find the outcome matching trade.conditionId
-  const winningOutcomeId = market.winningOutcomeId;
-  outcome = trade.conditionId === winningOutcomeId ? "WIN" : "LOSS";
-  pnl = trade.pnl ?? null;
-  outcome_at = new Date(trade.timestamp * 1000);
-}
+    if (trade.outcome) {
+      outcome = trade.side.toUpperCase() === trade.outcome.toUpperCase() ? "WIN" : "LOSS";
+      outcome_at = new Date(trade.timestamp * 1000);
+    }
 
-
-await supabase.from("signals").insert({
-  wallet_id: wallet.id,
-  signal: trade.title,
-  market_name: trade.title,
-  market_id: trade.marketId, // <-- use marketId
-  side: String(trade.outcome).toUpperCase(),
-  tx_hash: trade.transactionHash,
-  outcome,
-  pnl,
-  created_at: new Date(trade.timestamp * 1000),
-  outcome_at,
-  wallet_count: 1,
-  wallet_set: [String(wallet.id)],
-  tx_hashes: [trade.transactionHash],
-});
-
+    await supabase.from("signals").insert({
+      wallet_id: wallet.id,
+      signal: trade.title,
+      market_name: trade.title,
+      market_id: trade.eventSlug, // use eventSlug as unique market identifier
+      side: trade.side.toUpperCase(),
+      tx_hash: trade.transactionHash,
+      outcome,
+      pnl,
+      created_at: new Date(trade.timestamp * 1000),
+      outcome_at,
+      wallet_count: 1,
+      wallet_set: [String(wallet.id)],
+      tx_hashes: [trade.transactionHash],
+    });
 
     insertedCount++;
   }
 
   if (insertedCount > 0) console.log(`Inserted ${insertedCount} new trades for wallet ${wallet.id}`);
 
-  // Update last_checked for wallet
   await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
+}
+
+
+/* ===========================
+   Update Pending Outcomes
+=========================== */
+async function updatePendingOutcomes() {
+  const { data: pending } = await supabase
+    .from("signals")
+    .select("*")
+    .eq("outcome", "Pending");
+
+  if (!pending?.length) return;
+
+  let resolvedAny = false;
+
+  for (const sig of pending) {
+    // If trade object has outcome, treat as resolved
+    if (!sig.tx_hash) continue;
+
+    // Fetch the latest trade info to get outcome/pnl
+    let trade = null;
+    try {
+      const trades = await fetchLatestTrades(sig.wallet_id); // fetch all trades for wallet
+      trade = trades.find(t => t.transactionHash === sig.tx_hash);
+    } catch {
+      trade = null;
+    }
+    if (!trade || !trade.outcome) continue;
+
+    const result = sig.side.toUpperCase() === trade.outcome.toUpperCase() ? "WIN" : "LOSS";
+    const pnl = trade.pnl ?? null;
+    const outcome_at = new Date(trade.timestamp * 1000);
+
+    await supabase.from("signals").update({
+      outcome: result,
+      pnl,
+      outcome_at,
+    }).eq("id", sig.id);
+
+    // Update wallet losing streak
+    const { data: wallet } = await supabase.from("wallets").select("*").eq("id", sig.wallet_id).single();
+    if (wallet) {
+      if (result === "LOSS") {
+        const streak = (wallet.losing_streak || 0) + 1;
+        await supabase.from("wallets").update({ losing_streak: streak }).eq("id", wallet.id);
+        if (streak >= LOSING_STREAK_THRESHOLD) {
+          await supabase.from("wallets").update({ paused: true }).eq("id", wallet.id);
+          await sendTelegram(`Wallet paused due to losing streak:\nWallet ID: ${wallet.id}\nLosses: ${streak}`);
+        }
+      } else if (result === "WIN") {
+        await supabase.from("wallets").update({ losing_streak: 0 }).eq("id", wallet.id);
+      }
+    }
+
+    await sendResultNotes(sig, result);
+    resolvedAny = true;
+  }
+
+  if (resolvedAny) await sendMajoritySignals();
 }
 
 
@@ -317,87 +369,6 @@ async function sendResultNotes(sig, result) {
   await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", "polymarket-millionaires");
 }
 
-/* ===========================
-   Resolve pending outcomes (auto-fill pnl)
-=========================== */
-async function updatePendingOutcomes() {
-  // Fetch all pending signals
-  const { data: pending } = await supabase
-    .from("signals")
-    .select("*")
-    .eq("outcome", "Pending");
-
-  if (!pending?.length) return;
-
-  // Get unique market IDs
-  const marketIds = [...new Set(pending.map(s => s.market_id))];
-
-  // Fetch all markets
-  const markets = await Promise.all(marketIds.map(id => fetchMarket(id)));
-  const marketMap = Object.fromEntries(markets.map(m => [m?.id, m]));
-
-  let resolvedAny = false;
-
-  for (const sig of pending) {
-    const market = marketMap[sig.market_id];
-    if (!market || !market.resolved) continue;
-
-    const winningSide = String(market.winningOutcome || "").toUpperCase();
-    if (!winningSide) continue;
-
-    // Determine outcome
-    const result = sig.side === winningSide ? "WIN" : market.cancelled ? "PUSH" : "LOSS";
-
-    // Calculate pnl if available
-    let pnl = sig.pnl ?? null;
-    if (!pnl && sig.side && market) {
-      // Attempt to calculate pnl: trade amount * (odds if win, 0 if loss)
-      // Here, we assume market.trades contains trade info if needed
-      const trade = market.trades?.find(t => t.transactionHash === sig.tx_hash);
-      if (trade) pnl = trade.pnl ?? null;
-    }
-
-    // Update signal
-    await supabase
-      .from("signals")
-      .update({
-        outcome: result,
-        outcome_at: new Date(),
-        pnl,
-      })
-      .eq("id", sig.id);
-
-    // Update wallet losing streak
-    const { data: wallet } = await supabase
-      .from("wallets")
-      .select("*")
-      .eq("id", sig.wallet_id)
-      .single();
-
-    if (wallet) {
-      if (result === "LOSS") {
-        const streak = (wallet.losing_streak || 0) + 1;
-        await supabase.from("wallets").update({ losing_streak: streak }).eq("id", wallet.id);
-
-        if (streak >= LOSING_STREAK_THRESHOLD) {
-          await supabase.from("wallets").update({ paused: true }).eq("id", wallet.id);
-          await sendTelegram(`Wallet paused due to losing streak:\nWallet ID: ${wallet.id}\nLosses: ${streak}`);
-        }
-      } else if (result === "WIN") {
-        // Reset losing streak if win
-        await supabase.from("wallets").update({ losing_streak: 0 }).eq("id", wallet.id);
-      }
-    }
-
-    // Send result notification
-    await sendResultNotes(sig, result);
-
-    resolvedAny = true;
-  }
-
-  // After resolving, update majority signals
-  if (resolvedAny) await sendMajoritySignals();
-}
 
 /* ===========================
    Send majority signals

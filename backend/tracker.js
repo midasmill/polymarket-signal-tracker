@@ -169,87 +169,6 @@ function getPick(sig) {
   return "Unknown";
 }
 
-/* ===========================
-   Resolve Pending Outcomes
-=========================== */
-async function resolvePendingOutcomes() {
-  try {
-    // Fetch all pending signals
-    const { data: pendingSignals } = await supabase
-      .from("signals")
-      .select("*")
-      .eq("outcome", "Pending");
-
-    if (!pendingSignals?.length) return;
-
-    for (const sig of pendingSignals) {
-      const wallet = await supabase
-        .from("wallets")
-        .select("*")
-        .eq("id", sig.wallet_id)
-        .maybeSingle();
-      if (!wallet) continue;
-
-      const userId = wallet.data?.polymarket_proxy_wallet || wallet.data?.polymarket_username;
-      if (!userId) continue;
-
-      // Fetch positions for this wallet
-      let positions = [];
-      try {
-        const url = `https://data-api.polymarket.com/positions?user=${userId}&limit=100`;
-        const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
-        if (res.ok) positions = await res.json();
-      } catch (err) {
-        console.error(`Failed to fetch positions for wallet ${wallet.data?.id}:`, err.message);
-        continue;
-      }
-
-      // Find the position for this signal
-      const pos = positions.find(p => p.conditionId === sig.market_id);
-      if (!pos) continue;
-
-      const cashPnl = pos.cashPnl ?? 0;
-      const pickedOutcome = sig.picked_outcome || pos.outcome || derivePickedOutcome(pos);
-      const outcome = cashPnl < 0 ? "LOSS" : "WIN";
-      const resolved_outcome = cashPnl < 0 ? pos.oppositeOutcome || pickedOutcome : pickedOutcome;
-
-      // Update the signal
-      try {
-        await supabase
-          .from("signals")
-          .update({
-            pnl: cashPnl,
-            outcome,
-            resolved_outcome,
-            outcome_at: new Date(),
-          })
-          .eq("id", sig.id);
-        console.log(`[RESOLVED] Signal ${sig.id} -> pnl=${cashPnl}, outcome=${outcome}`);
-      } catch (err) {
-        console.error("Failed to resolve signal:", err.message);
-      }
-
-      // Update wallet losing streak if LOSS
-      if (cashPnl < 0) {
-        try {
-          const { data: walletData } = await supabase
-            .from("wallets")
-            .select("losing_streak")
-            .eq("id", wallet.data.id)
-            .maybeSingle();
-
-          const newStreak = (walletData?.losing_streak || 0) + 1;
-          await supabase.from("wallets").update({ losing_streak: newStreak }).eq("id", wallet.data.id);
-        } catch (err) {
-          console.error("Failed to update losing streak:", err.message);
-        }
-      }
-    }
-  } catch (err) {
-    console.error("Error in resolvePendingOutcomes:", err.message);
-  }
-}
-
 
 /* ===========================
    Format Signal
@@ -286,14 +205,15 @@ async function updateNotes(slug, text) {
 /* ===========================
    Track Wallet Trades
 =========================== */
+
 async function trackWallet(wallet) {
   if (wallet.paused) return;
 
-  // Fetch positions (user’s actual picks)
-  let positions = [];
   const userId = wallet.polymarket_proxy_wallet || wallet.polymarket_username;
   if (!userId) return;
 
+  // Fetch positions
+  let positions = [];
   try {
     const url = `https://data-api.polymarket.com/positions?user=${userId}&limit=100`;
     const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
@@ -308,10 +228,10 @@ async function trackWallet(wallet) {
     return;
   }
 
-  // Fetch existing tx_hashes and market_ids for this wallet to avoid duplicates
+  // Fetch existing signals to avoid duplicates
   const { data: existingSignals } = await supabase
     .from("signals")
-    .select("tx_hash, market_id")
+    .select("id, tx_hash, market_id")
     .eq("wallet_id", wallet.id);
   const existingTxs = new Set(existingSignals?.map(s => s.tx_hash));
   const existingMarkets = new Set(existingSignals?.map(s => s.market_id));
@@ -319,52 +239,55 @@ async function trackWallet(wallet) {
   for (const pos of positions) {
     const pickedOutcome = pos.outcome || derivePickedOutcome(pos);
     const eventSlug = pos.eventSlug || pos.slug;
-
-    // Skip duplicates
-    if (existingTxs.has(pos.asset) || existingMarkets.has(pos.conditionId)) continue;
-
-    console.log("[INSERT PICK]", pos.asset, pickedOutcome, eventSlug);
-
-    // Insert new signal
-    try {
-      await supabase.from("signals").insert({
-        wallet_id: wallet.id,
-        signal: pos.title,
-        market_name: pos.title,
-        market_id: pos.conditionId,
-        event_slug: eventSlug,
-        side: pos.side?.toUpperCase() || "BUY",
-        picked_outcome: pickedOutcome,
-        tx_hash: pos.asset,
-        outcome: "Pending",
-        created_at: new Date(pos.timestamp * 1000 || Date.now()),
-        wallet_count: 1,
-        wallet_set: [String(wallet.id)],
-        tx_hashes: [pos.asset],
-      });
-    } catch (err) {
-      console.error("Insert failed:", err.message);
-    }
-
-    // === Resolve outcome immediately ===
     const cashPnl = pos.cashPnl ?? 0;
     const outcome = cashPnl < 0 ? "LOSS" : "WIN";
     const resolved_outcome = cashPnl < 0 ? pos.oppositeOutcome || pickedOutcome : pickedOutcome;
 
-    // Update the signal row
-    try {
-      await supabase
-        .from("signals")
-        .update({
+    // Check if signal exists
+    let sigId = null;
+    const existingSig = existingSignals.find(s => s.market_id === pos.conditionId);
+    if (existingSig) {
+      sigId = existingSig.id;
+      // Update existing signal
+      try {
+        await supabase
+          .from("signals")
+          .update({
+            pnl: cashPnl,
+            outcome,
+            resolved_outcome,
+            outcome_at: new Date(),
+          })
+          .eq("id", sigId);
+      } catch (err) {
+        console.error("Failed to update existing signal:", err.message);
+      }
+    } else if (!existingTxs.has(pos.asset)) {
+      // Insert new signal
+      try {
+        const { data: inserted } = await supabase.from("signals").insert({
+          wallet_id: wallet.id,
+          signal: pos.title,
+          market_name: pos.title,
+          market_id: pos.conditionId,
+          event_slug: eventSlug,
+          side: pos.side?.toUpperCase() || "BUY",
+          picked_outcome: pickedOutcome,
+          tx_hash: pos.asset,
           pnl: cashPnl,
           outcome,
           resolved_outcome,
           outcome_at: new Date(),
-        })
-        .eq("market_id", pos.conditionId)
-        .eq("wallet_id", wallet.id);
-    } catch (err) {
-      console.error("Failed to resolve signal:", err.message);
+          created_at: new Date(pos.timestamp * 1000 || Date.now()),
+          wallet_count: 1,
+          wallet_set: [String(wallet.id)],
+          tx_hashes: [pos.asset],
+        }).select("id");
+
+        sigId = inserted?.[0]?.id;
+      } catch (err) {
+        console.error("Failed to insert new signal:", err.message);
+      }
     }
 
     // Update losing streak if LOSS
@@ -383,6 +306,11 @@ async function trackWallet(wallet) {
       }
     }
   }
+
+  // Update last_checked
+  await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
+}
+
 
   // Update last_checked
   await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);

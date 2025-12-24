@@ -227,11 +227,9 @@ async function unpauseAndFetchWallet(wallet) {
 
 
 /* ===========================
-   Track Wallet Trades
+   Track Wallet Trades (per-market losing streak)
 =========================== */
 async function trackWallet(wallet) {
-  if (wallet.paused) return;
-
   const userId = wallet.polymarket_proxy_wallet || wallet.polymarket_username;
   if (!userId) return;
 
@@ -250,6 +248,7 @@ async function trackWallet(wallet) {
     return;
   }
 
+  // Fetch existing signals
   const { data: existingSignals } = await supabase
     .from("signals")
     .select("id, tx_hash, market_id")
@@ -257,13 +256,14 @@ async function trackWallet(wallet) {
 
   const existingTxs = new Set(existingSignals?.map(s => s.tx_hash));
 
-  // Track last outcome for losing streak calculation
-  let lastOutcome = null;
+  // Track outcomes per market
+  const marketMap = {}; // { marketId: { wins: number, losses: number } }
 
   for (const pos of positions) {
+    const marketId = pos.conditionId;
     const pickedOutcome = pos.outcome || `OPTION_${pos.outcomeIndex}`;
     const eventSlug = pos.eventSlug || pos.slug;
-    const pnl = pos.cashPnl ?? null; // can be positive, negative, or null if unresolved
+    const pnl = pos.cashPnl ?? null;
 
     let outcome = "Pending";
     let resolved_outcome = null;
@@ -278,10 +278,13 @@ async function trackWallet(wallet) {
       }
     }
 
-    lastOutcome = outcome; // store for losing streak update
+    // Aggregate outcomes per market
+    if (!marketMap[marketId]) marketMap[marketId] = { wins: 0, losses: 0 };
+    if (outcome === "WIN") marketMap[marketId].wins++;
+    else if (outcome === "LOSS") marketMap[marketId].losses++;
 
-    const existingSig = existingSignals.find(s => s.market_id === pos.conditionId);
-
+    // Insert/update signals
+    const existingSig = existingSignals.find(s => s.market_id === marketId);
     if (existingSig) {
       await supabase
         .from("signals")
@@ -292,7 +295,7 @@ async function trackWallet(wallet) {
         wallet_id: wallet.id,
         signal: pos.title,
         market_name: pos.title,
-        market_id: pos.conditionId,
+        market_id: marketId,
         event_slug: eventSlug,
         side: pos.side?.toUpperCase() || "BUY",
         picked_outcome: pickedOutcome,
@@ -309,26 +312,24 @@ async function trackWallet(wallet) {
     }
   }
 
-  // Update losing streak based on the last processed outcome
-  if (lastOutcome) {
-    const { data: walletData } = await supabase
-      .from("wallets")
-      .select("losing_streak")
-      .eq("id", wallet.id)
-      .maybeSingle();
-
-    let newStreak = walletData?.losing_streak || 0;
-    if (lastOutcome === "LOSS") newStreak++;
-    else if (lastOutcome === "WIN") newStreak = 0;
-
-    const updateData = { losing_streak: newStreak };
-    if (newStreak >= LOSING_STREAK_THRESHOLD) updateData.paused = true;
-
-    await supabase.from("wallets").update(updateData).eq("id", wallet.id);
+  // ✅ Calculate losing streak (1 loss per lost market)
+  let lostMarkets = 0;
+  for (const market of Object.values(marketMap)) {
+    if (market.losses > market.wins) lostMarkets++;
   }
 
-  // Update last_checked once
-  await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
+  // Update wallet losing streak and pause if threshold reached
+  const { data: walletData } = await supabase
+    .from("wallets")
+    .select("losing_streak")
+    .eq("id", wallet.id)
+    .maybeSingle();
+
+  const newStreak = lostMarkets;
+  const updateData = { losing_streak: newStreak };
+  if (newStreak >= LOSING_STREAK_THRESHOLD) updateData.paused = true;
+
+  await supabase.from("wallets").update({ ...updateData, last_checked: new Date() }).eq("id", wallet.id);
 }
 
 // ---------------------- Main loop ----------------------

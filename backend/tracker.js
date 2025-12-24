@@ -105,15 +105,25 @@ async function fetchLatestTrades(user) {
 
 async function fetchMarket(marketId) {
   if (marketCache.has(marketId)) return marketCache.get(marketId);
+
+  const url = `https://data-api.polymarket.com/markets/${marketId}`;
+
   try {
-    const market = await fetchWithRetry(`https://polymarket.com/api/markets/${marketId}`);
+    const market = await fetchWithRetry(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+        Accept: "application/json",
+      },
+    });
+
     if (market) marketCache.set(marketId, market);
     return market;
   } catch (err) {
-    console.error("Market fetch error:", err.message);
+    console.error(`Market fetch error (${marketId}):`, err.message);
     return null;
   }
 }
+
 
 /* ===========================
    Confidence helpers

@@ -723,7 +723,7 @@ async function fetchAndInsertLeaderboardWallets() {
     let duplicates = 0;
 
     try {
-  const url = `https://data-api.polymarket.com/v1/leaderboard?category=OVERALL&timePeriod=${period}&orderBy=PNL&limit=${pageSize}&offset=${offset}`;
+  const url = `https://data-api.polymarket.com/v1/leaderboard?category=OVERALL&timePeriod=ALL&orderBy=PNL&limit=500&offset=0`;
         const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();

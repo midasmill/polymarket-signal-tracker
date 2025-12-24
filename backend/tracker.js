@@ -465,7 +465,7 @@ const { error } = await supabase
 if (error) console.error(`Wallet ${wallet.id} update failed:`, error);
 else console.log(`Wallet ${wallet.id} — winRate: ${winRate.toFixed(2)}%, losingStreak: ${losingStreak}, livePicks: ${livePicksCount}, paused: ${paused}`);
 
-
+} 
 
 /* ===========================
    Update Wallet Metrics

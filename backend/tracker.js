@@ -97,15 +97,15 @@ async function recalcAllWalletStats() {
       // Compute win rate
       const totalMarkets = Object.keys(marketMap).length;
       const totalWins = Object.values(marketMap).reduce((sum, m) => sum + m.wins, 0);
-      const winRate = totalMarkets > 0 ? (totalWins / totalMarkets) * 100 : 0;
+      winRate = (totalWinsInDB / totalResolvedSignalsInDB) * 100
 
       // Update wallet
-      await supabase.from("wallets").update({
-        losing_streak: maxStreak,
-        win_rate: winRate,
-        paused: maxStreak >= LOSING_STREAK_THRESHOLD || winRate < 80,
-        last_checked: new Date(),
-      }).eq("id", wallet.id);
+await supabase.from("wallets").update({
+  win_rate,
+  losing_streak,
+  live_picks, // new column
+  paused
+}).eq("id", wallet.id);
     }
 
     console.log("All wallet stats recalculated successfully.");

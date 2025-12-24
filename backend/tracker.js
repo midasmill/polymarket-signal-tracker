@@ -225,9 +225,8 @@ async function unpauseAndFetchWallet(wallet) {
   }
 }
 
-
 /* ===========================
-   Track Wallet Trades (per-market losing streak)
+   Track Wallet Trades (persistent per-market losing streak)
 =========================== */
 async function trackWallet(wallet) {
   const userId = wallet.polymarket_proxy_wallet || wallet.polymarket_username;
@@ -256,8 +255,8 @@ async function trackWallet(wallet) {
 
   const existingTxs = new Set(existingSignals?.map(s => s.tx_hash));
 
-  // Track outcomes per market
-  const marketMap = {}; // { marketId: { wins: number, losses: number } }
+  // Aggregate outcomes per market
+  const marketMap = {}; // { marketId: { wins, losses } }
 
   for (const pos of positions) {
     const marketId = pos.conditionId;
@@ -278,7 +277,6 @@ async function trackWallet(wallet) {
       }
     }
 
-    // Aggregate outcomes per market
     if (!marketMap[marketId]) marketMap[marketId] = { wins: 0, losses: 0 };
     if (outcome === "WIN") marketMap[marketId].wins++;
     else if (outcome === "LOSS") marketMap[marketId].losses++;
@@ -312,25 +310,30 @@ async function trackWallet(wallet) {
     }
   }
 
-  // ✅ Calculate losing streak (1 loss per lost market)
-  let lostMarkets = 0;
-  for (const market of Object.values(marketMap)) {
-    if (market.losses > market.wins) lostMarkets++;
-  }
+  // ✅ Calculate new losing streak (consecutive lost markets)
+  const lostMarkets = Object.values(marketMap)
+    .filter(m => m.losses > m.wins)
+    .map((_, i) => i + 1); // just counts lost markets
 
-  // Update wallet losing streak and pause if threshold reached
+  // Fetch previous losing streak
   const { data: walletData } = await supabase
     .from("wallets")
     .select("losing_streak")
     .eq("id", wallet.id)
     .maybeSingle();
 
-  const newStreak = lostMarkets;
+  let prevStreak = walletData?.losing_streak || 0;
+
+  // Count consecutive losses across previous streak + current lost markets
+  let newStreak = lostMarkets.length > 0 ? prevStreak + lostMarkets.length : 0;
+
+  // Pause wallet if new streak ≥ threshold
   const updateData = { losing_streak: newStreak };
   if (newStreak >= LOSING_STREAK_THRESHOLD) updateData.paused = true;
 
   await supabase.from("wallets").update({ ...updateData, last_checked: new Date() }).eq("id", wallet.id);
 }
+
 
 // ---------------------- Main loop ----------------------
 async function main() {

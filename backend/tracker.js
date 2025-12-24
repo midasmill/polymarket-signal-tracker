@@ -249,21 +249,22 @@ async function trackWallet(wallet) {
       outcome_at = new Date(trade.timestamp * 1000); // Use trade timestamp for resolved
     }
 
-    await supabase.from("signals").insert({
-      wallet_id: wallet.id,
-      signal: trade.title,
-      market_name: trade.title,
-      market_id: trade.conditionId,
-      side: String(trade.outcome).toUpperCase(),
-      tx_hash: trade.transactionHash,
-      outcome,
-      pnl,
-      created_at: new Date(trade.timestamp * 1000),
-      outcome_at,
-      wallet_count: 1,
-      wallet_set: [String(wallet.id)],
-      tx_hashes: [trade.transactionHash],
-    });
+await supabase.from("signals").insert({
+  wallet_id: wallet.id,
+  signal: trade.title,
+  market_name: trade.title,
+  market_id: trade.marketId, // <-- use marketId
+  side: String(trade.outcome).toUpperCase(),
+  tx_hash: trade.transactionHash,
+  outcome,
+  pnl,
+  created_at: new Date(trade.timestamp * 1000),
+  outcome_at,
+  wallet_count: 1,
+  wallet_set: [String(wallet.id)],
+  tx_hashes: [trade.transactionHash],
+});
+
 
     insertedCount++;
   }

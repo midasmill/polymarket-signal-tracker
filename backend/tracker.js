@@ -387,59 +387,102 @@ await updateWalletWinRatesAndPauseJS();
   }, POLL_INTERVAL);
 }
 
-
 /* ===========================
-   Update Wallet Win Rates & Losing Streak
+   Update Wallet Win Rates & Quality Filters (30d, per market)
 =========================== */
 async function updateWalletWinRatesAndPauseJS() {
   try {
-    // 1️⃣ Fetch all wallets
-    const { data: wallets } = await supabase.from("wallets").select("id");
+    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+    const { data: wallets } = await supabase
+      .from("wallets")
+      .select("id");
+
     if (!wallets?.length) return;
 
     for (const wallet of wallets) {
-      // 2️⃣ Fetch wallet's resolved signals (WIN/LOSS)
+
+      // 1️⃣ Fetch resolved signals (last 30 days)
       const { data: signals } = await supabase
         .from("signals")
-        .select("market_id, outcome, created_at")
+        .select("market_id, outcome, pnl, avg_price, created_at")
         .eq("wallet_id", wallet.id)
         .in("outcome", ["WIN", "LOSS"])
+        .gte("created_at", since)
         .order("created_at", { ascending: true });
 
       if (!signals?.length) {
-        await supabase.from("wallets").update({ win_rate: 0, losing_streak: 0 }).eq("id", wallet.id);
+        await supabase.from("wallets").update({
+          win_rate: 0,
+          losing_streak: 0,
+          paused: true
+        }).eq("id", wallet.id);
         continue;
       }
 
-      // 3️⃣ Calculate win rate
-      const wins = signals.filter(s => s.outcome === "WIN").length;
-      const total = signals.length;
-      const winRate = (wins / total) * 100;
+      // 2️⃣ Reduce to ONE result per market
+      const markets = {};
+      for (const s of signals) {
+        markets[s.market_id] ??= {
+          outcome: s.outcome,
+          pnl: 0,
+          prices: []
+        };
 
-      // 4️⃣ Calculate current consecutive losing streak
-      let losingStreak = 0;
-      for (let i = signals.length - 1; i >= 0; i--) {
-        if (signals[i].outcome === "LOSS") losingStreak++;
-        else break; // streak stops at first WIN
+        markets[s.market_id].outcome = s.outcome; // last outcome wins
+        markets[s.market_id].pnl += s.pnl || 0;
+        if (s.avg_price != null) markets[s.market_id].prices.push(s.avg_price);
       }
 
-      // 5️⃣ Determine pause status
-      const paused = losingStreak >= LOSING_STREAK_THRESHOLD || winRate < 80;
+      const marketList = Object.values(markets);
 
-      // 6️⃣ Update wallet
-      await supabase
-        .from("wallets")
-        .update({ win_rate: winRate, losing_streak: losingStreak, paused, last_checked: new Date() })
-        .eq("id", wallet.id);
+      // 3️⃣ Market win rate (30d)
+      const wins = marketList.filter(m => m.outcome === "WIN").length;
+      const totalMarkets = marketList.length;
+      const marketWinRate = (wins / totalMarkets) * 100;
+
+      // 4️⃣ Avg entry price
+      const allPrices = marketList.flatMap(m => m.prices);
+      const avgEntryPrice = allPrices.length
+        ? allPrices.reduce((a, b) => a + b, 0) / allPrices.length
+        : 1;
+
+      // 5️⃣ Realized PnL (net)
+      const realizedPnl = marketList.reduce((sum, m) => sum + m.pnl, 0);
+
+      // 6️⃣ Losing streak (per market)
+      let losingStreak = 0;
+      for (let i = marketList.length - 1; i >= 0; i--) {
+        if (marketList[i].outcome === "LOSS") losingStreak++;
+        else break;
+      }
+
+      // 7️⃣ Quality gate
+      const passesQuality =
+        marketWinRate >= 65 &&
+        avgEntryPrice <= 0.55 &&
+        realizedPnl > 0;
+
+      const paused =
+        !passesQuality ||
+        losingStreak >= LOSING_STREAK_THRESHOLD;
+
+      // 8️⃣ Update wallet
+      await supabase.from("wallets").update({
+        win_rate: marketWinRate,
+        losing_streak: losingStreak,
+        avg_entry_price: avgEntryPrice,
+        realized_pnl: realizedPnl,
+        paused,
+        last_checked: new Date()
+      }).eq("id", wallet.id);
     }
 
-    console.log("✅ Wallet win rates and losing streaks updated successfully.");
+   console.log("✅ Wallet quality metrics updated");
   } catch (err) {
-    console.error("Error updating wallet win rates & streaks:", err.message);
+    console.error("Error updating wallet quality metrics:", err.message);
   }
 }
-
-
 
 /* ===========================
    Send Result Notes

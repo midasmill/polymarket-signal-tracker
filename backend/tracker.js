@@ -416,7 +416,6 @@ if (tradeRows.length) {
   } catch (err) {
     console.error(`Failed to rebuild wallet_live_picks:`, err.message);
   }
-}
 
 
   // 6️⃣ Compute wallet metrics from resolved signals

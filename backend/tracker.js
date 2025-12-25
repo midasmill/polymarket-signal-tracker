@@ -246,20 +246,38 @@ async function unpauseAndFetchWallet(wallet) {
 ========================== */
 async function fetchWalletPositions(userId) {
   if (!userId) return [];
-  const url = `https://data-api.polymarket.com/positions?user=${userId}&limit=100&sizeThreshold=1&sortBy=CURRENT&sortDirection=DESC`;
-  try {
-    const data = await fetchWithRetry(
-      url,
-      { headers: { "User-Agent": "Mozilla/5.0" } },
-      3, // retries
-      2000 // 2s delay
-    );
-    return Array.isArray(data) ? data : [];
-  } catch (err) {
-    console.error(`Failed to fetch positions for wallet ${userId}:`, err.message);
-    return [];
+
+  const allPositions = [];
+  let limit = 100;
+  let offset = 0;
+
+  while (true) {
+    const url = `https://data-api.polymarket.com/positions?user=${userId}&limit=${limit}&offset=${offset}&sizeThreshold=1&sortBy=CURRENT&sortDirection=DESC`;
+
+    try {
+      const data = await fetchWithRetry(
+        url,
+        { headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" } }
+      );
+
+      if (!Array.isArray(data) || data.length === 0) break;
+
+      allPositions.push(...data);
+
+      if (data.length < limit) break; // last page reached
+
+      offset += limit; // next page
+    } catch (err) {
+      console.error(`Failed to fetch positions for wallet ${userId} at offset ${offset}:`, err.message);
+      break;
+    }
   }
+
+  console.log(`Fetched ${allPositions.length} total positions for wallet ${userId}`);
+  return allPositions;
 }
+
+
 
 /* ===========================
    Track Wallet Trades (safe & complete)
@@ -271,18 +289,15 @@ async function trackWallet(wallet) {
     return;
   }
 
-  // 0️⃣ Auto-unpause if win_rate >= 80%
+     // 0️⃣ Auto-unpause if win_rate >= 80%
   if (wallet.paused && wallet.win_rate >= 80) {
-    await supabase
-      .from("wallets")
-      .update({ paused: false })
-      .eq("id", wallet.id);
+    await supabase.from("wallets").update({ paused: false }).eq("id", wallet.id);
     wallet.paused = false;
     console.log(`Wallet ${wallet.id} auto-unpaused (winRate=${wallet.win_rate.toFixed(2)}%)`);
   }
 
-  // Skip if still paused
-  if (wallet.paused) return;
+  // Skip if still paused **unless force_fetch is true**
+  if (wallet.paused && !wallet.force_fetch) return;
 
   // 1️⃣ Fetch positions (resolved + unresolved info)
   let positions = [];
@@ -441,6 +456,12 @@ async function trackWallet(wallet) {
   else console.log(
     `Wallet ${wallet.id} — winRate: ${winRate.toFixed(2)}%, losingStreak: ${losingStreak}, livePicks: ${livePicks}, paused: ${paused}`
   );
+
+   // Clear force_fetch flag after first historical fetch
+if (wallet.force_fetch) {
+  await supabase.from("wallets").update({ force_fetch: false }).eq("id", wallet.id);
+}
+
 }
 
 
@@ -663,15 +684,18 @@ async function fetchAndInsertLeaderboardWallets() {
             continue;
           }
 
-          // Insert wallet paused by default
-          const { error: insertErr } = await supabase.from("wallets").insert({
-            polymarket_proxy_wallet: proxyWallet,
-            polymarket_username: entry.userName || null,
-            last_checked: new Date(),
-            paused: true, // start paused
-            losing_streak: 0,
-            win_rate: 0,
-          });
+// Insert wallet paused by default
+const { error: insertErr } = await supabase.from("wallets").insert({
+  polymarket_proxy_wallet: proxyWallet,
+  polymarket_username: entry.userName || null,
+  last_checked: new Date(),
+  paused: true,
+  losing_streak: 0,
+  win_rate: 0,
+  force_fetch: true, // mark new wallet for one-time historical fetch
+});
+
+
 
           if (insertErr) {
             console.error(`Failed to insert wallet ${proxyWallet}:`, insertErr);

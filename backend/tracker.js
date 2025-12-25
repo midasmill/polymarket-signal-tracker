@@ -685,16 +685,39 @@ async function fetchAndInsertLeaderboardWallets() {
           }
 
 // Insert wallet paused by default
-const { error: insertErr } = await supabase.from("wallets").insert({
-  polymarket_proxy_wallet: proxyWallet,
-  polymarket_username: entry.userName || null,
-  last_checked: new Date(),
-  paused: true,
-  losing_streak: 0,
-  win_rate: 0,
-  force_fetch: true, // mark new wallet for one-time historical fetch
-});
+const { data: insertedWallet, error: insertErr } = await supabase
+  .from("wallets")
+  .insert({
+    polymarket_proxy_wallet: proxyWallet,
+    polymarket_username: entry.userName || null,
+    last_checked: new Date(),
+    paused: true,
+    losing_streak: 0,
+    win_rate: 0,
+    force_fetch: true, // mark new wallet for one-time historical fetch
+  })
+  .select("*")
+  .single(); // return the inserted wallet
 
+if (insertErr) {
+  console.error(`Failed to insert wallet ${proxyWallet}:`, insertErr);
+  totalSkipped++;
+  continue;
+}
+
+console.log(`Inserted wallet ${proxyWallet} (user=${entry.userName})`);
+totalInserted++;
+
+// Immediately fetch historical trades to populate signals
+if (insertedWallet) {
+  try {
+    console.log(`Fetching historical trades for wallet ${proxyWallet}...`);
+    await trackWallet({ ...insertedWallet, force_fetch: true });
+    console.log(`Historical trades fetched for wallet ${proxyWallet}`);
+  } catch (err) {
+    console.error(`Failed to fetch historical trades for wallet ${proxyWallet}:`, err.message);
+  }
+}
 
 
           if (insertErr) {

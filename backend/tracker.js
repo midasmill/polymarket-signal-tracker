@@ -813,7 +813,6 @@ async function rebuildWalletLivePicks() {
       resolved_outcome: sig.resolved_outcome,
       fetched_at: new Date(),
       vote_count: pickCounts[majorityPick],
-       vote_counts: JSON.stringify(pickCounts), // ← store as JSON string
       vote_counts: pickCounts,
       win_rate: sig.win_rate, // store win_rate in live picks for reference
     });

@@ -448,7 +448,7 @@ const unresolvedTrades = trades.filter(t =>
 
   // Otherwise, treat as unresolved
   return true;
-});
+);
 
 const tradeRows = unresolvedTrades.map(trade => ({
   wallet_id: wallet.id,
@@ -491,43 +491,6 @@ if (tradeRows.length) {
   const wins = resolvedSignals?.filter(s => s.outcome === "WIN").length || 0;
   const winRate = totalResolved > 0 ? (wins / totalResolved) * 100 : 0;
 
-// 7️⃣ Prepare live picks from truly unresolved signals
-// Only include trades that are Pending and not resolved in positions
-const { data: pendingSignals } = await supabase
-  .from("signals")
-  .select("*")
-  .eq("wallet_id", wallet.id)
-  .eq("outcome", "Pending");
-
-// Filter out any trades that now have a resolved position
-const livePicksRows = pendingSignals.filter(sig => {
-  const pos = positions.find(p => p.asset === sig.tx_hash);
-  return !pos || typeof pos.cashPnl !== "number"; // only include if no resolved cashPnl
-}).map(pos => ({
-  wallet_id: wallet.id,
-  market_id: pos.market_id,
-  market_name: pos.market_name, // include market_name
-  picked_outcome: pos.picked_outcome,
-  side: pos.side,
-  pnl: null,
-  outcome: "Pending",
-  resolved_outcome: null,
-  fetched_at: new Date(),
-}));
-
-const livePicksCount = livePicksRows.length;
-
-// Delete old live picks for wallet
-await supabase.from("wallet_live_picks").delete().eq("wallet_id", wallet.id);
-
-// Insert new live picks
-if (livePicksRows.length) {
-  await supabase.from("wallet_live_picks").insert(livePicksRows);
-  console.log(`Inserted ${livePicksRows.length} live picks for wallet ${wallet.id}`);
-}
-
-
-
   // 8️⃣ Determine pause status
   const paused = losingStreak >= LOSING_STREAK_THRESHOLD || winRate < 80;
 
@@ -547,7 +510,53 @@ if (livePicksRows.length) {
   else console.log(`Wallet ${wallet.id} — winRate: ${winRate.toFixed(2)}%, losingStreak: ${losingStreak}, livePicks: ${livePicksCount}, paused: ${paused}`);
 }
 
+/* ===========================
+   Rebuild live picks from unresolved signals
+========================== */
+async function rebuildWalletLivePicks() {
+  console.log("🔄 Rebuilding wallet_live_picks from signals...");
 
+  // Clear table
+  await supabase.from("wallet_live_picks").delete().neq("wallet_id", 0);
+
+  // Fetch all pending signals
+  const { data: pendingSignals, error } = await supabase
+    .from("signals")
+    .select(`
+      wallet_id,
+      market_id,
+      market_name,
+      picked_outcome,
+      side
+    `)
+    .eq("outcome", "Pending");
+
+  if (error) {
+    console.error("Failed to fetch pending signals:", error);
+    return;
+  }
+
+  if (!pendingSignals.length) {
+    console.log("No pending signals found.");
+    return;
+  }
+
+  const rows = pendingSignals.map(s => ({
+    wallet_id: s.wallet_id,
+    market_id: s.market_id,
+    market_name: s.market_name,
+    picked_outcome: s.picked_outcome,
+    side: s.side,
+    pnl: null,
+    outcome: "Pending",
+    resolved_outcome: null,
+    fetched_at: new Date()
+  }));
+
+  await supabase.from("wallet_live_picks").insert(rows);
+
+  console.log(`✅ Inserted ${rows.length} live picks`);
+}
 
 /* ===========================
    Update Wallet Metrics
@@ -832,11 +841,17 @@ async function trackerLoop() {
       console.error("Error sending majority signals:", err.message);
     }
 
+          // after all wallets are tracked
+await rebuildWalletLivePicks();
+
+
     console.log(`✅ Tracker loop completed successfully`);
   } catch (err) {
     console.error("Loop error:", err.message);
     // Telegram notifications are disabled to avoid spamming
     // await sendTelegram(`Tracker loop error: ${err.message}`);
+
+
   }
 }
 

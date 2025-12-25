@@ -360,6 +360,13 @@ const liveConditionIds = new Set(
 );
 
 // Only insert trades that are truly unresolved
+
+   // If ANY signal for this market is already resolved, skip inserting
+const resolvedExists = existingSignals.some(
+  s => s.market_id === t.conditionId && s.outcome !== "Pending"
+);
+if (resolvedExists) return false;
+
 const unresolvedTrades = trades.filter(t => {
   // Must still exist as a live position
   if (!liveConditionIds.has(t.conditionId)) return false;
@@ -419,6 +426,13 @@ if (tradeRows.length) {
   const paused = losingStreak >= LOSING_STREAK_THRESHOLD || winRate < 80;
 
   // 9️⃣ Update wallet metrics
+
+   const { count: livePicksCount } = await supabase
+  .from("signals")
+  .select("*", { count: "exact", head: true })
+  .eq("wallet_id", wallet.id)
+  .eq("outcome", "Pending");
+
   const { error } = await supabase
     .from("wallets")
     .update({
@@ -530,21 +544,28 @@ const { data: liveSignals } = await supabase
   .eq("wallet_id", wallet.id)
   .eq("outcome", "Pending");
 
-      if (liveErr) {
-        console.error(`Failed to fetch live signals for wallet ${wallet.id}:`, liveErr);
-      }
+const livePicksCount = liveSignals?.length || 0;
+
       const livePicksCount = liveSignals?.length || 0;
 
       // Pause status
       const paused = losingStreak >= LOSING_STREAK_THRESHOLD || winRate < 80;
 
       // 3️⃣ Update wallet with error check
+
+       const { count: livePicksCount } = await supabase
+  .from("signals")
+  .select("*", { count: "exact", head: true })
+  .eq("wallet_id", wallet.id)
+  .eq("outcome", "Pending");
+
       const { data, error } = await supabase
         .from("wallets")
         .update({
           win_rate: winRate,
           losing_streak: losingStreak,
-          live_picks: livePicks,
+          live_picks: livePicksCount,
+         livePicks: ${livePicksCount}
           paused,
           last_checked: new Date()
         })
@@ -580,9 +601,12 @@ async function sendMajoritySignals() {
   const { data: markets } = await supabase.from("signals").select("market_id", { distinct: true });
   if (!markets?.length) return;
 
-  for (const { market_id } of markets) {
-    const { data: signals } = await supabase.from("signals").select("*").eq("market_id", market_id);
-     .eq("outcome", "Pending")
+const { data: signals } = await supabase
+  .from("signals")
+  .select("*")
+  .eq("market_id", market_id)
+  .eq("outcome", "Pending");
+
     if (!signals || signals.length < MIN_WALLETS_FOR_SIGNAL) continue;
 
     const perWalletPick = {};

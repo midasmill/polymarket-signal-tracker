@@ -683,11 +683,31 @@ Total skipped: ${totalSkipped}`);
    — skips ties (e.g., 2 YES vs 2 NO)
 =========================== */
 async function rebuildWalletLivePicks() {
-  console.log("Rebuilding wallet_live_picks with vote counts...");
+  console.log("Rebuilding wallet_live_picks (win_rate ≥ 80%)...");
 
+  // 1️⃣ Fetch wallets with win_rate ≥ 80
+  const { data: wallets, error: walletsErr } = await supabase
+    .from("wallets")
+    .select("id")
+    .gte("win_rate", 80);
+
+  if (walletsErr) {
+    console.error("Failed to fetch wallets:", walletsErr.message);
+    return;
+  }
+
+  if (!wallets?.length) {
+    console.log("No wallets with win_rate ≥ 80%");
+    return;
+  }
+
+  const walletIds = wallets.map(w => w.id);
+
+  // 2️⃣ Fetch pending signals from those wallets
   const { data: signals, error } = await supabase
     .from("signals")
     .select("*")
+    .in("wallet_id", walletIds)
     .eq("outcome", "Pending")
     .not("picked_outcome", "is", null);
 
@@ -696,6 +716,7 @@ async function rebuildWalletLivePicks() {
     return;
   }
 
+  // 3️⃣ Group by wallet_id + event_slug
   const grouped = {};
   const skippedEvents = [];
   for (const sig of signals) {
@@ -705,6 +726,7 @@ async function rebuildWalletLivePicks() {
     grouped[key].push(sig);
   }
 
+  // 4️⃣ Determine majority pick per group and insert
   const livePicks = [];
   for (const [key, group] of Object.entries(grouped)) {
     const pickCounts = {};
@@ -734,11 +756,12 @@ async function rebuildWalletLivePicks() {
       outcome: sig.outcome,
       resolved_outcome: sig.resolved_outcome,
       fetched_at: new Date(),
-      vote_count: pickCounts[majorityPick],        // majority count
-      vote_counts: pickCounts,                     // JSON of all votes
+      vote_count: pickCounts[majorityPick],
+      vote_counts: pickCounts,
     });
   }
 
+  // 5️⃣ Clear old live picks and insert new
   const { error: deleteErr } = await supabase.from("wallet_live_picks").delete();
   if (deleteErr) console.error("Failed to clear wallet_live_picks:", deleteErr.message);
 
@@ -752,8 +775,6 @@ async function rebuildWalletLivePicks() {
     console.log(`⚠️ Skipped ${skippedEvents.length} events due to ties:`, skippedEvents.map(e => e.key));
   }
 }
-
-
 
 /* ===========================
    Fetch majority picks per wallet

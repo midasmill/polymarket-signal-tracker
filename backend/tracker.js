@@ -341,6 +341,7 @@ async function trackWallet(wallet) {
 
   // 1️⃣ Fetch wallet positions safely
   const positions = await fetchWalletPositions(userId);
+   console.log("Fetched positions for", userId, positions);
 
   if (!positions.length) {
     await supabase.from("wallets").update({ last_checked: new Date() }).eq("id", wallet.id);
@@ -422,7 +423,7 @@ async function trackWallet(wallet) {
   const wins = resolvedSignals?.filter(s => s.outcome === "WIN").length || 0;
   const winRate = totalResolved > 0 ? (wins / totalResolved) * 100 : 0;
 
- // 7️⃣ Count live/unresolved signals and prepare live picks rows
+// 7️⃣ Count live/unresolved signals and prepare live picks rows
 const livePicksRows = positions
   .filter(pos => pos.cashPnl === null || pos.outcome === null)
   .map(pos => ({
@@ -436,16 +437,15 @@ const livePicksRows = positions
     fetched_at: new Date(),
   }));
 
-// Clear old live picks for this wallet
+// Delete old live picks
 await supabase.from("wallet_live_picks").delete().eq("wallet_id", wallet.id);
 
-// Insert current unresolved / new picks
+// Insert new live picks
 if (livePicksRows.length) {
   await supabase.from("wallet_live_picks").insert(livePicksRows);
+  console.log(`Inserted ${livePicksRows.length} live picks for wallet ${wallet.id}`);
 }
 
-// Count number of live picks for wallet metrics
-const livePicksCount = livePicksRows.length;
 
 // 8️⃣ Determine pause status
 const paused = losingStreak >= LOSING_STREAK_THRESHOLD || winRate < 80;

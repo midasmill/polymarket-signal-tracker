@@ -418,12 +418,24 @@ async function trackWallet(wallet) {
     }
   }
 
-// 5️⃣ Process unresolved trades from trades API
-const unresolvedTrades = trades.filter(t => t.outcome && !existingTxs.has(t.asset));
+// 5️⃣ Process unresolved trades from trades API safely
+const unresolvedTrades = trades.filter(t => {
+  // Skip trades already in signals
+  if (existingTxs.has(t.asset)) return false;
+
+  // Check positions for this trade to see if it's truly unresolved
+  const pos = positions.find(p => p.asset === t.asset);
+  // If we have a position with cashPnl !== null, it's already resolved
+  if (pos && typeof pos.cashPnl === "number") return false;
+
+  // Otherwise, treat as unresolved
+  return true;
+});
+
 const tradeRows = unresolvedTrades.map(trade => ({
   wallet_id: wallet.id,
   signal: trade.title,
-  market_name: trade.title,         // <-- added this
+  market_name: trade.title,
   market_id: trade.conditionId,
   event_slug: trade.eventSlug || trade.slug,
   side: trade.side?.toUpperCase() || "BUY",
@@ -438,7 +450,7 @@ const tradeRows = unresolvedTrades.map(trade => ({
 
 if (tradeRows.length) {
   await supabase.from("signals").insert(tradeRows);
-  console.log(`Inserted ${tradeRows.length} unresolved trades for wallet ${wallet.id}`);
+  console.log(`Inserted ${tradeRows.length} truly unresolved trades for wallet ${wallet.id}`);
 }
 
   // 6️⃣ Compute wallet metrics from resolved signals
@@ -461,17 +473,22 @@ if (tradeRows.length) {
   const wins = resolvedSignals?.filter(s => s.outcome === "WIN").length || 0;
   const winRate = totalResolved > 0 ? (wins / totalResolved) * 100 : 0;
 
-// 7️⃣ Prepare live picks from unresolved signals
+// 7️⃣ Prepare live picks from truly unresolved signals
+// Only include trades that are Pending and not resolved in positions
 const { data: pendingSignals } = await supabase
   .from("signals")
   .select("*")
   .eq("wallet_id", wallet.id)
   .eq("outcome", "Pending");
 
-const livePicksRows = pendingSignals.map(pos => ({
+// Filter out any trades that now have a resolved position
+const livePicksRows = pendingSignals.filter(sig => {
+  const pos = positions.find(p => p.asset === sig.tx_hash);
+  return !pos || typeof pos.cashPnl !== "number"; // only include if no resolved cashPnl
+}).map(pos => ({
   wallet_id: wallet.id,
   market_id: pos.market_id,
-  market_name: pos.market_name,   // already present
+  market_name: pos.market_name, // include market_name
   picked_outcome: pos.picked_outcome,
   side: pos.side,
   pnl: null,
@@ -480,10 +497,9 @@ const livePicksRows = pendingSignals.map(pos => ({
   fetched_at: new Date(),
 }));
 
-
 const livePicksCount = livePicksRows.length;
 
-// Delete old live picks
+// Delete old live picks for wallet
 await supabase.from("wallet_live_picks").delete().eq("wallet_id", wallet.id);
 
 // Insert new live picks
@@ -491,6 +507,7 @@ if (livePicksRows.length) {
   await supabase.from("wallet_live_picks").insert(livePicksRows);
   console.log(`Inserted ${livePicksRows.length} live picks for wallet ${wallet.id}`);
 }
+
 
 
   // 8️⃣ Determine pause status

@@ -425,7 +425,7 @@ async function trackWallet(wallet) {
 
 // 7️⃣ Count live/unresolved signals and prepare live picks rows
 const livePicksRows = positions
-  .filter(pos => pos.cashPnl === null || pos.outcome === null)
+  .filter(pos => pos.cashPnl === null) // only unresolved trades
   .map(pos => ({
     wallet_id: wallet.id,
     market_id: pos.conditionId,
@@ -433,9 +433,10 @@ const livePicksRows = positions
     side: pos.side?.toUpperCase() || "BUY",
     pnl: pos.cashPnl ?? null,
     outcome: pos.cashPnl !== null ? (pos.cashPnl > 0 ? "WIN" : "LOSS") : "Pending",
-    resolved_outcome: pos.oppositeOutcome || null,
+    resolved_outcome: null,
     fetched_at: new Date(),
   }));
+
 
 // Delete old live picks
 await supabase.from("wallet_live_picks").delete().eq("wallet_id", wallet.id);

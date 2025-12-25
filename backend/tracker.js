@@ -428,27 +428,28 @@ if (!userId) {
   }
 
 // 5️⃣ Process unresolved trades from trades API safely
-// Build a set of live conditionIds from positions
+
+// Build a set of live conditionIds from unresolved positions
 const liveConditionIds = new Set(
   positions
     .filter(p => p.cashPnl === null)
     .map(p => p.conditionId)
 );
 
-// Only insert unresolved trades that STILL EXIST in positions
-const unresolvedTrades = trades.filter(t =>
-  liveConditionIds.has(t.conditionId) &&
-  !existingTxs.has(t.asset)
-);
+// Only insert trades that are truly unresolved
+const unresolvedTrades = trades.filter(t => {
+  // Must still exist as a live position
+  if (!liveConditionIds.has(t.conditionId)) return false;
 
-  // Check positions for this trade to see if it's truly unresolved
+  // Skip if already inserted
+  if (existingTxs.has(t.asset)) return false;
+
+  // Extra safety: if position exists but is resolved, skip
   const pos = positions.find(p => p.asset === t.asset);
-  // If we have a position with cashPnl !== null, it's already resolved
   if (pos && typeof pos.cashPnl === "number") return false;
 
-  // Otherwise, treat as unresolved
   return true;
-);
+});
 
 const tradeRows = unresolvedTrades.map(trade => ({
   wallet_id: wallet.id,

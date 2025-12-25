@@ -349,7 +349,7 @@ async function trackWallet(wallet) {
         market_id: marketId,
         event_slug: pos.eventSlug || pos.slug,
         side: pos.side?.toUpperCase() || "BUY",
-        win_rate: wallet.win_rate, // add this
+        win_rate: wallet.win_rate, // ← crucial
         picked_outcome: pickedOutcome,
         tx_hash: pos.asset,
         pnl,
@@ -547,11 +547,12 @@ async function sendMajoritySignals() {
   if (!markets?.length) return;
 
   for (const { market_id } of markets) {
-    const { data: signals } = await supabase
-      .from("signals")
-      .select("*")
-      .eq("market_id", market_id)
-      .eq("outcome", "Pending");
+const { data: signals } = await supabase
+  .from("signals")
+  .select("*")
+  .gte("win_rate", 80)
+  .eq("outcome", "Pending")
+  .not("picked_outcome", "is", null);
 
     if (!signals || signals.length < MIN_WALLETS_FOR_SIGNAL) continue;
 
@@ -761,6 +762,7 @@ async function rebuildWalletLivePicks() {
       resolved_outcome: sig.resolved_outcome,
       fetched_at: new Date(),
       vote_count: pickCounts[majorityPick],
+       vote_counts: JSON.stringify(pickCounts), // ← store as JSON string
       vote_counts: pickCounts,
       win_rate: sig.win_rate, // store win_rate in live picks for reference
     });

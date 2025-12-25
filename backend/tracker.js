@@ -580,54 +580,7 @@ async function sendResultNotes(sig, result) {
 /* ===========================
    Send Majority Signals
 =========================== */
-async function sendMajoritySignals() {
-  const { data: markets } = await supabase
-    .from("signals")
-    .select("market_id", { distinct: true });
 
-  if (!markets?.length) return;
-
-  for (const { market_id } of markets) {
-const { data: signals } = await supabase
-  .from("signals")
-  .select("*")
-  .gte("win_rate", 80)
-  .eq("outcome", "Pending")
-  .not("picked_outcome", "is", null);
-
-    if (!signals || signals.length < MIN_WALLETS_FOR_SIGNAL) continue;
-
-    const perWalletPick = {};
-    for (const sig of signals) perWalletPick[sig.wallet_id] = getPick(sig);
-
-    const pickCounts = {};
-    for (const pick of Object.values(perWalletPick))
-      if (pick && pick !== "Unknown") pickCounts[pick] = (pickCounts[pick] || 0) + 1;
-
-    const entries = Object.entries(pickCounts).sort((a, b) => b[1] - a[1]);
-    if (!entries.length) continue;
-    if (entries.length > 1 && entries[0][1] === entries[1][1]) continue; // tie
-
-    const [majorityPick, walletCount] = entries[0];
-    if (walletCount < MIN_WALLETS_FOR_SIGNAL) continue;
-
-    const confidence = getConfidenceEmoji(walletCount);
-    const sig = signals.find(s => getPick(s) === majorityPick);
-    if (!sig) continue;
-    if (!FORCE_SEND && sig.signal_sent_at) continue;
-
-    const emoji = RESULT_EMOJIS[sig.outcome] || "⚪";
-    const text = formatSignal({ ...sig, side: majorityPick }, confidence, emoji, "Signal Sent");
-
-    await sendTelegram(text);
-    await updateNotes("polymarket-millionaires", text);
-
-    await supabase
-      .from("signals")
-      .update({ signal_sent_at: new Date() })
-      .eq("market_id", market_id);
-  }
-}
 
 
 /* ===========================
@@ -712,24 +665,17 @@ async function fetchAndInsertLeaderboardWallets() {
 async function rebuildWalletLivePicks() {
   console.log("Rebuilding wallet_live_picks...");
 
-  // 1️⃣ Fetch all pending signals with picked_outcome
-const { data: signals, error } = await supabase
-  .from("signals")
-  .select("*")
-  .eq("outcome", "Pending")
-  .not("picked_outcome", "is", null);
+  // Fetch pending signals with picked_outcome and wallet win_rate >= 80
+  const { data: signals, error } = await supabase
+    .from("signals")
+    .select("*")
+    .eq("outcome", "Pending")
+    .not("picked_outcome", "is", null)
+    .gte("win_rate", 80);
 
-  if (error) {
-    console.error("Failed to fetch signals:", error.message);
-    return;
-  }
+  if (error) return console.error("Failed to fetch signals:", error.message);
+  if (!signals?.length) return console.log("No pending signals to process.");
 
-  if (!signals?.length) {
-    console.log("No pending signals to process.");
-    return;
-  }
-
-  // 2️⃣ Group signals by wallet_id + event_slug
   const grouped = {};
   for (const sig of signals) {
     if (!sig.event_slug) continue;
@@ -738,27 +684,14 @@ const { data: signals, error } = await supabase
     grouped[key].push(sig);
   }
 
-  // 3️⃣ Determine majority pick per group
   const livePicks = [];
-  const skippedEvents = [];
-
-  for (const [key, group] of Object.entries(grouped)) {
+  for (const group of Object.values(grouped)) {
     const pickCounts = {};
-    for (const sig of group) {
-      pickCounts[sig.picked_outcome] = (pickCounts[sig.picked_outcome] || 0) + 1;
-    }
-
+    for (const sig of group) pickCounts[sig.picked_outcome] = (pickCounts[sig.picked_outcome] || 0) + 1;
     const sorted = Object.entries(pickCounts).sort((a, b) => b[1] - a[1]);
-
-    // Skip true ties (more than 1 vote per option)
-    if (sorted.length > 1 && sorted[0][1] === sorted[1][1] && sorted[0][1] > 1) {
-      skippedEvents.push({ key, picks: Object.keys(pickCounts) });
-      continue;
-    }
-
+    if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) continue; // skip ties
     const majorityPick = sorted[0][0];
     const sig = group.find(s => s.picked_outcome === majorityPick);
-
     livePicks.push({
       wallet_id: sig.wallet_id,
       market_id: sig.market_id,
@@ -771,24 +704,13 @@ const { data: signals, error } = await supabase
       resolved_outcome: sig.resolved_outcome,
       fetched_at: new Date(),
       vote_count: pickCounts[majorityPick],
-      vote_counts: pickCounts,
-      win_rate: sig.win_rate || 0, // keep reference
+      win_rate: sig.win_rate || 0
     });
   }
 
-  // 4️⃣ Clear old live picks and insert new
-  const { error: deleteErr } = await supabase.from("wallet_live_picks").delete();
-  if (deleteErr) console.error("Failed to clear wallet_live_picks:", deleteErr.message);
-
-  if (livePicks.length) {
-    const { error: insertErr } = await supabase.from("wallet_live_picks").insert(livePicks);
-    if (insertErr) console.error("Failed to insert wallet_live_picks:", insertErr.message);
-  }
-
-  console.log(`✅ Rebuilt wallet_live_picks (${livePicks.length} entries)`);
-  if (skippedEvents.length) {
-    console.log(`⚠️ Skipped ${skippedEvents.length} events due to true ties:`, skippedEvents.map(e => e.key));
-  }
+  await supabase.from("wallet_live_picks").delete();
+  if (livePicks.length) await supabase.from("wallet_live_picks").insert(livePicks);
+  console.log(`✅ Rebuilt wallet_live_picks (${livePicks.length})`);
 }
 
 /* ===========================

@@ -580,6 +580,46 @@ async function sendResultNotes(sig, result) {
 /* ===========================
    Send Majority Signals
 =========================== */
+async function sendMajoritySignals() {
+  const { data: markets } = await supabase.from("signals").select("market_id", { distinct: true });
+  if (!markets?.length) return;
+
+  for (const { market_id } of markets) {
+    const { data: signals } = await supabase
+      .from("signals")
+      .select("*")
+      .gte("win_rate", 80)
+      .eq("outcome", "Pending")
+      .not("picked_outcome", "is", null);
+
+    if (!signals || signals.length < MIN_WALLETS_FOR_SIGNAL) continue;
+
+    const perWalletPick = {};
+    for (const sig of signals) perWalletPick[sig.wallet_id] = sig.picked_outcome;
+
+    const pickCounts = {};
+    for (const pick of Object.values(perWalletPick)) pickCounts[pick] = (pickCounts[pick] || 0) + 1;
+
+    const sorted = Object.entries(pickCounts).sort((a, b) => b[1] - a[1]);
+    if (!sorted.length) continue;
+    if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) continue;
+
+    const [majorityPick, walletCount] = sorted[0];
+    if (walletCount < MIN_WALLETS_FOR_SIGNAL) continue;
+
+    const sig = signals.find(s => s.picked_outcome === majorityPick);
+    if (!sig || (!FORCE_SEND && sig.signal_sent_at)) continue;
+
+    const confidence = getConfidenceEmoji(walletCount);
+    const emoji = RESULT_EMOJIS[sig.outcome] || "⚪";
+    const text = formatSignal({ ...sig, side: majorityPick }, confidence, emoji, "Signal Sent");
+
+    await sendTelegram(text);
+    await updateNotes("polymarket-millionaires", text);
+
+    await supabase.from("signals").update({ signal_sent_at: new Date() }).eq("market_id", market_id);
+  }
+}
 
 
 

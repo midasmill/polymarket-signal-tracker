@@ -418,28 +418,29 @@ async function trackWallet(wallet) {
     }
   }
 
-  // 5️⃣ Process unresolved trades from trades API
-  const unresolvedTrades = trades.filter(t => t.outcome && !existingTxs.has(t.asset));
-  const tradeRows = unresolvedTrades.map(trade => ({
-    wallet_id: wallet.id,
-    signal: trade.title,
-    market_name: trade.title,
-    market_id: trade.conditionId,
-    event_slug: trade.eventSlug || trade.slug,
-    side: trade.side?.toUpperCase() || "BUY",
-    picked_outcome: trade.outcome || `OPTION_${trade.outcomeIndex}`,
-    tx_hash: trade.asset,
-    pnl: null,
-    outcome: "Pending",
-    resolved_outcome: null,
-    outcome_at: null,
-    created_at: new Date(trade.timestamp * 1000 || Date.now()),
-  }));
+// 5️⃣ Process trades from trades API (include unresolved)
+const newTrades = trades.filter(t => !existingTxs.has(t.asset)); // remove t.outcome check
+const tradeRows = newTrades.map(trade => ({
+  wallet_id: wallet.id,
+  signal: trade.title,
+  market_name: trade.title,
+  market_id: trade.conditionId,
+  event_slug: trade.eventSlug || trade.slug,
+  side: trade.side?.toUpperCase() || "BUY",
+  picked_outcome: trade.outcome || `OPTION_${trade.outcomeIndex}`,
+  tx_hash: trade.asset,
+  pnl: null,
+  outcome: trade.outcome ? "Pending" : "Pending", // always Pending for unresolved
+  resolved_outcome: null,
+  outcome_at: null,
+  created_at: new Date(trade.timestamp * 1000 || Date.now()),
+}));
 
-  if (tradeRows.length) {
-    await supabase.from("signals").insert(tradeRows);
-    console.log(`Inserted ${tradeRows.length} unresolved trades for wallet ${wallet.id}`);
-  }
+if (tradeRows.length) {
+  await supabase.from("signals").insert(tradeRows);
+  console.log(`Inserted ${tradeRows.length} trades (resolved + unresolved) for wallet ${wallet.id}`);
+}
+
 
   // 6️⃣ Compute wallet metrics from resolved signals
   const { data: resolvedSignals } = await supabase

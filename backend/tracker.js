@@ -424,6 +424,7 @@ async function trackWallet(wallet) {
   const winRate = totalResolved > 0 ? (wins / totalResolved) * 100 : 0;
 
   // 7️⃣ Count live/unresolved signals and prepare live picks rows
+  let livePicksCount = 0; // declare first
   const livePicksRows = positions
     .filter(pos => pos.cashPnl === null) // only unresolved trades
     .map(pos => ({
@@ -437,8 +438,7 @@ async function trackWallet(wallet) {
       fetched_at: new Date(),
     }));
 
-  // Count for wallet metrics
-  const livePicksCount = livePicksRows.length;
+  livePicksCount = livePicksRows.length; // assign after mapping
 
   // Delete old live picks
   await supabase.from("wallet_live_picks").delete().eq("wallet_id", wallet.id);
@@ -460,15 +460,19 @@ async function trackWallet(wallet) {
       win_rate: winRate,
       live_picks: livePicksCount,
       paused,
-      last_checked: new Date()
+      last_checked: new Date(),
     })
     .eq("id", wallet.id);
 
   if (error) console.error(`Wallet ${wallet.id} update failed:`, error);
-  else console.log(
-    `Wallet ${wallet.id} — winRate: ${winRate.toFixed(2)}%, losingStreak: ${losingStreak}, livePicks: ${livePicksCount}, paused: ${paused}`
-  );
-} // end of trackWallet
+  else
+    console.log(
+      `Wallet ${wallet.id} — winRate: ${winRate.toFixed(
+        2
+      )}%, losingStreak: ${losingStreak}, livePicks: ${livePicksCount}, paused: ${paused}`
+    );
+}
+
 
 
 /* ===========================

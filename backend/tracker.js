@@ -134,8 +134,15 @@ function getConfidenceEmoji(count) {
    Vote counting
 =========================== */
 async function getMarketVoteCounts(marketId) {
-  const { data: signals } = await supabase.from("signals").select("wallet_id, side").eq("market_id", marketId);
-  if (!signals?.length) return null;
+  // Group signals by wallet_id + event_slug manually
+const grouped = {};
+for (const sig of signals) {
+  if (!sig.event_slug) continue;
+  const key = `${sig.wallet_id}||${sig.event_slug}`;
+  grouped[key] ??= [];
+  grouped[key].push(sig);
+}
+
 
   const perWallet = {};
   for (const s of signals) {
@@ -763,11 +770,11 @@ async function rebuildWalletLivePicks() {
   console.log("Rebuilding wallet_live_picks...");
 
   // 1️⃣ Fetch all pending signals with picked_outcome
-  const { data: signals, error } = await supabase
-    .from("signals")
-    .select("*")
-    .eq("outcome", "Pending")
-    .not("picked_outcome", "is", null);
+const { data: signals, error } = await supabase
+  .from("signals")
+  .select("*")
+  .eq("outcome", "Pending")
+  .not("picked_outcome", "is", null);
 
   if (error) {
     console.error("Failed to fetch signals:", error.message);

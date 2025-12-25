@@ -671,7 +671,7 @@ async function fetchAndInsertLeaderboardWallets() {
             totalSkipped++;
             continue;
           }
-          if (entry.pnl < 10000) {
+          if (entry.pnl < 100000) {
             console.log(`Skipping wallet ${proxyWallet}: pnl ${entry.pnl} < 10000`);
             totalSkipped++;
             continue;

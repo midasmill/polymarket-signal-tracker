@@ -376,39 +376,48 @@ async function trackWallet(wallet) {
     }
   }
 
-  // 5️⃣ Process unresolved trades
-  const liveConditionIds = new Set(
-    positions.filter(p => p.cashPnl === null).map(p => p.conditionId)
-  );
+// 5️⃣ Process unresolved trades
+const liveConditionIds = new Set(
+  positions.filter(p => p.cashPnl === null).map(p => p.conditionId)
+);
 
-  const unresolvedTrades = trades.filter(t => {
-    if (!liveConditionIds.has(t.conditionId)) return false;
-    if (existingTxs.has(t.asset)) return false;
-    const pos = positions.find(p => p.asset === t.asset);
-    if (pos && typeof pos.cashPnl === "number") return false;
-    return true;
-  });
+const unresolvedTrades = trades.filter(t => {
+  if (!liveConditionIds.has(t.conditionId)) return false;
+  if (existingTxs.has(t.asset)) return false;
+  const pos = positions.find(p => p.asset === t.asset);
+  if (pos && typeof pos.cashPnl === "number") return false;
+  return true;
+});
 
-  const tradeRows = unresolvedTrades.map(trade => ({
-    wallet_id: wallet.id,
-    signal: trade.title,
-    market_name: trade.title,
-    market_id: trade.conditionId,
-    event_slug: trade.eventSlug || trade.slug,
-    side: trade.side?.toUpperCase() || "BUY",
-    picked_outcome: trade.outcome || `OPTION_${trade.outcomeIndex}`,
-    tx_hash: trade.asset,
-    pnl: null,
-    outcome: "Pending",
-    resolved_outcome: null,
-    outcome_at: null,
-    created_at: new Date(trade.timestamp * 1000 || Date.now()),
-  }));
+const tradeRows = unresolvedTrades.map(trade => ({
+  wallet_id: wallet.id,
+  signal: trade.title,
+  market_name: trade.title,
+  market_id: trade.conditionId,
+  event_slug: trade.eventSlug || trade.slug,
+  side: trade.side?.toUpperCase() || "BUY",
+  picked_outcome: trade.outcome || `OPTION_${trade.outcomeIndex}`,
+  tx_hash: trade.asset,
+  pnl: null,
+  outcome: "Pending",
+  resolved_outcome: null,
+  outcome_at: null,
+  created_at: new Date(trade.timestamp * 1000 || Date.now()),
+}));
 
-  if (tradeRows.length) {
-    await supabase.from("signals").insert(tradeRows);
-    console.log(`Inserted ${tradeRows.length} unresolved trades for wallet ${wallet.id}`);
+if (tradeRows.length) {
+  await supabase.from("signals").insert(tradeRows);
+  console.log(`Inserted ${tradeRows.length} unresolved trades for wallet ${wallet.id}`);
+
+  // 🔄 Immediately rebuild wallet_live_picks after inserting unresolved trades
+  try {
+    await rebuildWalletLivePicks();
+    console.log(`wallet_live_picks rebuilt after inserting trades for wallet ${wallet.id}`);
+  } catch (err) {
+    console.error(`Failed to rebuild wallet_live_picks:`, err.message);
   }
+}
+
 
   // 6️⃣ Compute wallet metrics from resolved signals
   const { data: resolvedSignals } = await supabase
@@ -745,20 +754,18 @@ Total inserted: ${totalInserted}
 Total skipped: ${totalSkipped}`);
 }
 
-
 /* ===========================
-   Rebuild wallet_live_picks table
+   Rebuild wallet_live_picks
    — one pick per wallet per event
-   — skips ties (e.g., 2 YES vs 2 NO)
+   — includes unresolved picks
 =========================== */
 async function rebuildWalletLivePicks() {
-  console.log("Rebuilding wallet_live_picks (win_rate ≥ 80%)...");
+  console.log("Rebuilding wallet_live_picks...");
 
-  // 1️⃣ Fetch only signals with win_rate ≥ 80 and pending outcome
+  // 1️⃣ Fetch all pending signals with picked_outcome
   const { data: signals, error } = await supabase
     .from("signals")
     .select("*")
-    .gte("win_rate", 80)
     .eq("outcome", "Pending")
     .not("picked_outcome", "is", null);
 
@@ -768,13 +775,12 @@ async function rebuildWalletLivePicks() {
   }
 
   if (!signals?.length) {
-    console.log("No pending signals from wallets with win_rate ≥ 80%");
+    console.log("No pending signals to process.");
     return;
   }
 
-  // 2️⃣ Group by wallet_id + event_slug
+  // 2️⃣ Group signals by wallet_id + event_slug
   const grouped = {};
-  const skippedEvents = [];
   for (const sig of signals) {
     if (!sig.event_slug) continue;
     const key = `${sig.wallet_id}||${sig.event_slug}`;
@@ -784,6 +790,8 @@ async function rebuildWalletLivePicks() {
 
   // 3️⃣ Determine majority pick per group
   const livePicks = [];
+  const skippedEvents = [];
+
   for (const [key, group] of Object.entries(grouped)) {
     const pickCounts = {};
     for (const sig of group) {
@@ -792,8 +800,8 @@ async function rebuildWalletLivePicks() {
 
     const sorted = Object.entries(pickCounts).sort((a, b) => b[1] - a[1]);
 
-    // skip ties
-    if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) {
+    // Skip true ties (more than 1 vote per option)
+    if (sorted.length > 1 && sorted[0][1] === sorted[1][1] && sorted[0][1] > 1) {
       skippedEvents.push({ key, picks: Object.keys(pickCounts) });
       continue;
     }
@@ -814,7 +822,7 @@ async function rebuildWalletLivePicks() {
       fetched_at: new Date(),
       vote_count: pickCounts[majorityPick],
       vote_counts: pickCounts,
-      win_rate: sig.win_rate, // store win_rate in live picks for reference
+      win_rate: sig.win_rate || 0, // keep reference
     });
   }
 
@@ -829,11 +837,9 @@ async function rebuildWalletLivePicks() {
 
   console.log(`✅ Rebuilt wallet_live_picks (${livePicks.length} entries)`);
   if (skippedEvents.length) {
-    console.log(`⚠️ Skipped ${skippedEvents.length} events due to ties:`, skippedEvents.map(e => e.key));
+    console.log(`⚠️ Skipped ${skippedEvents.length} events due to true ties:`, skippedEvents.map(e => e.key));
   }
 }
-
-
 
 /* ===========================
    Fetch majority picks per wallet

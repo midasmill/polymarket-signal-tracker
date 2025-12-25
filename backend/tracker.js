@@ -918,7 +918,7 @@ setInterval(() => {
 }, 60_000); // every 60 seconds
 
 /* ===========================
-   Tracker Loop
+   Tracker loop
 =========================== */
 async function trackerLoop() {
   try {
@@ -927,7 +927,7 @@ async function trackerLoop() {
 
     console.log(`[${new Date().toISOString()}] Tracking ${wallets.length} wallets...`);
 
-    // 1️⃣ Track wallets
+    // Track wallets
     for (const wallet of wallets) {
       try {
         await trackWallet(wallet);
@@ -936,17 +936,16 @@ async function trackerLoop() {
       }
     }
 
-    // 2️⃣ Rebuild wallet_live_picks
-    const livePicks = []; // <--- declare BEFORE any use
+    // Rebuild wallet_live_picks
+    let livePicks = [];
     const skippedEvents = [];
-
     const { data: signals, error } = await supabase
       .from("signals")
       .select("*")
       .eq("outcome", "Pending")
       .not("picked_outcome", "is", null);
 
-    if (error) console.error("Failed to fetch signals for live picks:", error.message);
+    if (error) console.error("Failed to fetch signals:", error.message);
 
     if (signals?.length) {
       const grouped = {};
@@ -966,7 +965,7 @@ async function trackerLoop() {
         const sorted = Object.entries(pickCounts).sort((a, b) => b[1] - a[1]);
         if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) {
           skippedEvents.push({ key, picks: Object.keys(pickCounts) });
-          continue; // skip ties
+          continue;
         }
 
         const majorityPick = sorted[0][0];
@@ -988,8 +987,11 @@ async function trackerLoop() {
       }
     }
 
-    // 3️⃣ Insert into wallet_live_picks
+    // Clear old live picks and insert new
     if (livePicks.length) {
+      const { error: deleteErr } = await supabase.from("wallet_live_picks").delete();
+      if (deleteErr) console.error("Failed to clear wallet_live_picks:", deleteErr.message);
+
       const { error: insertErr } = await supabase.from("wallet_live_picks").insert(livePicks);
       if (insertErr) console.error("Failed to insert wallet_live_picks:", insertErr.message);
     }
@@ -997,31 +999,18 @@ async function trackerLoop() {
     console.log(`✅ Rebuilt wallet_live_picks (${livePicks.length} entries)`);
     if (skippedEvents.length) console.log(`⚠️ Skipped ${skippedEvents.length} events due to ties`);
 
-  } catch (err) {
-    console.error("Loop error:", err.message);
-  }
-}
+    // Update wallet metrics
+    await updateWalletMetricsJS();
 
-
-    // 4️⃣ Recalculate wallet metrics (win_rate, losing streak, paused)
-    try {
-      await updateWalletMetricsJS();
-    } catch (err) {
-      console.error("Error updating wallet metrics:", err.message);
-    }
-
-    // 5️⃣ Send majority signals
-    try {
-      await sendMajoritySignals();
-    } catch (err) {
-      console.error("Error sending majority signals:", err.message);
-    }
+    // Send majority signals
+    await sendMajoritySignals();
 
     console.log(`✅ Tracker loop completed successfully`);
   } catch (err) {
     console.error("Loop error:", err.message);
   }
 }
+
 
 /* ===========================
    Main Function

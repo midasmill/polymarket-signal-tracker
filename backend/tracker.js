@@ -678,6 +678,77 @@ Total skipped: ${totalSkipped}`);
 }
 
 /* ===========================
+   Rebuild wallet_live_picks table
+   — one pick per wallet per event
+   — skips ties (e.g., 2 YES vs 2 NO)
+=========================== */
+async function rebuildWalletLivePicks() {
+  console.log("Rebuilding wallet_live_picks...");
+
+  // 1️⃣ Fetch all pending signals
+  const { data: signals, error } = await supabase
+    .from("signals")
+    .select("*")
+    .eq("outcome", "Pending");
+
+  if (error) {
+    console.error("Failed to fetch signals:", error.message);
+    return;
+  }
+
+  // 2️⃣ Group by wallet_id + event_slug
+  const grouped = {};
+  for (const sig of signals) {
+    const key = `${sig.wallet_id}||${sig.event_slug}`;
+    grouped[key] ??= [];
+    grouped[key].push(sig);
+  }
+
+  // 3️⃣ Determine majority pick per group
+  const livePicks = [];
+  for (const group of Object.values(grouped)) {
+    const pickCounts = {};
+    for (const sig of group) {
+      const pick = sig.picked_outcome || sig.side; // fallback if picked_outcome missing
+      pickCounts[pick] = (pickCounts[pick] || 0) + 1;
+    }
+
+    const sorted = Object.entries(pickCounts).sort((a, b) => b[1] - a[1]);
+
+    // Skip ties
+    if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) continue;
+
+    const majorityPick = sorted[0][0];
+    const sig = group.find(s => s.picked_outcome === majorityPick) || group[0];
+
+    livePicks.push({
+      wallet_id: sig.wallet_id,
+      market_id: sig.market_id,
+      market_name: sig.market_name,
+      picked_outcome: majorityPick,
+      side: sig.side,
+      pnl: sig.pnl,
+      outcome: sig.outcome,
+      resolved_outcome: sig.resolved_outcome,
+      fetched_at: new Date(),
+    });
+  }
+
+  // 4️⃣ Clear existing live picks and insert new ones
+  const { error: deleteErr } = await supabase.from("wallet_live_picks").delete();
+  if (deleteErr) console.error("Failed to clear wallet_live_picks:", deleteErr.message);
+
+  if (livePicks.length) {
+    const { error: insertErr } = await supabase.from("wallet_live_picks").insert(livePicks);
+    if (insertErr) console.error("Failed to insert wallet_live_picks:", insertErr.message);
+  }
+
+  console.log(`✅ Rebuilt wallet_live_picks (${livePicks.length} entries)`);
+}
+
+
+
+/* ===========================
    Daily Summary
 =========================== */
 async function sendDailySummary() {
@@ -745,31 +816,30 @@ async function trackerLoop() {
       }
     }
 
-    // 3️⃣ Recalculate wallet metrics (win_rate, losing streak, paused)
+    // 3️⃣ Rebuild wallet_live_picks after all wallets are tracked
+    try {
+      await rebuildWalletLivePicks();
+    } catch (err) {
+      console.error("Failed to rebuild wallet_live_picks:", err.message);
+    }
+
+    // 4️⃣ Recalculate wallet metrics (win_rate, losing streak, paused)
     try {
       await updateWalletMetricsJS();
     } catch (err) {
       console.error("Error updating wallet metrics:", err.message);
     }
 
-    // 4️⃣ Send majority signals
+    // 5️⃣ Send majority signals
     try {
       await sendMajoritySignals();
     } catch (err) {
       console.error("Error sending majority signals:", err.message);
     }
 
-          // after all wallets are tracked
-await rebuildWalletLivePicks();
-
-
     console.log(`✅ Tracker loop completed successfully`);
   } catch (err) {
     console.error("Loop error:", err.message);
-    // Telegram notifications are disabled to avoid spamming
-    // await sendTelegram(`Tracker loop error: ${err.message}`);
-
-
   }
 }
 

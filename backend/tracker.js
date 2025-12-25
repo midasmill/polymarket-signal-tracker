@@ -701,10 +701,10 @@ Total skipped: ${totalSkipped}`);
 async function rebuildWalletLivePicks() {
   console.log("Rebuilding wallet_live_picks (win_rate ≥ 80%)...");
 
-  // 1️⃣ Fetch wallets with win_rate ≥ 80
+  // 1️⃣ Fetch all wallets with win_rate ≥ 80
   const { data: wallets, error: walletsErr } = await supabase
     .from("wallets")
-    .select("id")
+    .select("id, win_rate")
     .gte("win_rate", 80);
 
   if (walletsErr) {
@@ -719,7 +719,7 @@ async function rebuildWalletLivePicks() {
 
   const walletIds = wallets.map(w => w.id);
 
-  // 2️⃣ Fetch pending signals from those wallets
+  // 2️⃣ Fetch only pending signals from those wallets
   const { data: signals, error } = await supabase
     .from("signals")
     .select("*")

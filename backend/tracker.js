@@ -265,11 +265,11 @@ async function fetchWalletPositions(userId) {
    Track Wallet Trades (with trades API for unresolved)
 ========================== */
 async function trackWallet(wallet) {
-const userId = wallet.polymarket_proxy_wallet;
-if (!userId) {
-  console.warn(`Wallet ${wallet.id} has no polymarket_proxy_wallet, skipping`);
-  return;
-}
+  const proxyWallet = wallet.polymarket_proxy_wallet;
+  if (!proxyWallet) {
+    console.warn(`Wallet ${wallet.id} has no polymarket_proxy_wallet, skipping`);
+    return;
+  }
 
   // 0️⃣ Auto-unpause if win_rate >= 80%
   if (wallet.paused && wallet.win_rate >= 80) {
@@ -284,19 +284,19 @@ if (!userId) {
   // Skip fetching if still paused
   if (wallet.paused) return;
 
-  // 1️⃣ Fetch wallet positions (optional, for resolved info)
-  const positions = await fetchWalletPositions(userId);
-  console.log(`Fetched ${positions.length} positions for wallet ${userId}`);
+  // 1️⃣ Fetch wallet positions (resolved + unresolved info)
+  const positions = await fetchWalletPositions(proxyWallet);
+  console.log(`Fetched ${positions.length} positions for wallet ${proxyWallet}`);
 
   // 2️⃣ Fetch trades from trades API (unresolved picks)
-  const tradesUrl = `https://data-api.polymarket.com/trades?limit=100&takerOnly=true&user=${userId}`;
   let trades = [];
   try {
+    const tradesUrl = `https://data-api.polymarket.com/trades?limit=100&takerOnly=true&user=${proxyWallet}`;
     trades = await fetchWithRetry(tradesUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
     trades = Array.isArray(trades) ? trades : [];
-    console.log(`Fetched ${trades.length} trades for wallet ${userId}`);
+    console.log(`Fetched ${trades.length} trades for wallet ${proxyWallet}`);
   } catch (err) {
-    console.error(`Failed to fetch trades for wallet ${userId}:`, err.message);
+    console.error(`Failed to fetch trades for wallet ${proxyWallet}:`, err.message);
   }
 
   // 3️⃣ Fetch existing signals
@@ -329,7 +329,12 @@ if (!userId) {
     if (existingSig) {
       await supabase
         .from("signals")
-        .update({ pnl, outcome, resolved_outcome: resolvedOutcome, outcome_at: pnl !== null ? new Date() : null })
+        .update({
+          pnl,
+          outcome,
+          resolved_outcome: resolvedOutcome,
+          outcome_at: pnl !== null ? new Date() : null,
+        })
         .eq("id", existingSig.id);
     } else if (!existingTxs.has(pos.asset)) {
       await supabase.from("signals").insert({
@@ -350,57 +355,49 @@ if (!userId) {
     }
   }
 
-// 5️⃣ Process unresolved trades from trades API safely
+  // 5️⃣ Process unresolved trades
+  const liveConditionIds = new Set(positions.filter(p => p.cashPnl === null).map(p => p.conditionId));
 
-// Build a set of live conditionIds from unresolved positions
-const liveConditionIds = new Set(
-  positions
-    .filter(p => p.cashPnl === null)
-    .map(p => p.conditionId)
-);
+  const unresolvedTrades = trades.filter(t => {
+    // Must still exist as a live position
+    if (!liveConditionIds.has(t.conditionId)) return false;
 
-// Only insert trades that are truly unresolved
+    // Skip if already inserted
+    if (existingTxs.has(t.asset)) return false;
 
-   // If ANY signal for this market is already resolved, skip inserting
-const resolvedExists = existingSignals.some(
-  s => s.market_id === t.conditionId && s.outcome !== "Pending"
-);
-if (resolvedExists) return false;
+    // Skip if resolved in positions
+    const pos = positions.find(p => p.asset === t.asset);
+    if (pos && typeof pos.cashPnl === "number") return false;
 
-const unresolvedTrades = trades.filter(t => {
-  // Must still exist as a live position
-  if (!liveConditionIds.has(t.conditionId)) return false;
+    // Skip if ANY existing signal for this market is already resolved
+    const resolvedExists = existingSignals.some(
+      s => s.market_id === t.conditionId && s.outcome !== "Pending"
+    );
+    if (resolvedExists) return false;
 
-  // Skip if already inserted
-  if (existingTxs.has(t.asset)) return false;
+    return true;
+  });
 
-  // Extra safety: if position exists but is resolved, skip
-  const pos = positions.find(p => p.asset === t.asset);
-  if (pos && typeof pos.cashPnl === "number") return false;
+  const tradeRows = unresolvedTrades.map(trade => ({
+    wallet_id: wallet.id,
+    signal: trade.title,
+    market_name: trade.title,
+    market_id: trade.conditionId,
+    event_slug: trade.eventSlug || trade.slug,
+    side: trade.side?.toUpperCase() || "BUY",
+    picked_outcome: trade.outcome || `OPTION_${trade.outcomeIndex}`,
+    tx_hash: trade.asset,
+    pnl: null,
+    outcome: "Pending",
+    resolved_outcome: null,
+    outcome_at: null,
+    created_at: new Date(trade.timestamp * 1000 || Date.now()),
+  }));
 
-  return true;
-});
-
-const tradeRows = unresolvedTrades.map(trade => ({
-  wallet_id: wallet.id,
-  signal: trade.title,
-  market_name: trade.title,
-  market_id: trade.conditionId,
-  event_slug: trade.eventSlug || trade.slug,
-  side: trade.side?.toUpperCase() || "BUY",
-  picked_outcome: trade.outcome || `OPTION_${trade.outcomeIndex}`,
-  tx_hash: trade.asset,
-  pnl: null,
-  outcome: "Pending",
-  resolved_outcome: null,
-  outcome_at: null,
-  created_at: new Date(trade.timestamp * 1000 || Date.now()),
-}));
-
-if (tradeRows.length) {
-  await supabase.from("signals").insert(tradeRows);
-  console.log(`Inserted ${tradeRows.length} truly unresolved trades for wallet ${wallet.id}`);
-}
+  if (tradeRows.length) {
+    await supabase.from("signals").insert(tradeRows);
+    console.log(`Inserted ${tradeRows.length} unresolved trades for wallet ${wallet.id}`);
+  }
 
   // 6️⃣ Compute wallet metrics from resolved signals
   const { data: resolvedSignals } = await supabase
@@ -422,17 +419,17 @@ if (tradeRows.length) {
   const wins = resolvedSignals?.filter(s => s.outcome === "WIN").length || 0;
   const winRate = totalResolved > 0 ? (wins / totalResolved) * 100 : 0;
 
-  // 8️⃣ Determine pause status
+  // 7️⃣ Determine pause status
   const paused = losingStreak >= LOSING_STREAK_THRESHOLD || winRate < 80;
 
+  // 8️⃣ Count live picks
+  const { count: livePicksCount } = await supabase
+    .from("signals")
+    .select("*", { count: "exact", head: true })
+    .eq("wallet_id", wallet.id)
+    .eq("outcome", "Pending");
+
   // 9️⃣ Update wallet metrics
-
-   const { count: livePicksCount } = await supabase
-  .from("signals")
-  .select("*", { count: "exact", head: true })
-  .eq("wallet_id", wallet.id)
-  .eq("outcome", "Pending");
-
   const { error } = await supabase
     .from("wallets")
     .update({
@@ -445,56 +442,14 @@ if (tradeRows.length) {
     .eq("id", wallet.id);
 
   if (error) console.error(`Wallet ${wallet.id} update failed:`, error);
-  else console.log(`Wallet ${wallet.id} — winRate: ${winRate.toFixed(2)}%, losingStreak: ${losingStreak}, livePicks: ${livePicksCount}, paused: ${paused}`);
+  else
+    console.log(
+      `Wallet ${wallet.id} — winRate: ${winRate.toFixed(
+        2
+      )}%, losingStreak: ${losingStreak}, livePicks: ${livePicksCount}, paused: ${paused}`
+    );
 }
 
-/* ===========================
-   Rebuild live picks from unresolved signals
-========================== */
-async function rebuildWalletLivePicks() {
-  console.log("🔄 Rebuilding wallet_live_picks from signals...");
-
-  // Clear table
-  await supabase.from("wallet_live_picks").delete().neq("wallet_id", 0);
-
-  // Fetch all pending signals
-  const { data: pendingSignals, error } = await supabase
-    .from("signals")
-    .select(`
-      wallet_id,
-      market_id,
-      market_name,
-      picked_outcome,
-      side
-    `)
-    .eq("outcome", "Pending");
-
-  if (error) {
-    console.error("Failed to fetch pending signals:", error);
-    return;
-  }
-
-  if (!pendingSignals.length) {
-    console.log("No pending signals found.");
-    return;
-  }
-
-  const rows = pendingSignals.map(s => ({
-    wallet_id: s.wallet_id,
-    market_id: s.market_id,
-    market_name: s.market_name,
-    picked_outcome: s.picked_outcome,
-    side: s.side,
-    pnl: null,
-    outcome: "Pending",
-    resolved_outcome: null,
-    fetched_at: new Date()
-  }));
-
-  await supabase.from("wallet_live_picks").insert(rows);
-
-  console.log(`✅ Inserted ${rows.length} live picks`);
-}
 
 /* ===========================
    Update Wallet Metrics
@@ -644,52 +599,70 @@ async function fetchAndInsertLeaderboardWallets() {
     try {
       const url = `https://data-api.polymarket.com/v1/leaderboard?category=OVERALL&timePeriod=${period}&orderBy=PNL&limit=50`;
       const data = await fetchWithRetry(url, { headers: { "User-Agent": "Mozilla/5.0" } });
-      console.log(`[LEADERBOARD][${period}] Fetched=${data.length}`);
+      if (!Array.isArray(data)) {
+        console.warn(`[LEADERBOARD][${period}] Unexpected response:`, data);
+        continue;
+      }
 
+      console.log(`[LEADERBOARD][${period}] Fetched=${data.length}`);
       totalFetched += data.length;
 
       for (const entry of data) {
-        // Skip wallets without proxy or failing filters
-        if (!entry.proxyWallet) {
+        const proxyWallet = entry.proxyWallet;
+
+        // Skip wallets without proxyWallet or failing filters
+        if (!proxyWallet) {
           console.log(`Skipping wallet: missing proxyWallet (user=${entry.userName})`);
           totalSkipped++;
           continue;
         }
         if (entry.pnl < 1000) {
-          console.log(`Skipping wallet ${entry.proxyWallet}: pnl ${entry.pnl} < 1000`);
+          console.log(`Skipping wallet ${proxyWallet}: pnl ${entry.pnl} < 1000`);
           totalSkipped++;
           continue;
         }
         if (entry.vol >= 10 * entry.pnl) {
-          console.log(`Skipping wallet ${entry.proxyWallet}: vol ${entry.vol} >= 10 * pnl ${entry.pnl}`);
+          console.log(`Skipping wallet ${proxyWallet}: vol ${entry.vol} >= 10 * pnl ${entry.pnl}`);
           totalSkipped++;
           continue;
         }
 
         // Check if wallet already exists
-        const { data: existing } = await supabase.from("wallets")
-.select("id")
-.eq("polymarket_proxy_wallet", entry.proxyWallet)
-.maybeSingle();
+        const { data: existing, error: existingErr } = await supabase
+          .from("wallets")
+          .select("id")
+          .eq("polymarket_proxy_wallet", proxyWallet)
+          .maybeSingle();
 
+        if (existingErr) {
+          console.error(`Error checking wallet ${proxyWallet}:`, existingErr);
+          totalSkipped++;
+          continue;
+        }
 
         if (existing) {
-          console.log(`Skipping wallet ${entry.proxyWallet}: already exists`);
+          console.log(`Skipping wallet ${proxyWallet}: already exists`);
           totalSkipped++;
           continue;
         }
 
         // Insert wallet paused by default
-        await supabase.from("wallets").insert({
-          polymarket_proxy_wallet: entry.proxyWallet,
-          polymarket_username: null, // optional, DO NOT rely on it
+        const { error: insertErr } = await supabase.from("wallets").insert({
+          polymarket_proxy_wallet: proxyWallet,
+          polymarket_username: entry.userName || null,
           last_checked: new Date(),
-          paused: true,      // start paused
+          paused: true, // start paused
           losing_streak: 0,
-          win_rate: 0
+          win_rate: 0,
         });
 
-        console.log(`Inserted wallet ${entry.proxyWallet} (user=${entry.userName})`);
+        if (insertErr) {
+          console.error(`Failed to insert wallet ${proxyWallet}:`, insertErr);
+          totalSkipped++;
+          continue;
+        }
+
+        console.log(`Inserted wallet ${proxyWallet} (user=${entry.userName})`);
         totalInserted++;
       } // end inner for
     } catch (err) {

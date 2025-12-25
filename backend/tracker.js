@@ -332,11 +332,11 @@ async function fetchWalletPositions(userId) {
   }
 }
 
+import util from "util";
+
 /* ===========================
    Track Wallet Trades (fixed losing streak + live/resolved)
 ========================== */
-import util from "util";
-
 async function trackWallet(wallet) {
   const userId = wallet.polymarket_proxy_wallet || wallet.polymarket_username;
   if (!userId) return;
@@ -344,10 +344,10 @@ async function trackWallet(wallet) {
   // 1️⃣ Fetch wallet positions safely
   const positions = await fetchWalletPositions(userId);
 
-  // Log summary only
+  // Log summary only (limit output)
   console.log(
     `Wallet ${wallet.id} (${userId}) — fetched ${positions.length} positions. Example:`,
-    util.inspect(positions.slice(0, 3), { depth: 1, maxArrayLength: 3 })
+    util.inspect(positions.slice(0, 3), { depth: 1, maxArrayLength: 3, breakLength: 80 })
   );
 
   if (!positions.length) {
@@ -374,7 +374,7 @@ async function trackWallet(wallet) {
 
     if (pnl !== null) {
       outcome = pnl > 0 ? "WIN" : "LOSS";
-      resolvedOutcome = pnl > 0 ? pickedOutcome : pos.oppositeOutcome || pickedOutcome;
+      resolvedOutcome = pnl > 0 ? pickedOutcome : (pos.oppositeOutcome || pickedOutcome);
     }
 
     const existingSig = existingSignals.find(s => s.market_id === marketId);
@@ -403,7 +403,7 @@ async function trackWallet(wallet) {
     }
   }
 
-  // 4️⃣ Compute metrics
+  // 4️⃣ Fetch resolved signals
   const { data: resolvedSignals } = await supabase
     .from("signals")
     .select("outcome, created_at")
@@ -411,19 +411,19 @@ async function trackWallet(wallet) {
     .in("outcome", ["WIN", "LOSS"])
     .order("created_at", { ascending: true });
 
+  // 5️⃣ Calculate losing streak
   let losingStreak = 0;
-  if (resolvedSignals?.length) {
-    for (let i = resolvedSignals.length - 1; i >= 0; i--) {
-      if (resolvedSignals[i].outcome === "LOSS") losingStreak++;
-      else break;
-    }
+  for (let i = resolvedSignals.length - 1; i >= 0; i--) {
+    if (resolvedSignals[i].outcome === "LOSS") losingStreak++;
+    else break;
   }
 
-  const totalResolved = resolvedSignals?.length || 0;
-  const wins = resolvedSignals?.filter(s => s.outcome === "WIN").length || 0;
-  const winRate = totalResolved > 0 ? (wins / totalResolved) * 100 : 0;
+  // 6️⃣ Calculate win rate
+  const totalResolved = resolvedSignals.length || 0;
+  const wins = resolvedSignals.filter(s => s.outcome === "WIN").length;
+  const winRate = totalResolved ? (wins / totalResolved) * 100 : 0;
 
-  // 5️⃣ Prepare live picks
+  // 7️⃣ Prepare live picks rows (unresolved positions only)
   const livePicksRows = positions
     .filter(pos => pos.cashPnl === null)
     .map(pos => ({
@@ -431,7 +431,7 @@ async function trackWallet(wallet) {
       market_id: pos.conditionId,
       picked_outcome: pos.outcome || `OPTION_${pos.outcomeIndex}`,
       side: pos.side?.toUpperCase() || "BUY",
-      pnl: pos.cashPnl ?? null,
+      pnl: null,
       outcome: "Pending",
       resolved_outcome: null,
       fetched_at: new Date(),
@@ -443,14 +443,18 @@ async function trackWallet(wallet) {
   await supabase.from("wallet_live_picks").delete().eq("wallet_id", wallet.id);
 
   // Insert new live picks
-  if (livePicksRows.length) {
+  if (livePicksCount) {
     await supabase.from("wallet_live_picks").insert(livePicksRows);
+    console.log(
+      `Inserted ${livePicksCount} live picks for wallet ${wallet.id}. Example IDs:`,
+      livePicksRows.slice(0, 3).map(p => p.market_id)
+    );
   }
 
-  // 6️⃣ Determine pause status
+  // 8️⃣ Determine pause status
   const paused = losingStreak >= LOSING_STREAK_THRESHOLD || winRate < 80;
 
-  // 7️⃣ Update wallet once
+  // 9️⃣ Update wallet metrics
   const { error } = await supabase
     .from("wallets")
     .update({
@@ -458,7 +462,7 @@ async function trackWallet(wallet) {
       win_rate: winRate,
       live_picks: livePicksCount,
       paused,
-      last_checked: new Date()
+      last_checked: new Date(),
     })
     .eq("id", wallet.id);
 
@@ -468,6 +472,7 @@ async function trackWallet(wallet) {
       `Wallet ${wallet.id} — winRate: ${winRate.toFixed(2)}%, losingStreak: ${losingStreak}, livePicks: ${livePicksCount}, paused: ${paused}`
     );
 }
+
 
 
 

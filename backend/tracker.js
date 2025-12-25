@@ -750,7 +750,6 @@ async function rebuildWalletLivePicks() {
   console.log(`✅ Rebuilt wallet_live_picks (${livePicks.length} entries)`);
 }
 
-
 /* ===========================
    Daily Summary
 =========================== */

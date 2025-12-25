@@ -415,9 +415,8 @@ if (tradeRows.length) {
     console.log(`wallet_live_picks rebuilt after inserting trades for wallet ${wallet.id}`);
   } catch (err) {
     console.error(`Failed to rebuild wallet_live_picks:`, err.message);
-      });
-    }
   }
+}
 
 
   // 6️⃣ Compute wallet metrics from resolved signals

@@ -547,14 +547,18 @@ async function sendResultNotes(sig, result) {
    Send Majority Signals
 =========================== */
 async function sendMajoritySignals() {
-  const { data: markets } = await supabase.from("signals").select("market_id", { distinct: true });
+  const { data: markets } = await supabase
+    .from("signals")
+    .select("market_id", { distinct: true });
+
   if (!markets?.length) return;
 
-const { data: signals } = await supabase
-  .from("signals")
-  .select("*")
-  .eq("market_id", market_id)
-  .eq("outcome", "Pending");
+  for (const { market_id } of markets) {
+    const { data: signals } = await supabase
+      .from("signals")
+      .select("*")
+      .eq("market_id", market_id)
+      .eq("outcome", "Pending");
 
     if (!signals || signals.length < MIN_WALLETS_FOR_SIGNAL) continue;
 
@@ -562,7 +566,8 @@ const { data: signals } = await supabase
     for (const sig of signals) perWalletPick[sig.wallet_id] = getPick(sig);
 
     const pickCounts = {};
-    for (const pick of Object.values(perWalletPick)) if (pick && pick !== "Unknown") pickCounts[pick] = (pickCounts[pick] || 0) + 1;
+    for (const pick of Object.values(perWalletPick))
+      if (pick && pick !== "Unknown") pickCounts[pick] = (pickCounts[pick] || 0) + 1;
 
     const entries = Object.entries(pickCounts).sort((a, b) => b[1] - a[1]);
     if (!entries.length) continue;
@@ -582,9 +587,13 @@ const { data: signals } = await supabase
     await sendTelegram(text);
     await updateNotes("polymarket-millionaires", text);
 
-    await supabase.from("signals").update({ signal_sent_at: new Date() }).eq("market_id", market_id);
+    await supabase
+      .from("signals")
+      .update({ signal_sent_at: new Date() })
+      .eq("market_id", market_id);
   }
 }
+
 
 /* ===========================
    Leaderboard Wallets

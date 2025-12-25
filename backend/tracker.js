@@ -682,7 +682,6 @@ Total skipped: ${totalSkipped}`);
    — one pick per wallet per event
    — skips ties (e.g., 2 YES vs 2 NO)
 =========================== */
-
 async function rebuildWalletLivePicks() {
   console.log("Rebuilding wallet_live_picks...");
 
@@ -728,17 +727,18 @@ async function rebuildWalletLivePicks() {
       wallet_id: sig.wallet_id,
       market_id: sig.market_id,
       market_name: sig.market_name,
+      event_slug: sig.event_slug,          // <-- added
       picked_outcome: majorityPick,
       side: sig.side,
       pnl: sig.pnl,
       outcome: sig.outcome,
       resolved_outcome: sig.resolved_outcome,
       fetched_at: new Date(),
-      vote_count: pickCounts[majorityPick], // store count if needed
+      vote_count: pickCounts[majorityPick], // optional, shows how many votes for this pick
     });
   }
 
-  // 4️⃣ Replace live picks
+  // 4️⃣ Clear and insert
   const { error: deleteErr } = await supabase.from("wallet_live_picks").delete();
   if (deleteErr) console.error("Failed to clear wallet_live_picks:", deleteErr.message);
 
@@ -749,6 +749,7 @@ async function rebuildWalletLivePicks() {
 
   console.log(`✅ Rebuilt wallet_live_picks (${livePicks.length} entries)`);
 }
+
 
 /* ===========================
    Daily Summary

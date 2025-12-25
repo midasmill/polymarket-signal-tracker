@@ -683,9 +683,9 @@ Total skipped: ${totalSkipped}`);
    — skips ties (e.g., 2 YES vs 2 NO)
 =========================== */
 async function rebuildWalletLivePicks() {
-  console.log("Rebuilding wallet_live_picks...");
+  console.log("Rebuilding wallet_live_picks with vote_count...");
 
-  // 1️⃣ Fetch pending signals with picked_outcome
+  // 1️⃣ Fetch all pending signals with picked_outcome
   const { data: signals, error } = await supabase
     .from("signals")
     .select("*")
@@ -697,10 +697,11 @@ async function rebuildWalletLivePicks() {
     return;
   }
 
-  // 2️⃣ Group by wallet_id + event_slug
+  // 2️⃣ Group signals by wallet_id + event_slug
   const grouped = {};
+  const skippedEvents = [];
   for (const sig of signals) {
-    if (!sig.event_slug) continue; // skip if no event_slug
+    if (!sig.event_slug) continue;
     const key = `${sig.wallet_id}||${sig.event_slug}`;
     grouped[key] ??= [];
     grouped[key].push(sig);
@@ -708,17 +709,20 @@ async function rebuildWalletLivePicks() {
 
   // 3️⃣ Determine majority pick per group
   const livePicks = [];
-  for (const group of Object.values(grouped)) {
+  for (const [key, group] of Object.entries(grouped)) {
     const pickCounts = {};
     for (const sig of group) {
       pickCounts[sig.picked_outcome] = (pickCounts[sig.picked_outcome] || 0) + 1;
     }
 
-    // Sort by count descending
+    // Sort picks by vote count descending
     const sorted = Object.entries(pickCounts).sort((a, b) => b[1] - a[1]);
 
     // Skip ties
-    if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) continue;
+    if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) {
+      skippedEvents.push({ key, picks: Object.keys(pickCounts) });
+      continue;
+    }
 
     const majorityPick = sorted[0][0];
     const sig = group.find(s => s.picked_outcome === majorityPick);
@@ -727,18 +731,18 @@ async function rebuildWalletLivePicks() {
       wallet_id: sig.wallet_id,
       market_id: sig.market_id,
       market_name: sig.market_name,
-      event_slug: sig.event_slug,          // <-- added
+      event_slug: sig.event_slug,
       picked_outcome: majorityPick,
       side: sig.side,
       pnl: sig.pnl,
       outcome: sig.outcome,
       resolved_outcome: sig.resolved_outcome,
       fetched_at: new Date(),
-      vote_count: pickCounts[majorityPick], // optional, shows how many votes for this pick
+      vote_count: pickCounts[majorityPick], // ✅ majority vote count
     });
   }
 
-  // 4️⃣ Clear and insert
+  // 4️⃣ Clear old live picks and insert new
   const { error: deleteErr } = await supabase.from("wallet_live_picks").delete();
   if (deleteErr) console.error("Failed to clear wallet_live_picks:", deleteErr.message);
 
@@ -748,7 +752,31 @@ async function rebuildWalletLivePicks() {
   }
 
   console.log(`✅ Rebuilt wallet_live_picks (${livePicks.length} entries)`);
+  if (skippedEvents.length) {
+    console.log(`⚠️ Skipped ${skippedEvents.length} events due to ties:`, skippedEvents.map(e => e.key));
+  }
 }
+
+
+/* ===========================
+   Fetch majority picks per wallet
+=========================== */
+async function fetchWalletLivePicks(walletId) {
+  const { data, error } = await supabase
+    .from("wallet_live_picks")
+    .select("*")
+    .eq("wallet_id", walletId)
+    .order("vote_count", { ascending: false })
+    .order("fetched_at", { ascending: false });
+
+  if (error) {
+    console.error(`Failed to fetch live picks for wallet ${walletId}:`, error.message);
+    return [];
+  }
+
+  return data || [];
+}
+
 
 /* ===========================
    Daily Summary
@@ -820,9 +848,72 @@ async function trackerLoop() {
 
     // 3️⃣ Rebuild wallet_live_picks after all wallets are tracked
     try {
-      await rebuildWalletLivePicks();
+      console.log("Rebuilding wallet_live_picks with tie logging...");
+      
+      const { data: signals, error } = await supabase
+        .from("signals")
+        .select("*")
+        .eq("outcome", "Pending")
+        .not("picked_outcome", "is", null);
+
+      if (error) {
+        console.error("Failed to fetch signals for live picks:", error.message);
+      } else {
+        const grouped = {};
+        const skippedEvents = [];
+        for (const sig of signals) {
+          if (!sig.event_slug) continue;
+          const key = `${sig.wallet_id}||${sig.event_slug}`;
+          grouped[key] ??= [];
+          grouped[key].push(sig);
+        }
+
+        const livePicks = [];
+        for (const [key, group] of Object.entries(grouped)) {
+          const pickCounts = {};
+          for (const sig of group) {
+            pickCounts[sig.picked_outcome] = (pickCounts[sig.picked_outcome] || 0) + 1;
+          }
+
+          const sorted = Object.entries(pickCounts).sort((a, b) => b[1] - a[1]);
+          if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) {
+            skippedEvents.push({ key, picks: Object.keys(pickCounts) });
+            continue; // skip ties
+          }
+
+          const majorityPick = sorted[0][0];
+          const sig = group.find(s => s.picked_outcome === majorityPick);
+
+          livePicks.push({
+            wallet_id: sig.wallet_id,
+            market_id: sig.market_id,
+            market_name: sig.market_name,
+            event_slug: sig.event_slug,
+            picked_outcome: majorityPick,
+            side: sig.side,
+            pnl: sig.pnl,
+            outcome: sig.outcome,
+            resolved_outcome: sig.resolved_outcome,
+            fetched_at: new Date(),
+            vote_count: pickCounts[majorityPick],
+          });
+        }
+
+        const { error: deleteErr } = await supabase.from("wallet_live_picks").delete();
+        if (deleteErr) console.error("Failed to clear wallet_live_picks:", deleteErr.message);
+
+        if (livePicks.length) {
+          const { error: insertErr } = await supabase.from("wallet_live_picks").insert(livePicks);
+          if (insertErr) console.error("Failed to insert wallet_live_picks:", insertErr.message);
+        }
+
+        console.log(`✅ Rebuilt wallet_live_picks (${livePicks.length} entries)`);
+        if (skippedEvents.length) {
+          console.log(`⚠️ Skipped ${skippedEvents.length} events due to ties:`, skippedEvents.map(e => e.key));
+        }
+      }
     } catch (err) {
-      console.error("Failed to rebuild wallet_live_picks:", err.message);
+      console.error("Error rebuilding wallet_live_picks:", err.message);
     }
 
     // 4️⃣ Recalculate wallet metrics (win_rate, losing streak, paused)

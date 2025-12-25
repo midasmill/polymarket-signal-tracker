@@ -349,6 +349,7 @@ async function trackWallet(wallet) {
         market_id: marketId,
         event_slug: pos.eventSlug || pos.slug,
         side: pos.side?.toUpperCase() || "BUY",
+        win_rate: wallet.win_rate, // add this
         picked_outcome: pickedOutcome,
         tx_hash: pos.asset,
         pnl,
@@ -701,29 +702,11 @@ Total skipped: ${totalSkipped}`);
 async function rebuildWalletLivePicks() {
   console.log("Rebuilding wallet_live_picks (win_rate ≥ 80%)...");
 
-  // 1️⃣ Fetch all wallets with win_rate ≥ 80
-  const { data: wallets, error: walletsErr } = await supabase
-    .from("wallets")
-    .select("id, win_rate")
-    .gte("win_rate", 80);
-
-  if (walletsErr) {
-    console.error("Failed to fetch wallets:", walletsErr.message);
-    return;
-  }
-
-  if (!wallets?.length) {
-    console.log("No wallets with win_rate ≥ 80%");
-    return;
-  }
-
-  const walletIds = wallets.map(w => w.id);
-
-  // 2️⃣ Fetch only pending signals from those wallets
+  // 1️⃣ Fetch only signals with win_rate ≥ 80 and pending outcome
   const { data: signals, error } = await supabase
     .from("signals")
     .select("*")
-    .in("wallet_id", walletIds)
+    .gte("win_rate", 80)
     .eq("outcome", "Pending")
     .not("picked_outcome", "is", null);
 
@@ -732,7 +715,12 @@ async function rebuildWalletLivePicks() {
     return;
   }
 
-  // 3️⃣ Group by wallet_id + event_slug
+  if (!signals?.length) {
+    console.log("No pending signals from wallets with win_rate ≥ 80%");
+    return;
+  }
+
+  // 2️⃣ Group by wallet_id + event_slug
   const grouped = {};
   const skippedEvents = [];
   for (const sig of signals) {
@@ -742,7 +730,7 @@ async function rebuildWalletLivePicks() {
     grouped[key].push(sig);
   }
 
-  // 4️⃣ Determine majority pick per group and insert
+  // 3️⃣ Determine majority pick per group
   const livePicks = [];
   for (const [key, group] of Object.entries(grouped)) {
     const pickCounts = {};
@@ -774,10 +762,11 @@ async function rebuildWalletLivePicks() {
       fetched_at: new Date(),
       vote_count: pickCounts[majorityPick],
       vote_counts: pickCounts,
+      win_rate: sig.win_rate, // store win_rate in live picks for reference
     });
   }
 
-  // 5️⃣ Clear old live picks and insert new
+  // 4️⃣ Clear old live picks and insert new
   const { error: deleteErr } = await supabase.from("wallet_live_picks").delete();
   if (deleteErr) console.error("Failed to clear wallet_live_picks:", deleteErr.message);
 
@@ -791,6 +780,8 @@ async function rebuildWalletLivePicks() {
     console.log(`⚠️ Skipped ${skippedEvents.length} events due to ties:`, skippedEvents.map(e => e.key));
   }
 }
+
+
 
 /* ===========================
    Fetch majority picks per wallet

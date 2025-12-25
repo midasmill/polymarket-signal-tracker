@@ -317,7 +317,7 @@ async function unpauseAndFetchWallet(wallet) {
 ========================== */
 async function fetchWalletPositions(userId) {
   if (!userId) return [];
-  const url = `https://data-api.polymarket.com/positions?user=${userId}&limit=100&sizeThreshold=1&sortBy=CURRENT&sortDirection=DESC`;
+  const url = `https://data-api.polymarket.com/positions?user=${proxyWallet}&limit=100&sizeThreshold=1&sortBy=CURRENT&sortDirection=DESC`;
   try {
     const data = await fetchWithRetry(
       url,
@@ -327,7 +327,7 @@ async function fetchWalletPositions(userId) {
     );
     return Array.isArray(data) ? data : [];
   } catch (err) {
-    console.error(`Failed to fetch positions for wallet ${userId}:`, err.message);
+    console.error(`Failed to fetch positions for wallet ${proxyWallet}:`, err.message);
     return [];
   }
 }
@@ -336,8 +336,17 @@ async function fetchWalletPositions(userId) {
    Track Wallet Trades (with trades API for unresolved)
 ========================== */
 async function trackWallet(wallet) {
-  const userId = wallet.polymarket_proxy_wallet || wallet.polymarket_username;
-  if (!userId) return;
+const userId = wallet.polymarket_proxy_wallet;
+
+   if (!proxyWallet.startsWith("0x")) {
+  throw new Error(`Invalid proxyWallet for wallet ${wallet.id}`);
+}
+
+if (!userId) {
+  console.log(`Skipping wallet ${wallet.id}: missing proxyWallet`);
+  return;
+}
+
 
   // 0️⃣ Auto-unpause if win_rate >= 80%
   if (wallet.paused && wallet.win_rate >= 80) {
@@ -419,9 +428,18 @@ async function trackWallet(wallet) {
   }
 
 // 5️⃣ Process unresolved trades from trades API safely
-const unresolvedTrades = trades.filter(t => {
-  // Skip trades already in signals
-  if (existingTxs.has(t.asset)) return false;
+// Build a set of live conditionIds from positions
+const liveConditionIds = new Set(
+  positions
+    .filter(p => p.cashPnl === null)
+    .map(p => p.conditionId)
+);
+
+// Only insert unresolved trades that STILL EXIST in positions
+const unresolvedTrades = trades.filter(t =>
+  liveConditionIds.has(t.conditionId) &&
+  !existingTxs.has(t.asset)
+);
 
   // Check positions for this trade to see if it's truly unresolved
   const pos = positions.find(p => p.asset === t.asset);

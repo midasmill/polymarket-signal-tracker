@@ -416,7 +416,7 @@ if (tradeRows.length) {
   await supabase.from("signals").insert(tradeRows);
   console.log(`Inserted ${tradeRows.length} unresolved trades for wallet ${wallet.id}`);
 
-  // 🔄 Immediately rebuild wallet_live_picks after inserting unresolved trades
+  // 🔄 Immediately rebuild wallet_live_picks
   try {
     await rebuildWalletLivePicks();
     console.log(`wallet_live_picks rebuilt after inserting trades for wallet ${wallet.id}`);

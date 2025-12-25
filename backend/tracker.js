@@ -262,7 +262,7 @@ async function fetchWalletPositions(userId) {
 }
 
 /* ===========================
-   Track Wallet Trades (with trades API for unresolved)
+   Track Wallet Trades (safe & complete)
 ========================== */
 async function trackWallet(wallet) {
   const proxyWallet = wallet.polymarket_proxy_wallet;
@@ -281,14 +281,19 @@ async function trackWallet(wallet) {
     console.log(`Wallet ${wallet.id} auto-unpaused (winRate=${wallet.win_rate.toFixed(2)}%)`);
   }
 
-  // Skip fetching if still paused
+  // Skip if still paused
   if (wallet.paused) return;
 
-  // 1️⃣ Fetch wallet positions (resolved + unresolved info)
-  const positions = await fetchWalletPositions(proxyWallet);
-  console.log(`Fetched ${positions.length} positions for wallet ${proxyWallet}`);
+  // 1️⃣ Fetch positions (resolved + unresolved info)
+  let positions = [];
+  try {
+    positions = await fetchWalletPositions(proxyWallet);
+    console.log(`Fetched ${positions.length} positions for wallet ${proxyWallet}`);
+  } catch (err) {
+    console.error(`Failed to fetch positions for wallet ${proxyWallet}:`, err.message);
+  }
 
-  // 2️⃣ Fetch trades from trades API (unresolved picks)
+  // 2️⃣ Fetch trades (unresolved)
   let trades = [];
   try {
     const tradesUrl = `https://data-api.polymarket.com/trades?limit=100&takerOnly=true&user=${proxyWallet}`;
@@ -333,7 +338,7 @@ async function trackWallet(wallet) {
           pnl,
           outcome,
           resolved_outcome: resolvedOutcome,
-          outcome_at: pnl !== null ? new Date() : null,
+          outcome_at: pnl !== null ? new Date() : null
         })
         .eq("id", existingSig.id);
     } else if (!existingTxs.has(pos.asset)) {
@@ -356,25 +361,15 @@ async function trackWallet(wallet) {
   }
 
   // 5️⃣ Process unresolved trades
-  const liveConditionIds = new Set(positions.filter(p => p.cashPnl === null).map(p => p.conditionId));
+  const liveConditionIds = new Set(
+    positions.filter(p => p.cashPnl === null).map(p => p.conditionId)
+  );
 
   const unresolvedTrades = trades.filter(t => {
-    // Must still exist as a live position
     if (!liveConditionIds.has(t.conditionId)) return false;
-
-    // Skip if already inserted
     if (existingTxs.has(t.asset)) return false;
-
-    // Skip if resolved in positions
     const pos = positions.find(p => p.asset === t.asset);
     if (pos && typeof pos.cashPnl === "number") return false;
-
-    // Skip if ANY existing signal for this market is already resolved
-    const resolvedExists = existingSignals.some(
-      s => s.market_id === t.conditionId && s.outcome !== "Pending"
-    );
-    if (resolvedExists) return false;
-
     return true;
   });
 
@@ -422,8 +417,8 @@ async function trackWallet(wallet) {
   // 7️⃣ Determine pause status
   const paused = losingStreak >= LOSING_STREAK_THRESHOLD || winRate < 80;
 
-  // 8️⃣ Count live picks
-  const { count: livePicksCount } = await supabase
+  // 8️⃣ Count live picks safely
+  const { count: livePicks } = await supabase
     .from("signals")
     .select("*", { count: "exact", head: true })
     .eq("wallet_id", wallet.id)
@@ -435,19 +430,16 @@ async function trackWallet(wallet) {
     .update({
       losing_streak: losingStreak,
       win_rate: winRate,
-      live_picks: livePicksCount,
+      live_picks: livePicks,
       paused,
       last_checked: new Date(),
     })
     .eq("id", wallet.id);
 
   if (error) console.error(`Wallet ${wallet.id} update failed:`, error);
-  else
-    console.log(
-      `Wallet ${wallet.id} — winRate: ${winRate.toFixed(
-        2
-      )}%, losingStreak: ${losingStreak}, livePicks: ${livePicksCount}, paused: ${paused}`
-    );
+  else console.log(
+    `Wallet ${wallet.id} — winRate: ${winRate.toFixed(2)}%, losingStreak: ${losingStreak}, livePicks: ${livePicks}, paused: ${paused}`
+  );
 }
 
 

@@ -418,19 +418,19 @@ async function trackWallet(wallet) {
     }
   }
 
-// 5️⃣ Process trades from trades API (include unresolved)
-const newTrades = trades.filter(t => !existingTxs.has(t.asset)); // remove t.outcome check
-const tradeRows = newTrades.map(trade => ({
+// 5️⃣ Process unresolved trades from trades API
+const unresolvedTrades = trades.filter(t => t.outcome && !existingTxs.has(t.asset));
+const tradeRows = unresolvedTrades.map(trade => ({
   wallet_id: wallet.id,
   signal: trade.title,
-  market_name: trade.title,
+  market_name: trade.title,         // <-- added this
   market_id: trade.conditionId,
   event_slug: trade.eventSlug || trade.slug,
   side: trade.side?.toUpperCase() || "BUY",
   picked_outcome: trade.outcome || `OPTION_${trade.outcomeIndex}`,
   tx_hash: trade.asset,
   pnl: null,
-  outcome: trade.outcome ? "Pending" : "Pending", // always Pending for unresolved
+  outcome: "Pending",
   resolved_outcome: null,
   outcome_at: null,
   created_at: new Date(trade.timestamp * 1000 || Date.now()),
@@ -438,9 +438,8 @@ const tradeRows = newTrades.map(trade => ({
 
 if (tradeRows.length) {
   await supabase.from("signals").insert(tradeRows);
-  console.log(`Inserted ${tradeRows.length} trades (resolved + unresolved) for wallet ${wallet.id}`);
+  console.log(`Inserted ${tradeRows.length} unresolved trades for wallet ${wallet.id}`);
 }
-
 
   // 6️⃣ Compute wallet metrics from resolved signals
   const { data: resolvedSignals } = await supabase
@@ -462,34 +461,37 @@ if (tradeRows.length) {
   const wins = resolvedSignals?.filter(s => s.outcome === "WIN").length || 0;
   const winRate = totalResolved > 0 ? (wins / totalResolved) * 100 : 0;
 
-  // 7️⃣ Prepare live picks from unresolved signals
-  const { data: pendingSignals } = await supabase
-    .from("signals")
-    .select("*")
-    .eq("wallet_id", wallet.id)
-    .eq("outcome", "Pending");
+// 7️⃣ Prepare live picks from unresolved signals
+const { data: pendingSignals } = await supabase
+  .from("signals")
+  .select("*")
+  .eq("wallet_id", wallet.id)
+  .eq("outcome", "Pending");
 
-  const livePicksRows = pendingSignals.map(pos => ({
-    wallet_id: wallet.id,
-    market_id: pos.market_id,
-    picked_outcome: pos.picked_outcome,
-    side: pos.side,
-    pnl: null,
-    outcome: "Pending",
-    resolved_outcome: null,
-    fetched_at: new Date(),
-  }));
+const livePicksRows = pendingSignals.map(pos => ({
+  wallet_id: wallet.id,
+  market_id: pos.market_id,
+  market_name: pos.market_name,   // already present
+  picked_outcome: pos.picked_outcome,
+  side: pos.side,
+  pnl: null,
+  outcome: "Pending",
+  resolved_outcome: null,
+  fetched_at: new Date(),
+}));
 
-  const livePicksCount = livePicksRows.length;
 
-  // Delete old live picks
-  await supabase.from("wallet_live_picks").delete().eq("wallet_id", wallet.id);
+const livePicksCount = livePicksRows.length;
 
-  // Insert new live picks
-  if (livePicksRows.length) {
-    await supabase.from("wallet_live_picks").insert(livePicksRows);
-    console.log(`Inserted ${livePicksRows.length} live picks for wallet ${wallet.id}`);
-  }
+// Delete old live picks
+await supabase.from("wallet_live_picks").delete().eq("wallet_id", wallet.id);
+
+// Insert new live picks
+if (livePicksRows.length) {
+  await supabase.from("wallet_live_picks").insert(livePicksRows);
+  console.log(`Inserted ${livePicksRows.length} live picks for wallet ${wallet.id}`);
+}
+
 
   // 8️⃣ Determine pause status
   const paused = losingStreak >= LOSING_STREAK_THRESHOLD || winRate < 80;

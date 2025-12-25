@@ -430,8 +430,25 @@ async function trackWallet(wallet) {
   const wins = resolvedSignals?.filter(s => s.outcome === "WIN").length || 0;
   const winRate = totalResolved > 0 ? (wins / totalResolved) * 100 : 0;
 
-  // 7️⃣ Determine pause status
-  const paused = losingStreak >= LOSING_STREAK_THRESHOLD || winRate < 80;
+// 7️⃣ Determine pause status
+let pausedStatus;
+if (wallet.force_fetch) {
+  pausedStatus = wallet.paused; // keep original paused state for first fetch
+} else {
+  pausedStatus = losingStreak >= LOSING_STREAK_THRESHOLD || winRate < 80;
+}
+
+await supabase
+  .from("wallets")
+  .update({
+    losing_streak: losingStreak,
+    win_rate: winRate,
+    live_picks: livePicks,
+    paused: pausedStatus,
+    last_checked: new Date(),
+  })
+  .eq("id", wallet.id);
+
 
   // 8️⃣ Count live picks safely
   const { count: livePicks } = await supabase
@@ -906,8 +923,14 @@ setInterval(() => {
 async function trackerLoop() {
   try {
     // 1️⃣ Fetch all wallets
-    const { data: wallets } = await supabase.from("wallets").select("*");
-    if (!wallets?.length) return console.log("No wallets found");
+const { data: wallets } = await supabase
+  .from("wallets")
+  .select("*")
+  .eq("force_fetch", true);
+
+for (const wallet of wallets) {
+  await trackWallet(wallet);
+}
 
     console.log(`[${new Date().toISOString()}] Tracking ${wallets.length} wallets...`);
 

@@ -418,11 +418,6 @@ async function trackWallet(wallet) {
     }
   }
 
-  // 6️⃣ Calculate win rate
-  const totalResolved = resolvedSignals?.length || 0;
-  const wins = resolvedSignals?.filter(s => s.outcome === "WIN").length || 0;
-  const winRate = totalResolved > 0 ? (wins / totalResolved) * 100 : 0;
-
 // 7️⃣ Count live/unresolved signals and prepare live picks rows
 const livePicksRows = positions
   .filter(pos => pos.cashPnl === null) // only unresolved trades
@@ -432,11 +427,13 @@ const livePicksRows = positions
     picked_outcome: pos.outcome || `OPTION_${pos.outcomeIndex}`,
     side: pos.side?.toUpperCase() || "BUY",
     pnl: pos.cashPnl ?? null,
-    outcome: pos.cashPnl !== null ? (pos.cashPnl > 0 ? "WIN" : "LOSS") : "Pending",
+    outcome: "Pending",
     resolved_outcome: null,
     fetched_at: new Date(),
   }));
 
+// Count for wallet metrics
+const livePicksCount = livePicksRows.length;
 
 // Delete old live picks
 await supabase.from("wallet_live_picks").delete().eq("wallet_id", wallet.id);
@@ -447,7 +444,6 @@ if (livePicksRows.length) {
   console.log(`Inserted ${livePicksRows.length} live picks for wallet ${wallet.id}`);
 }
 
-
 // 8️⃣ Determine pause status
 const paused = losingStreak >= LOSING_STREAK_THRESHOLD || winRate < 80;
 
@@ -457,7 +453,7 @@ const { error } = await supabase
   .update({
     losing_streak: losingStreak,
     win_rate: winRate,
-    live_picks: livePicksCount,
+    live_picks: livePicksCount,  // <-- use this
     paused,
     last_checked: new Date()
   })
@@ -466,7 +462,6 @@ const { error } = await supabase
 if (error) console.error(`Wallet ${wallet.id} update failed:`, error);
 else console.log(`Wallet ${wallet.id} — winRate: ${winRate.toFixed(2)}%, losingStreak: ${losingStreak}, livePicks: ${livePicksCount}, paused: ${paused}`);
 
-} 
 
 /* ===========================
    Update Wallet Metrics

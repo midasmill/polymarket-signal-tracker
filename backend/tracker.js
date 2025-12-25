@@ -672,7 +672,7 @@ async function fetchAndInsertLeaderboardWallets() {
             continue;
           }
           if (entry.pnl < 100000) {
-            console.log(`Skipping wallet ${proxyWallet}: pnl ${entry.pnl} < 10000`);
+            console.log(`Skipping wallet ${proxyWallet}: pnl ${entry.pnl} < 100000`);
             totalSkipped++;
             continue;
           }
@@ -708,7 +708,7 @@ const { data: insertedWallet, error: insertErr } = await supabase
     polymarket_proxy_wallet: proxyWallet,
     polymarket_username: entry.userName || null,
     last_checked: new Date(),
-    paused: true,
+    paused: false,
     losing_streak: 0,
     win_rate: 0,
     force_fetch: true, // mark new wallet for one-time historical fetch

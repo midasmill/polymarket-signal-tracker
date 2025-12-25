@@ -682,14 +682,16 @@ Total skipped: ${totalSkipped}`);
    — one pick per wallet per event
    — skips ties (e.g., 2 YES vs 2 NO)
 =========================== */
+
 async function rebuildWalletLivePicks() {
   console.log("Rebuilding wallet_live_picks...");
 
-  // 1️⃣ Fetch all pending signals
+  // 1️⃣ Fetch pending signals with picked_outcome
   const { data: signals, error } = await supabase
     .from("signals")
     .select("*")
-    .eq("outcome", "Pending");
+    .eq("outcome", "Pending")
+    .not("picked_outcome", "is", null);
 
   if (error) {
     console.error("Failed to fetch signals:", error.message);
@@ -699,6 +701,7 @@ async function rebuildWalletLivePicks() {
   // 2️⃣ Group by wallet_id + event_slug
   const grouped = {};
   for (const sig of signals) {
+    if (!sig.event_slug) continue; // skip if no event_slug
     const key = `${sig.wallet_id}||${sig.event_slug}`;
     grouped[key] ??= [];
     grouped[key].push(sig);
@@ -709,17 +712,17 @@ async function rebuildWalletLivePicks() {
   for (const group of Object.values(grouped)) {
     const pickCounts = {};
     for (const sig of group) {
-      const pick = sig.picked_outcome || sig.side; // fallback if picked_outcome missing
-      pickCounts[pick] = (pickCounts[pick] || 0) + 1;
+      pickCounts[sig.picked_outcome] = (pickCounts[sig.picked_outcome] || 0) + 1;
     }
 
+    // Sort by count descending
     const sorted = Object.entries(pickCounts).sort((a, b) => b[1] - a[1]);
 
     // Skip ties
     if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) continue;
 
     const majorityPick = sorted[0][0];
-    const sig = group.find(s => s.picked_outcome === majorityPick) || group[0];
+    const sig = group.find(s => s.picked_outcome === majorityPick);
 
     livePicks.push({
       wallet_id: sig.wallet_id,
@@ -731,10 +734,11 @@ async function rebuildWalletLivePicks() {
       outcome: sig.outcome,
       resolved_outcome: sig.resolved_outcome,
       fetched_at: new Date(),
+      vote_count: pickCounts[majorityPick], // store count if needed
     });
   }
 
-  // 4️⃣ Clear existing live picks and insert new ones
+  // 4️⃣ Replace live picks
   const { error: deleteErr } = await supabase.from("wallet_live_picks").delete();
   if (deleteErr) console.error("Failed to clear wallet_live_picks:", deleteErr.message);
 
@@ -745,8 +749,6 @@ async function rebuildWalletLivePicks() {
 
   console.log(`✅ Rebuilt wallet_live_picks (${livePicks.length} entries)`);
 }
-
-
 
 /* ===========================
    Daily Summary

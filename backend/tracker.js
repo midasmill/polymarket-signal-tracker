@@ -132,45 +132,67 @@ function getConfidenceEmoji(count) {
 
 /* ===========================
    Vote counting
-=========================== */
+========================== */
 async function getMarketVoteCounts(marketId) {
-  // Group signals by wallet_id + event_slug manually
-const grouped = {};
-for (const sig of signals) {
-  if (!sig.event_slug) continue;
-  const key = `${sig.wallet_id}||${sig.event_slug}`;
-  grouped[key] ??= [];
-  grouped[key].push(sig);
-}
+  // 1️⃣ Fetch pending signals for this market from wallets with win_rate >= 80%
+  const { data: signals, error } = await supabase
+    .from("signals")
+    .select("wallet_id, side, picked_outcome, event_slug")
+    .eq("market_id", marketId)
+    .eq("outcome", "Pending")
+    .gte("win_rate", 80)
+    .not("picked_outcome", "is", null);
 
+  if (error || !signals?.length) return {};
 
-  const perWallet = {};
-  for (const s of signals) {
-    perWallet[s.wallet_id] ??= {};
-    perWallet[s.wallet_id][s.side] = (perWallet[s.wallet_id][s.side] || 0) + 1;
+  // 2️⃣ Group signals by wallet_id + event_slug
+  const grouped = {};
+  for (const sig of signals) {
+    if (!sig.event_slug) continue;
+    const key = `${sig.wallet_id}||${sig.event_slug}`;
+    grouped[key] ??= [];
+    grouped[key].push(sig);
   }
 
+  // 3️⃣ Count votes per wallet (resolve ties per wallet)
+  const perWallet = {};
+  for (const [key, group] of Object.entries(grouped)) {
+    const walletId = group[0].wallet_id;
+    perWallet[walletId] ??= {};
+    const counts = {};
+    for (const sig of group) {
+      counts[sig.side] = (counts[sig.side] || 0) + 1;
+    }
+
+    // Take majority side per wallet, skip tie
+    const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+    if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) continue;
+    perWallet[walletId][sorted[0][0]] = (perWallet[walletId][sorted[0][0]] || 0) + 1;
+  }
+
+  // 4️⃣ Aggregate counts across all wallets
   const counts = {};
   for (const votes of Object.values(perWallet)) {
-    const sides = Object.entries(votes).sort((a, b) => b[1] - a[1]);
-    if (sides.length > 1 && sides[0][1] === sides[1][1]) continue; // tie per wallet
-    counts[sides[0][0]] = (counts[sides[0][0]] || 0) + 1;
+    for (const [side, count] of Object.entries(votes)) {
+      counts[side] = (counts[side] || 0) + count;
+    }
   }
 
   return counts;
 }
 
 function getMajoritySide(counts) {
-  if (!counts) return null;
+  if (!counts || !Object.keys(counts).length) return null;
   const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
-  if (entries.length > 1 && entries[0][1] === entries[1][1]) return null;
+  if (entries.length > 1 && entries[0][1] === entries[1][1]) return null; // tie
   return entries[0][0];
 }
 
 function getMajorityConfidence(counts) {
-  if (!counts) return "";
+  if (!counts || !Object.values(counts).length) return "";
   return getConfidenceEmoji(Math.max(...Object.values(counts)));
 }
+
 
 /* ===========================
    Pick helpers

@@ -683,9 +683,8 @@ Total skipped: ${totalSkipped}`);
    — skips ties (e.g., 2 YES vs 2 NO)
 =========================== */
 async function rebuildWalletLivePicks() {
-  console.log("Rebuilding wallet_live_picks with vote_count...");
+  console.log("Rebuilding wallet_live_picks with vote counts...");
 
-  // 1️⃣ Fetch all pending signals with picked_outcome
   const { data: signals, error } = await supabase
     .from("signals")
     .select("*")
@@ -697,7 +696,6 @@ async function rebuildWalletLivePicks() {
     return;
   }
 
-  // 2️⃣ Group signals by wallet_id + event_slug
   const grouped = {};
   const skippedEvents = [];
   for (const sig of signals) {
@@ -707,7 +705,6 @@ async function rebuildWalletLivePicks() {
     grouped[key].push(sig);
   }
 
-  // 3️⃣ Determine majority pick per group
   const livePicks = [];
   for (const [key, group] of Object.entries(grouped)) {
     const pickCounts = {};
@@ -715,10 +712,9 @@ async function rebuildWalletLivePicks() {
       pickCounts[sig.picked_outcome] = (pickCounts[sig.picked_outcome] || 0) + 1;
     }
 
-    // Sort picks by vote count descending
     const sorted = Object.entries(pickCounts).sort((a, b) => b[1] - a[1]);
 
-    // Skip ties
+    // skip ties
     if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) {
       skippedEvents.push({ key, picks: Object.keys(pickCounts) });
       continue;
@@ -738,11 +734,11 @@ async function rebuildWalletLivePicks() {
       outcome: sig.outcome,
       resolved_outcome: sig.resolved_outcome,
       fetched_at: new Date(),
-      vote_count: pickCounts[majorityPick], // ✅ majority vote count
+      vote_count: pickCounts[majorityPick],        // majority count
+      vote_counts: pickCounts,                     // JSON of all votes
     });
   }
 
-  // 4️⃣ Clear old live picks and insert new
   const { error: deleteErr } = await supabase.from("wallet_live_picks").delete();
   if (deleteErr) console.error("Failed to clear wallet_live_picks:", deleteErr.message);
 
@@ -756,6 +752,7 @@ async function rebuildWalletLivePicks() {
     console.log(`⚠️ Skipped ${skippedEvents.length} events due to ties:`, skippedEvents.map(e => e.key));
   }
 }
+
 
 
 /* ===========================

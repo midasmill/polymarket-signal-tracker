@@ -430,56 +430,45 @@ async function trackWallet(wallet) {
   const wins = resolvedSignals?.filter(s => s.outcome === "WIN").length || 0;
   const winRate = totalResolved > 0 ? (wins / totalResolved) * 100 : 0;
 
-// 7️⃣ Determine pause status
+// 7️⃣ Count live picks FIRST
+const { count: livePicksCount } = await supabase
+  .from("signals")
+  .select("*", { count: "exact", head: true })
+  .eq("wallet_id", wallet.id)
+  .eq("outcome", "Pending");
+
+// 8️⃣ Determine pause status
 let pausedStatus;
 if (wallet.force_fetch) {
-  pausedStatus = wallet.paused; // keep original paused state for first fetch
+  pausedStatus = wallet.paused;
 } else {
   pausedStatus = losingStreak >= LOSING_STREAK_THRESHOLD || winRate < 80;
 }
 
+// 9️⃣ Update wallet metrics ONCE
 await supabase
   .from("wallets")
   .update({
     losing_streak: losingStreak,
     win_rate: winRate,
-    live_picks: livePicks,
+    live_picks: livePicksCount,
     paused: pausedStatus,
     last_checked: new Date(),
   })
   .eq("id", wallet.id);
 
-
-  // 8️⃣ Count live picks safely
-  const { count: livePicks } = await supabase
-    .from("signals")
-    .select("*", { count: "exact", head: true })
-    .eq("wallet_id", wallet.id)
-    .eq("outcome", "Pending");
-
-  // 9️⃣ Update wallet metrics
-  const { error } = await supabase
-    .from("wallets")
-    .update({
-      losing_streak: losingStreak,
-      win_rate: winRate,
-      live_picks: livePicks,
-      paused,
-      last_checked: new Date(),
-    })
-    .eq("id", wallet.id);
-
-  if (error) console.error(`Wallet ${wallet.id} update failed:`, error);
-  else console.log(
-    `Wallet ${wallet.id} — winRate: ${winRate.toFixed(2)}%, losingStreak: ${losingStreak}, livePicks: ${livePicks}, paused: ${paused}`
-  );
-
-   // Clear force_fetch flag after first historical fetch
+// 🔟 Clear force_fetch flag after first historical fetch
 if (wallet.force_fetch) {
-  await supabase.from("wallets").update({ force_fetch: false }).eq("id", wallet.id);
+  await supabase
+    .from("wallets")
+    .update({ force_fetch: false })
+    .eq("id", wallet.id);
 }
 
-}
+console.log(
+  `Wallet ${wallet.id} — winRate: ${winRate.toFixed(2)}%, losingStreak: ${losingStreak}, livePicks: ${livePicksCount}, paused: ${pausedStatus}`
+);
+
 
 
 /* ===========================
@@ -545,8 +534,6 @@ async function updateWalletMetricsJS() {
         .update({
           win_rate: winRate,
           losing_streak: losingStreak,
-          live_picks: livePicksCount,
-          paused,
           last_checked: new Date()
         })
         .eq("id", wallet.id);

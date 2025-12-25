@@ -689,7 +689,7 @@ const { error: insertErr } = await supabase.from("wallets").insert({
   polymarket_proxy_wallet: proxyWallet,
   polymarket_username: entry.userName || null,
   last_checked: new Date(),
-  paused: false,
+  paused: true,
   losing_streak: 0,
   win_rate: 0,
   force_fetch: true, // mark new wallet for one-time historical fetch

@@ -671,13 +671,13 @@ async function fetchAndInsertLeaderboardWallets() {
             totalSkipped++;
             continue;
           }
-          if (entry.pnl < 1000) {
-            console.log(`Skipping wallet ${proxyWallet}: pnl ${entry.pnl} < 1000`);
+          if (entry.pnl < 10000) {
+            console.log(`Skipping wallet ${proxyWallet}: pnl ${entry.pnl} < 10000`);
             totalSkipped++;
             continue;
           }
           if (entry.vol >= 10 * entry.pnl) {
-            console.log(`Skipping wallet ${proxyWallet}: vol ${entry.vol} >= 6 * pnl ${entry.pnl}`);
+            console.log(`Skipping wallet ${proxyWallet}: vol ${entry.vol} >= 5 * pnl ${entry.pnl}`);
             totalSkipped++;
             continue;
           }

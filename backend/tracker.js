@@ -740,6 +740,7 @@ if (insertedWallet) {
 }
 
 
+
           if (insertErr) {
             console.error(`Failed to insert wallet ${proxyWallet}:`, insertErr);
             totalSkipped++;

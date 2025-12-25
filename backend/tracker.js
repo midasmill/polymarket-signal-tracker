@@ -498,7 +498,7 @@ async function rebuildWalletLivePicks() {
 
 /* ===========================
    Update Wallet Metrics
-========================== */
+=========================== */
 async function updateWalletMetricsJS() {
   try {
     // 1️⃣ Fetch all wallets
@@ -523,12 +523,12 @@ async function updateWalletMetricsJS() {
         continue;
       }
 
-      // Win rate
+      // Calculate win rate
       const totalResolved = resolvedSignals?.length || 0;
       const wins = resolvedSignals?.filter(s => s.outcome === "WIN").length || 0;
       const winRate = totalResolved > 0 ? (wins / totalResolved) * 100 : 0;
 
-      // Consecutive losing streak from most recent resolved signal
+      // Calculate consecutive losing streak
       let losingStreak = 0;
       if (resolvedSignals?.length) {
         for (let i = resolvedSignals.length - 1; i >= 0; i--) {
@@ -537,42 +537,36 @@ async function updateWalletMetricsJS() {
         }
       }
 
-      // Live/unresolved picks
-const { data: liveSignals } = await supabase
-  .from("signals")
-  .select("id")
-  .eq("wallet_id", wallet.id)
-  .eq("outcome", "Pending");
+      // 3️⃣ Fetch live/unresolved signals
+      const { data: liveSignals, error: liveSignalsErr } = await supabase
+        .from("signals")
+        .select("id")
+        .eq("wallet_id", wallet.id)
+        .eq("outcome", "Pending");
 
-const livePicksCount = liveSignals?.length || 0;
+      if (liveSignalsErr) {
+        console.error(`Failed to fetch live signals for wallet ${wallet.id}:`, liveSignalsErr);
+      }
 
       const livePicksCount = liveSignals?.length || 0;
 
-      // Pause status
+      // 4️⃣ Determine pause status
       const paused = losingStreak >= LOSING_STREAK_THRESHOLD || winRate < 80;
 
-      // 3️⃣ Update wallet with error check
-
-       const { count: livePicksCount } = await supabase
-  .from("signals")
-  .select("*", { count: "exact", head: true })
-  .eq("wallet_id", wallet.id)
-  .eq("outcome", "Pending");
-
-      const { data, error } = await supabase
+      // 5️⃣ Update wallet metrics
+      const { error: updateErr } = await supabase
         .from("wallets")
         .update({
           win_rate: winRate,
           losing_streak: losingStreak,
           live_picks: livePicksCount,
-         livePicks: ${livePicksCount}
           paused,
           last_checked: new Date()
         })
         .eq("id", wallet.id);
 
-      if (error) console.error(`Wallet ${wallet.id} update failed:`, error);
-      else console.log(`Wallet ${wallet.id} — winRate: ${winRate.toFixed(2)}%, losingStreak: ${losingStreak}, livePicks: ${livePicks}, paused: ${paused}`);
+      if (updateErr) console.error(`Wallet ${wallet.id} update failed:`, updateErr);
+      else console.log(`Wallet ${wallet.id} — winRate: ${winRate.toFixed(2)}%, losingStreak: ${losingStreak}, livePicks: ${livePicksCount}, paused: ${paused}`);
     }
 
     console.log("✅ Wallet metrics updated successfully.");

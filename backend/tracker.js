@@ -267,12 +267,12 @@ function determineOutcome(pos) {
 }
 
 /* ===========================
-   Rebuild wallet_live_picks (All wallets, all unresolved picks)
+   Rebuild wallet_live_picks (All wallets, amount-weighted votes)
 =========================== */
 async function rebuildWalletLivePicks() {
-  console.log("Rebuilding wallet_live_picks (all wallets)...");
+  console.log("Rebuilding wallet_live_picks (all wallets, amount-weighted)...");
 
-  // 1️⃣ Fetch all wallets — no eligibility filter
+  // 1️⃣ Fetch all wallets
   const { data: allWallets, error: walletsErr } = await supabase
     .from("wallets")
     .select("id, win_rate, paused");
@@ -280,10 +280,9 @@ async function rebuildWalletLivePicks() {
   if (!allWallets?.length) return console.log("No wallets found.");
 
   console.log(`Total wallets fetched: ${allWallets.length}`);
-
   const allWalletIds = allWallets.map(w => w.id);
 
-  // 2️⃣ Fetch all unresolved signals for all wallets
+  // 2️⃣ Fetch all unresolved signals
   const { data: signals, error: signalsErr } = await supabase
     .from("signals")
     .select("*")
@@ -296,21 +295,24 @@ async function rebuildWalletLivePicks() {
 
   console.log(`Total pending signals fetched: ${signals.length}`);
 
-  // 3️⃣ Group by wallet + event_slug to calculate majority pick per wallet
+  // 3️⃣ Group by wallet + event_slug to calculate weighted vote
   const perWalletEvent = {};
   for (const sig of signals) {
     if (!sig.event_slug) continue;
     const key = `${sig.wallet_id}||${sig.event_slug}`;
     perWalletEvent[key] ??= {};
-    perWalletEvent[key][sig.picked_outcome] = (perWalletEvent[key][sig.picked_outcome] || 0) + 1;
+
+    // accumulate amount per side
+    const amount = sig.amount || 0; // make sure your signals table has an 'amount' column
+    perWalletEvent[key][sig.picked_outcome] = (perWalletEvent[key][sig.picked_outcome] || 0) + amount;
   }
 
-  // 4️⃣ Determine each wallet's majority pick
+  // 4️⃣ Determine each wallet's majority pick by total amount
   const livePicks = [];
-  for (const [key, counts] of Object.entries(perWalletEvent)) {
-    const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  for (const [key, totals] of Object.entries(perWalletEvent)) {
+    const sorted = Object.entries(totals).sort((a, b) => b[1] - a[1]);
 
-    // skip tie votes (1 yes + 1 no → no vote counted)
+    // skip tie (same total amount)
     if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) continue;
 
     const majorityPick = sorted[0][0];
@@ -321,7 +323,6 @@ async function rebuildWalletLivePicks() {
       s.event_slug === eventSlug &&
       s.picked_outcome === majorityPick
     );
-
     if (!sig) continue;
 
     livePicks.push({
@@ -361,7 +362,7 @@ async function rebuildWalletLivePicks() {
       }
     }
 
-    // Skip picks that do not meet the minimum threshold (⭐)
+    // Skip picks that do not meet minimum threshold
     if (!confidence) continue;
 
     picks.forEach(p => {
@@ -380,6 +381,8 @@ async function rebuildWalletLivePicks() {
     await supabase.from("wallet_live_picks").insert(finalLivePicks);
     console.log(`Inserted ${finalLivePicks.length} live picks with confidence.`);
   }
+
+  console.log("✅ rebuildWalletLivePicks completed — wallets remain unpaused.");
 }
 
 

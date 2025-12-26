@@ -119,8 +119,6 @@ async function fetchLatestTrades(user) {
   }
 }
 
-const marketCache = new Map();
-
 async function fetchMarket(eventSlug) {
   if (!eventSlug) return null;
   if (marketCache.has(eventSlug)) return marketCache.get(eventSlug);

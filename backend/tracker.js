@@ -18,6 +18,8 @@ const LOSING_STREAK_THRESHOLD = parseInt(process.env.LOSING_STREAK_THRESHOLD || 
 const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "2", 10);
 const FORCE_SEND = process.env.FORCE_SEND === "true";
 
+const WIN_RATE_THRESHOLD = parseInt(process.env.WIN_RATE_THRESHOLD || "70");
+
 const CONFIDENCE_THRESHOLDS = {
   "⭐": MIN_WALLETS_FOR_SIGNAL,
   "⭐⭐": parseInt(process.env.CONF_2 || "5"),
@@ -48,12 +50,12 @@ process.on("uncaughtException", err => {
 /* ===========================
    Get Eligible Wallets
 =========================== */
-async function getEligibleWallets(minWinRate = 80) {
+async function getEligibleWallets(minWinRate = WIN_RATE_THRESHOLD) {
   const { data, error } = await supabase
     .from("wallets")
     .select("id, win_rate")
     .eq("paused", false)
-    .gte("win_rate", minWinRate);
+    .gte("win_rate", WIN_RATE_THRESHOLD);
 
   if (error || !data?.length) return [];
   return data;
@@ -329,7 +331,7 @@ async function unpauseAndFetchWallet(wallet) {
 
   if (error || !updated) return;
 
-  if (updated.win_rate >= 80 && updated.paused) {
+  if (updated.win_rate >= WIN_RATE_THRESHOLD && updated.paused) {
     const { error: updateErr } = await supabase
       .from("wallets")
       .update({ paused: false })
@@ -390,8 +392,8 @@ async function trackWallet(wallet) {
     return;
   }
 
-  // Auto-unpause if win_rate >= 80%
-  if (wallet.paused && wallet.win_rate >= 80) {
+  // Auto-unpause if win_rate >= WIN_RATE_THRESHOLD
+  if (wallet.paused && wallet.win_rate >= WIN_RATE_THRESHOLD) {
     await supabase.from("wallets").update({ paused: false }).eq("id", wallet.id);
     wallet.paused = false;
     console.log(`Wallet ${wallet.id} auto-unpaused (winRate=${wallet.win_rate.toFixed(2)}%)`);
@@ -550,7 +552,7 @@ async function trackWallet(wallet) {
   // 8️⃣ Determine pause status
   let pausedStatus = wallet.force_fetch
     ? wallet.paused
-    : (winRate < 80 || (resolvedSignals?.length && resolvedSignals[resolvedSignals.length - 1].outcome === "LOSS"));
+    : (winRate < WIN_RATE_THRESHOLD || (resolvedSignals?.length && resolvedSignals[resolvedSignals.length - 1].outcome === "LOSS"));
 
   // 9️⃣ Update wallet metrics
   await supabase
@@ -647,7 +649,7 @@ async function updateWalletMetricsJS() {
         const livePicksCount = liveSignals?.length || 0;
 
         // 5️⃣ Determine paused
-        const paused = losingStreak >= LOSING_STREAK_THRESHOLD || winRate < 80;
+        const paused = losingStreak >= LOSING_STREAK_THRESHOLD || winRate < WIN_RATE_THRESHOLD;
 
         // 6️⃣ Update wallet
         const { error: updateErr } = await supabase
@@ -807,7 +809,7 @@ async function rebuildWalletLivePicks() {
     .from("wallets")
     .select("id, win_rate")
     .eq("paused", false)
-    .gte("win_rate", 70);
+    .gte("win_rate", WIN_RATE_THRESHOLD);
 
   if (walletsErr) return console.error("Failed to fetch wallets:", walletsErr.message);
   if (!eligibleWallets?.length) {

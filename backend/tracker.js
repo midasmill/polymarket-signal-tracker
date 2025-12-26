@@ -407,9 +407,7 @@ async function trackWallet(wallet) {
     const pickedOutcome = pos.outcome || `OPTION_${pos.outcomeIndex}`;
     const pnl = pos.cashPnl ?? null;
 
-    let outcome = "Pending";
-    let resolvedOutcome = null;
-
+let outcome, resolvedOutcome;
 ({ outcome, resolvedOutcome } = determineOutcome(pos));
 
     const existingSig = existingSignals.find(s => s.market_id === marketId);

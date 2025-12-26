@@ -770,7 +770,7 @@ async function fetchAndInsertLeaderboardWallets() {
 }
 
 /* ===========================
-   Rebuild wallet_live_picks
+   Rebuild wallet_live_picks (with skip diagnostics)
 =========================== */
 async function rebuildWalletLivePicks() {
   console.log("Rebuilding wallet_live_picks...");
@@ -820,7 +820,10 @@ async function rebuildWalletLivePicks() {
   // 3️⃣ Aggregate per wallet/event
   const perWalletEvent = {};
   for (const sig of signals) {
-    if (!sig.event_slug) continue;
+    if (!sig.event_slug) {
+      console.log(`Skipping signal id ${sig.id} — missing event_slug`);
+      continue;
+    }
     const key = `${sig.wallet_id}||${sig.event_slug}`;
     perWalletEvent[key] ??= {};
     perWalletEvent[key][sig.picked_outcome] = (perWalletEvent[key][sig.picked_outcome] || 0) + 1;
@@ -829,17 +832,22 @@ async function rebuildWalletLivePicks() {
   const livePicks = [];
 
   for (const [key, counts] of Object.entries(perWalletEvent)) {
+    const [walletId, eventSlug] = key.split("||");
     const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
-    if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) continue; // tie → skip
+
+    if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) {
+      console.log(`Skipping wallet ${walletId}, event ${eventSlug} — tie in picks:`, counts);
+      continue; // tie → skip
+    }
 
     const majorityPick = sorted[0][0];
-    const [walletId, eventSlug] = key.split("||");
-
     const sig = signals.find(s => s.wallet_id == walletId && s.event_slug === eventSlug && s.picked_outcome === majorityPick);
-    if (!sig) continue;
+    if (!sig) {
+      console.log(`Skipping wallet ${walletId}, event ${eventSlug} — no matching signal for majorityPick: ${majorityPick}`);
+      continue;
+    }
 
     console.log(`Adding live pick -> Wallet: ${walletId}, Market: ${sig.market_name}, Pick: ${majorityPick}`);
-
     livePicks.push({
       wallet_id: parseInt(walletId),
       market_id: sig.market_id,
@@ -880,6 +888,7 @@ async function rebuildWalletLivePicks() {
     console.log("No live picks to insert.");
   }
 }
+
 
 /* ===========================
    Fetch wallet live picks

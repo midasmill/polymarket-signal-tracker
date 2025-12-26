@@ -871,8 +871,6 @@ async function rebuildWalletLivePicks() {
   console.log(`✅ Rebuilt wallet_live_picks (${finalLivePicks.length})`);
 }
 
-}
-
 /* ===========================
    Fetch wallet live picks
 =========================== */

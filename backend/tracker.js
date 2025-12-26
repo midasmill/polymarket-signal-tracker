@@ -773,46 +773,36 @@ async function fetchAndInsertLeaderboardWallets() {
    Rebuild wallet_live_picks
 =========================== */
 async function rebuildWalletLivePicks() {
+  console.log("WIN_RATE_THRESHOLD:", WIN_RATE_THRESHOLD);
+
   console.log("Rebuilding wallet_live_picks...");
 
-  // 1️⃣ Fetch eligible wallets
-  const { data: eligibleWallets, error: walletsErr } = await supabase
+  // Fetch eligible wallets
+  const { data: eligibleWallets } = await supabase
     .from("wallets")
     .select("id, win_rate, paused")
     .gte("win_rate", WIN_RATE_THRESHOLD)
     .eq("paused", false);
 
-  if (walletsErr) {
-    console.error("Failed to fetch wallets:", walletsErr.message);
-    return;
-  }
+  console.log("Eligible wallets:", eligibleWallets?.map(w => `${w.id}:${w.win_rate}`));
 
-  if (!eligibleWallets?.length) {
-    console.log("No eligible wallets to process.");
-    return;
-  }
+  if (!eligibleWallets?.length) return console.log("No eligible wallets to process.");
 
   const eligibleIds = eligibleWallets.map(w => w.id);
 
-  // 2️⃣ Fetch unresolved signals from eligible wallets
-  const { data: signals, error: signalsErr } = await supabase
+  // Fetch unresolved signals from eligible wallets
+  const { data: signals, error } = await supabase
     .from("signals")
     .select("*")
     .in("wallet_id", eligibleIds)
     .eq("outcome", "Pending")
     .not("picked_outcome", "is", null);
 
-  if (signalsErr) {
-    console.error("Failed to fetch signals:", signalsErr.message);
-    return;
-  }
+  console.log("Total signals fetched:", signals?.length || 0);
 
-  if (!signals?.length) {
-    console.log("No pending signals to process.");
-    return;
-  }
+  if (!signals?.length) return console.log("No pending signals to process.");
 
-  // 3️⃣ Group by wallet + event to count majority picks per wallet
+  // Group by wallet + event to count per wallet majority pick
   const perWalletEvent = {};
   for (const sig of signals) {
     if (!sig.event_slug) continue;
@@ -826,31 +816,23 @@ async function rebuildWalletLivePicks() {
   for (const [key, counts] of Object.entries(perWalletEvent)) {
     // Determine majority pick for wallet
     const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
-    if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) {
-      console.log(`Skipping wallet/event ${key} due to tie in picks`);
-      continue; // tie → skip
-    }
+    if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) continue; // tie → skip
 
     const majorityPick = sorted[0][0];
-    const [walletIdStr, eventSlug] = key.split("||");
-    const walletId = parseInt(walletIdStr);
+    const [walletId, eventSlug] = key.split("||");
 
-    // Find the first signal matching wallet+event+majorityPick
-    const sig = signals.find(s =>
-      s.wallet_id === walletId &&
-      s.event_slug === eventSlug &&
-      s.picked_outcome === majorityPick
+    const sig = signals.find(
+      s => s.wallet_id == walletId && s.event_slug === eventSlug && s.picked_outcome === majorityPick
     );
+    if (!sig) continue;
 
-    if (!sig) {
-      console.log(`No matching signal found for wallet ${walletId}, event ${eventSlug}, pick ${majorityPick}`);
-      continue;
-    }
-
-    console.log("Adding live pick:", walletId, sig.event_slug, majorityPick);
+    // Per-wallet/event debug logs
+    console.log("Counts per wallet/event:", key, counts);
+    console.log("Sorted counts:", sorted);
+    console.log("WalletId/eventSlug/majorityPick:", walletId, eventSlug, majorityPick);
 
     livePicks.push({
-      wallet_id: walletId,
+      wallet_id: parseInt(walletId),
       market_id: sig.market_id,
       market_name: sig.market_name,
       event_slug: sig.event_slug,
@@ -861,7 +843,7 @@ async function rebuildWalletLivePicks() {
       resolved_outcome: sig.resolved_outcome,
       fetched_at: new Date(),
       vote_count: 1, // will be aggregated next
-      win_rate: sig.win_rate || 0
+      win_rate: sig.win_rate || 0,
     });
   }
 
@@ -889,6 +871,7 @@ async function rebuildWalletLivePicks() {
   console.log(`✅ Rebuilt wallet_live_picks (${finalLivePicks.length})`);
 }
 
+}
 
 /* ===========================
    Fetch wallet live picks

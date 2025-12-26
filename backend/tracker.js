@@ -925,9 +925,9 @@ async function trackerLoop() {
     }
 
     // 3️⃣ Reprocess resolved picks (optional, based on REPROCESS flag)
-    if (process.env.REPROCESS) {
-      await reprocessResolvedPicks();
-    }
+if (process.env.REPROCESS === "true") { 
+  await reprocessResolvedPicks(); 
+}
 
     // 4️⃣ Rebuild wallet_live_picks
     await rebuildWalletLivePicks();

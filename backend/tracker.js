@@ -773,36 +773,51 @@ async function fetchAndInsertLeaderboardWallets() {
    Rebuild wallet_live_picks
 =========================== */
 async function rebuildWalletLivePicks() {
+  console.log("Rebuilding wallet_live_picks...");
   console.log("WIN_RATE_THRESHOLD:", WIN_RATE_THRESHOLD);
 
-  console.log("Rebuilding wallet_live_picks...");
-
-  // Fetch eligible wallets
-  const { data: eligibleWallets } = await supabase
+  // 1️⃣ Fetch eligible wallets
+  const { data: eligibleWallets, error: walletsErr } = await supabase
     .from("wallets")
     .select("id, win_rate, paused")
-    .gte("win_rate", WIN_RATE_THRESHOLD)
-    .eq("paused", false);
+    .eq("paused", false)
+    .gte("win_rate", WIN_RATE_THRESHOLD);
 
-  console.log("Eligible wallets:", eligibleWallets?.map(w => `${w.id}:${w.win_rate}`));
+  if (walletsErr) {
+    console.error("Failed to fetch eligible wallets:", walletsErr.message);
+    return;
+  }
 
-  if (!eligibleWallets?.length) return console.log("No eligible wallets to process.");
+  console.log("Eligible wallets:", eligibleWallets?.map(w => `${w.id}:${w.win_rate}`) || []);
+
+  if (!eligibleWallets?.length) {
+    console.log("No eligible wallets to process.");
+    return;
+  }
 
   const eligibleIds = eligibleWallets.map(w => w.id);
 
-  // Fetch unresolved signals from eligible wallets
-  const { data: signals, error } = await supabase
+  // 2️⃣ Fetch unresolved signals from eligible wallets
+  const { data: signals, error: signalsErr } = await supabase
     .from("signals")
     .select("*")
     .in("wallet_id", eligibleIds)
     .eq("outcome", "Pending")
     .not("picked_outcome", "is", null);
 
+  if (signalsErr) {
+    console.error("Failed to fetch signals:", signalsErr.message);
+    return;
+  }
+
   console.log("Total signals fetched:", signals?.length || 0);
 
-  if (!signals?.length) return console.log("No pending signals to process.");
+  if (!signals?.length) {
+    console.log("No pending signals to process.");
+    return;
+  }
 
-  // Group by wallet + event to count per wallet majority pick
+  // 3️⃣ Aggregate per wallet/event
   const perWalletEvent = {};
   for (const sig of signals) {
     if (!sig.event_slug) continue;
@@ -814,22 +829,16 @@ async function rebuildWalletLivePicks() {
   const livePicks = [];
 
   for (const [key, counts] of Object.entries(perWalletEvent)) {
-    // Determine majority pick for wallet
     const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
     if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) continue; // tie → skip
 
     const majorityPick = sorted[0][0];
     const [walletId, eventSlug] = key.split("||");
 
-    const sig = signals.find(
-      s => s.wallet_id == walletId && s.event_slug === eventSlug && s.picked_outcome === majorityPick
-    );
+    const sig = signals.find(s => s.wallet_id == walletId && s.event_slug === eventSlug && s.picked_outcome === majorityPick);
     if (!sig) continue;
 
-    // Per-wallet/event debug logs
-    console.log("Counts per wallet/event:", key, counts);
-    console.log("Sorted counts:", sorted);
-    console.log("WalletId/eventSlug/majorityPick:", walletId, eventSlug, majorityPick);
+    console.log(`Adding live pick -> Wallet: ${walletId}, Market: ${sig.market_name}, Pick: ${majorityPick}`);
 
     livePicks.push({
       wallet_id: parseInt(walletId),
@@ -842,12 +851,12 @@ async function rebuildWalletLivePicks() {
       outcome: sig.outcome,
       resolved_outcome: sig.resolved_outcome,
       fetched_at: new Date(),
-      vote_count: 1, // will be aggregated next
-      win_rate: sig.win_rate || 0,
+      vote_count: 1,
+      win_rate: sig.win_rate || 0
     });
   }
 
-  // 4️⃣ Aggregate vote_count across wallets for each market_id + picked_outcome
+  // 4️⃣ Aggregate vote_count across wallets
   const grouped = {};
   for (const pick of livePicks) {
     const key = `${pick.market_id}||${pick.picked_outcome}`;
@@ -866,9 +875,10 @@ async function rebuildWalletLivePicks() {
   await supabase.from("wallet_live_picks").delete();
   if (finalLivePicks.length) {
     await supabase.from("wallet_live_picks").insert(finalLivePicks);
+    console.log(`✅ Inserted ${finalLivePicks.length} live picks into wallet_live_picks`);
+  } else {
+    console.log("No live picks to insert.");
   }
-
-  console.log(`✅ Rebuilt wallet_live_picks (${finalLivePicks.length})`);
 }
 
 /* ===========================

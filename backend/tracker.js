@@ -245,6 +245,61 @@ async function updateNotes(slug, text) {
 }
 
 /* ===========================
+   Reprocess All Resolved Picks
+=========================== */
+async function reprocessResolvedPicks() {
+  console.log("🔄 Reprocessing all resolved picks...");
+
+  try {
+    // Fetch all signals that are WIN or LOSS
+    const { data: resolvedSignals, error } = await supabase
+      .from("signals")
+      .select("*")
+      .in("outcome", ["WIN", "LOSS"]);
+
+    if (error) return console.error("Failed to fetch resolved signals:", error.message);
+    if (!resolvedSignals?.length) return console.log("No resolved signals to process.");
+
+    let updatedCount = 0;
+
+    for (const sig of resolvedSignals) {
+      const pos = await fetchWalletPosition(sig.wallet_id, sig.tx_hash); // fetch position by wallet + tx_hash
+      if (!pos) continue;
+
+      let outcome, resolvedOutcome;
+      if (pos.resolved === true) {
+        if (pos.cashPnl > 0) {
+          outcome = "WIN";
+          resolvedOutcome = pos.outcome || `OPTION_${pos.outcomeIndex}`;
+        } else {
+          outcome = "LOSS";
+          resolvedOutcome = pos.oppositeOutcome || (pos.outcome || `OPTION_${pos.outcomeIndex}`);
+        }
+      } else {
+        outcome = "Pending";
+        resolvedOutcome = null;
+      }
+
+      // Only update if outcome has changed
+      if (sig.outcome !== outcome || sig.resolved_outcome !== resolvedOutcome) {
+        await supabase
+          .from("signals")
+          .update({ outcome, resolved_outcome: resolvedOutcome, outcome_at: pos.cashPnl !== null ? new Date() : null })
+          .eq("id", sig.id);
+
+        updatedCount++;
+      }
+    }
+
+    console.log(`✅ Reprocessed resolved picks. Updated ${updatedCount} signals.`);
+  } catch (err) {
+    console.error("Error reprocessing resolved picks:", err.message);
+  }
+}
+
+
+
+/* ===========================
    Unpause Wallet
 =========================== */
 async function unpauseAndFetchWallet(wallet) {
@@ -874,6 +929,8 @@ async function trackerLoop() {
 /* ===========================
    Main Function
 =========================== */
+await reprocessResolvedPicks();
+
 async function main() {
   console.log("🚀 POLYMARKET TRACKER LIVE 🚀");
   try { await fetchAndInsertLeaderboardWallets(); } 

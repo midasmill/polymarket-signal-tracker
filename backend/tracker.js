@@ -413,22 +413,23 @@ async function trackWallet(wallet) {
         .update({ pnl, outcome, resolved_outcome: resolvedOutcome, outcome_at: pnl !== null ? new Date() : null })
         .eq("id", existingSig.id);
     } else if (!existingTxs.has(pos.asset)) {
-      await supabase.from("signals").insert({
-        wallet_id: wallet.id,
-        signal: pos.title,
-        market_name: pos.title,
-        market_id: marketId,
-        event_slug: pos.eventSlug || pos.slug,
-        side: pos.side?.toUpperCase() || "BUY",
-        win_rate: wallet.win_rate,
-        picked_outcome: pickedOutcome,
-        tx_hash: pos.asset,
-        pnl,
-        outcome,
-        resolved_outcome: resolvedOutcome,
-        outcome_at: pnl !== null ? new Date() : null,
-        created_at: new Date(pos.timestamp * 1000 || Date.now()),
-      });
+await supabase.from("signals").insert({
+  wallet_id: wallet.id,
+  signal: pos.title,
+  market_name: pos.title,
+  market_id: pos.conditionId,
+  event_slug: pos.eventSlug || pos.slug,
+  side: pos.side?.toUpperCase() || "BUY",
+  picked_outcome: pickedOutcome,
+  opposite_outcome: pos.oppositeOutcome || null,
+  tx_hash: pos.asset,
+  pnl,
+  outcome,
+  resolved_outcome: resolvedOutcome,
+  outcome_at: pnl !== null ? new Date() : null,
+  win_rate: wallet.win_rate,
+  created_at: new Date(pos.timestamp * 1000 || Date.now()),
+});
     }
   }
 

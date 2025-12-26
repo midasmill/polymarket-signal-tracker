@@ -279,12 +279,14 @@ async function rebuildWalletLivePicks() {
 }
 
 /* ===========================
-   Signal Processing
+   Signal Processing + Notes Update
 =========================== */
 async function processAndSendSignals() {
+  // 1️⃣ Fetch all live picks
   const { data: livePicks } = await supabase.from("wallet_live_picks").select("*");
   if (!livePicks?.length) return;
 
+  // 2️⃣ Group by market_id + picked_outcome
   const grouped = new Map();
   for (const pick of livePicks) {
     const key = `${pick.market_id}||${pick.picked_outcome}`;
@@ -294,27 +296,58 @@ async function processAndSendSignals() {
 
   const signalsToSend = [];
 
+  // 3️⃣ Prepare signals
   for (const [key, picks] of grouped.entries()) {
     const walletCount = picks.length;
     const confidence = getConfidenceEmoji(walletCount);
-    if (!confidence) continue;
-    const sig = picks[0];
+    if (!confidence) continue; // skip if below threshold
 
-    signalsToSend.push({
-      market_id: sig.market_id,
-      picked_outcome: sig.picked_outcome,
-      wallets: picks.map(p=>p.wallets).flat(),
-      confidence,
-      text: `📊 Market Event: ${sig.market_name}\nPrediction: ${sig.picked_outcome}\nConfidence: ${confidence}\nSignal Sent: ${new Date().toLocaleString("en-US",{timeZone:TIMEZONE})}`,
-    });
+    const sig = picks[0]; // representative pick
+    const text = `📊 Market Event: ${sig.market_name}
+Prediction: ${sig.picked_outcome}
+Confidence: ${confidence}
+Signal Sent: ${new Date().toLocaleString("en-US",{timeZone:TIMEZONE})}`;
 
-    await supabase.from("signals").update({ signal_sent_at: new Date() }).eq("market_id",sig.market_id).eq("picked_outcome",sig.picked_outcome);
+    signalsToSend.push({ market_id: sig.market_id, picked_outcome: sig.picked_outcome, text });
+
+    // mark signals as sent
+    await supabase
+      .from("signals")
+      .update({ signal_sent_at: new Date() })
+      .eq("market_id", sig.market_id)
+      .eq("picked_outcome", sig.picked_outcome);
   }
 
+  // 4️⃣ Send signals & update Notes
   for (const sig of signalsToSend) {
-    await sendTelegram(sig.text);
+    try {
+      await sendTelegram(sig.text);
+      await updateNotes("polymarket-millionaires", sig.text); // line breaks included
+      console.log(`✅ Sent signal for market ${sig.market_id}`);
+    } catch (err) {
+      console.error(`Failed to send signal for market ${sig.market_id}:`, err.message);
+    }
   }
 }
+
+/* ===========================
+   Notes Update Helper (new lines)
+=========================== */
+async function updateNotes(slug, text) {
+  const noteText = text
+    .split("\n")
+    .map(line => `> ${line}`) // blockquote for readability
+    .join("\n");
+
+  const { data: notes } = await supabase.from("notes").select("content").eq("slug", slug).maybeSingle();
+  let newContent = notes?.content || "";
+
+  // append new signal with a line break
+  newContent += newContent ? `\n\n${noteText}` : noteText;
+
+  await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", slug);
+}
+
 
 /* ===========================
    Wallet Metrics Update

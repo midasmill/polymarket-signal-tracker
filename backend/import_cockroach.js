@@ -1,4 +1,4 @@
-import csv from "csv-parser"; // correct for ESM
+import csvParser from "csv-parser";  // default import
 import fs from "fs";
 import path from "path";
 import pkg from "pg";

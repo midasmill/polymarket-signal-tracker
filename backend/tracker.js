@@ -432,7 +432,7 @@ async function trackWallet(wallet) {
     let outcome = "Pending";
     let resolvedOutcome = null;
 
-const { outcome, resolvedOutcome } = determineOutcome(pos);
+({ outcome, resolvedOutcome } = determineOutcome(pos));
 
     const existingSig = existingSignals.find(s => s.market_id === marketId);
     if (existingSig) {

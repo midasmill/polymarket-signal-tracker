@@ -34,4 +34,4 @@ async function importNotes(filePath) {
     });
 }
 
-importNotes('notes.csv');
+importNotes('importnotes.csv');

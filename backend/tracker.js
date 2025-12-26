@@ -407,7 +407,7 @@ for (const pos of positions) {
   const pickedOutcome = pos.outcome || `OPTION_${pos.outcomeIndex}`;
   const pnl = pos.cashPnl ?? null;
 
-  // ✅ Use determineOutcome function without redeclaring variables
+  // ✅ Correct usage: destructure outcome once as const
   const { outcome, resolvedOutcome } = determineOutcome(pos);
 
   const existingSig = existingSignals.find(s => s.market_id === marketId);

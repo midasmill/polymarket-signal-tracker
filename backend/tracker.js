@@ -317,36 +317,6 @@ async function reprocessResolvedPicks() {
   }
 }
 
-
-
-/* ===========================
-   Unpause Wallet
-=========================== */
-async function unpauseAndFetchWallet(wallet) {
-  const { data: updated, error } = await supabase
-    .from("wallets")
-    .select("*")
-    .eq("id", wallet.id)
-    .maybeSingle();
-
-  if (error || !updated) return;
-
-  if (updated.win_rate >= WIN_RATE_THRESHOLD && updated.paused) {
-    const { error: updateErr } = await supabase
-      .from("wallets")
-      .update({ paused: false })
-      .eq("id", wallet.id);
-
-    if (updateErr) {
-      console.error(`Failed to unpause wallet ${wallet.id}:`, updateErr.message);
-      return;
-    }
-
-    console.log(`Wallet ${wallet.id} unpaused (win_rate=${updated.win_rate.toFixed(2)}%)`);
-    await trackWallet({ ...updated, paused: false, force_fetch: true });
-  }
-}
-
 /* ===========================
    Fetch wallet positions safely
 =========================== */
@@ -927,39 +897,76 @@ async function fetchWalletLivePicks(walletId) {
 }
 
 /* ===========================
-   Tracker loop
+   Bulk Unpause Wallets
+=========================== */
+async function bulkUnpauseWallets() {
+  const { error, data } = await supabase
+    .from("wallets")
+    .update({ paused: false })
+    .gte("win_rate", WIN_RATE_THRESHOLD)
+    .eq("paused", true);
+
+  if (error) console.error("Failed to bulk unpause wallets:", error.message);
+  else console.log(`✅ Bulk unpaused ${data?.length || 0} wallets over threshold`);
+}
+
+/* ===========================
+   Tracker Loop
 =========================== */
 async function trackerLoop() {
   try {
-    const { data: wallets } = await supabase.from("wallets").select("*");
+    // 0️⃣ Bulk unpause eligible wallets first
+    await bulkUnpauseWallets();
+
+    // 1️⃣ Fetch all wallets
+    const { data: wallets, error: walletsErr } = await supabase.from("wallets").select("*");
+    if (walletsErr) return console.error("Failed to fetch wallets:", walletsErr.message);
     if (!wallets?.length) return console.log("No wallets found");
 
     console.log(`[${new Date().toISOString()}] Tracking ${wallets.length} wallets...`);
 
-    // 1️⃣ Track each wallet normally
+    // 2️⃣ Track each wallet
     for (const wallet of wallets) {
-      try { await trackWallet(wallet); } 
-      catch (err) { console.error(`Error tracking wallet ${wallet.id}:`, err.message); }
+      try { 
+        await trackWallet(wallet); 
+      } catch (err) { 
+        console.error(`Error tracking wallet ${wallet.id}:`, err.message); 
+      }
     }
 
-    // 2️⃣ Reprocess resolved picks before updating metrics
-    if (process.env.REPROCESS) {  // optional flag
+    // 3️⃣ Reprocess resolved picks (optional, based on REPROCESS flag)
+    if (process.env.REPROCESS) {
       await reprocessResolvedPicks();
     }
 
-    // 3️⃣ Rebuild live picks
+    // 4️⃣ Rebuild wallet_live_picks
     await rebuildWalletLivePicks();
 
-    // 4️⃣ Update wallet metrics (win rate, losing streak, paused)
+    // 5️⃣ Update wallet metrics (win rate, losing streak, paused)
     await updateWalletMetricsJS();
 
-    // 5️⃣ Send majority signals to Telegram / Notes
+    // 6️⃣ Send majority signals to Telegram / Notes
     await sendMajoritySignals();
 
     console.log("✅ Tracker loop completed successfully");
   } catch (err) {
-    console.error("Loop error:", err.message);
+    console.error("Tracker loop error:", err.message);
   }
+}
+
+/* ===========================
+   Main Function
+=========================== */
+async function main() {
+  console.log("🚀 POLYMARKET TRACKER LIVE 🚀");
+  try { 
+    await fetchAndInsertLeaderboardWallets(); 
+  } catch (err) { 
+    console.error("Failed to fetch leaderboard wallets:", err.message); 
+  }
+
+  await trackerLoop();
+  setInterval(trackerLoop, POLL_INTERVAL);
 }
 
 

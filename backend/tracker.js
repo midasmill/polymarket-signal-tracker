@@ -401,41 +401,47 @@ async function trackWallet(wallet) {
 
   const existingTxs = new Set(existingSignals?.map(s => s.tx_hash));
 
-  // 4️⃣ Process positions
-  for (const pos of positions) {
-    const marketId = pos.conditionId;
-    const pickedOutcome = pos.outcome || `OPTION_${pos.outcomeIndex}`;
-    const pnl = pos.cashPnl ?? null;
+// 4️⃣ Process positions
+for (const pos of positions) {
+  const marketId = pos.conditionId;
+  const pickedOutcome = pos.outcome || `OPTION_${pos.outcomeIndex}`;
+  const pnl = pos.cashPnl ?? null;
 
-let outcome, resolvedOutcome;
-({ outcome, resolvedOutcome } = determineOutcome(pos));
+  // ✅ Use determineOutcome function without redeclaring variables
+  const { outcome, resolvedOutcome } = determineOutcome(pos);
 
-    const existingSig = existingSignals.find(s => s.market_id === marketId);
-    if (existingSig) {
-      await supabase
-        .from("signals")
-        .update({ pnl, outcome, resolved_outcome: resolvedOutcome, outcome_at: pnl !== null ? new Date() : null })
-        .eq("id", existingSig.id);
-    } else if (!existingTxs.has(pos.asset)) {
-await supabase.from("signals").insert({
-  wallet_id: wallet.id,
-  signal: pos.title,
-  market_name: pos.title,
-  market_id: pos.conditionId,
-  event_slug: pos.eventSlug || pos.slug,
-  side: pos.side?.toUpperCase() || "BUY",
-  picked_outcome: pickedOutcome,
-  opposite_outcome: pos.oppositeOutcome || null,
-  tx_hash: pos.asset,
-  pnl,
-  outcome,
-  resolved_outcome: resolvedOutcome,
-  outcome_at: pnl !== null ? new Date() : null,
-  win_rate: wallet.win_rate,
-  created_at: new Date(pos.timestamp * 1000 || Date.now()),
-});
-    }
+  const existingSig = existingSignals.find(s => s.market_id === marketId);
+  if (existingSig) {
+    await supabase
+      .from("signals")
+      .update({
+        pnl,
+        outcome,
+        resolved_outcome: resolvedOutcome,
+        outcome_at: pnl !== null ? new Date() : null
+      })
+      .eq("id", existingSig.id);
+  } else if (!existingTxs.has(pos.asset)) {
+    await supabase.from("signals").insert({
+      wallet_id: wallet.id,
+      signal: pos.title,
+      market_name: pos.title,
+      market_id: marketId,
+      event_slug: pos.eventSlug || pos.slug,
+      side: pos.side?.toUpperCase() || "BUY",
+      picked_outcome: pickedOutcome,
+      opposite_outcome: pos.oppositeOutcome || null,
+      tx_hash: pos.asset,
+      pnl,
+      outcome,
+      resolved_outcome: resolvedOutcome,
+      outcome_at: pnl !== null ? new Date() : null,
+      win_rate: wallet.win_rate,
+      created_at: new Date(pos.timestamp * 1000 || Date.now()),
+    });
   }
+}
+
 
   // 5️⃣ Process unresolved trades
   const liveConditionIds = new Set(positions.filter(p => p.cashPnl === null).map(p => p.conditionId));

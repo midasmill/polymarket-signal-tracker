@@ -959,22 +959,6 @@ async function trackerLoop() {
 =========================== */
 async function main() {
   console.log("🚀 POLYMARKET TRACKER LIVE 🚀");
-  try { 
-    await fetchAndInsertLeaderboardWallets(); 
-  } catch (err) { 
-    console.error("Failed to fetch leaderboard wallets:", err.message); 
-  }
-
-  await trackerLoop();
-  setInterval(trackerLoop, POLL_INTERVAL);
-}
-
-
-/* ===========================
-   Main Function
-=========================== */
-async function main() {
-  console.log("🚀 POLYMARKET TRACKER LIVE 🚀");
 
   try {
     await fetchAndInsertLeaderboardWallets();
@@ -982,7 +966,7 @@ async function main() {
     console.error("Failed to fetch leaderboard wallets:", err.message);
   }
 
-  // ✅ Manual reprocess of resolved picks (only if env variable is set)
+  // ✅ Optional: reprocess resolved picks if env flag is set
   if (process.env.REPROCESS === "true") {
     console.log("⚡ REPROCESS flag detected — updating resolved picks...");
     await reprocessResolvedPicks();
@@ -993,6 +977,8 @@ async function main() {
   setInterval(trackerLoop, POLL_INTERVAL);
 }
 
+// Call the main function
+main();
 
 /* ===========================
    Cron daily at 7am

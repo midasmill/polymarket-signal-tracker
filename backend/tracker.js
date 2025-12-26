@@ -1,4 +1,3 @@
-import { createClient } from "@supabase/supabase-js";
 import fetch from "node-fetch";
 import cron from "node-cron";
 import http from "http";
@@ -372,22 +371,22 @@ if (pnl !== null && pos.resolved === true) {
         .update({ pnl, outcome, resolved_outcome: resolvedOutcome, outcome_at: pnl !== null ? new Date() : null })
         .eq("id", existingSig.id);
     } else if (!existingTxs.has(pos.asset)) {
-      await supabase.from("signals").insert({
-        wallet_id: wallet.id,
-        signal: pos.title,
-        market_name: pos.title,
-        market_id: marketId,
-        event_slug: pos.eventSlug || pos.slug,
-        side: pos.side?.toUpperCase() || "BUY",
-        win_rate: wallet.win_rate,
-        picked_outcome: pickedOutcome,
-        tx_hash: pos.asset,
-        pnl,
-        outcome,
-        resolved_outcome: resolvedOutcome,
-        outcome_at: pnl !== null ? new Date() : null,
-        created_at: new Date(pos.timestamp * 1000 || Date.now()),
-      });
+await supabase.from("signals").insert({
+    wallet_id: wallet.id,  // <--- MUST be wallets.id from DB
+    signal: pos.title,
+    market_name: pos.title,
+    market_id: marketId,
+    event_slug: pos.eventSlug || pos.slug,
+    side: pos.side?.toUpperCase() || "BUY",
+    win_rate: wallet.win_rate,
+    picked_outcome: pickedOutcome,
+    tx_hash: pos.asset,
+    pnl,
+    outcome,
+    resolved_outcome: resolvedOutcome,
+    outcome_at: pnl !== null ? new Date() : null,
+    created_at: new Date(pos.timestamp * 1000 || Date.now()),
+});
     }
   }
   // 5️⃣ Process unresolved trades

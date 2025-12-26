@@ -807,7 +807,7 @@ async function rebuildWalletLivePicks() {
     .from("wallets")
     .select("id, win_rate")
     .eq("paused", false)
-    .gte("win_rate", 60);
+    .gte("win_rate", 70);
 
   if (walletsErr) return console.error("Failed to fetch wallets:", walletsErr.message);
   if (!eligibleWallets?.length) {

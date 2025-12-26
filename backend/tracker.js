@@ -841,7 +841,7 @@ async function fetchAndInsertLeaderboardWallets() {
 
         for (const entry of data) {
           const proxyWallet = entry.proxyWallet;
-          if (!proxyWallet || entry.pnl < 100000 || entry.vol >= 2 * entry.pnl) {
+          if (!proxyWallet || entry.pnl < 1000000 || entry.vol >= 2 * entry.pnl) {
             totalSkipped++;
             continue;
           }

@@ -82,6 +82,8 @@ async function fetchMarket(eventSlug) {
     });
     if (!res.ok) return null;
     const market = await res.json();
+    // Skip closed markets
+    if (market.closed) return null;
     marketCache.set(eventSlug, market);
     return market;
   } catch { return null; }
@@ -209,35 +211,32 @@ async function trackWallet(wallet) {
   const allNewSignals = [];
 
   for (const pos of positions) {
-    const txHash = pos.asset;
-    if (existingTxs.has(txHash)) continue;
+  const txHash = pos.asset;
+  if (existingTxs.has(txHash)) continue;
 
-    const pickedOutcome = pos.outcome || `OPTION_${pos.outcomeIndex}`;
-    const market = await fetchMarket(pos.eventSlug || pos.slug);
-    if (!market) continue;
+  const market = await fetchMarket(pos.eventSlug || pos.slug);
+  if (!market) continue; // skip closed or invalid markets
 
-    const resolvedOutcome = market.closed ? pickedOutcome : null;
-    const outcome = market.closed ? pickedOutcome : "Pending";
-
-    allNewSignals.push({
-      wallet_id: wallet.id,
-      signal: pos.title,
-      market_name: pos.title,
-      market_id: pos.conditionId,
-      event_slug: pos.eventSlug || pos.slug,
-      side: pos.side?.toUpperCase() || "BUY",
-      picked_outcome: pickedOutcome,
-      tx_hash: txHash,
-      pnl: pos.cashPnl ?? null,
-      outcome,
-      resolved_outcome: resolvedOutcome,
-      outcome_at: pos.cashPnl !== null ? new Date() : null,
-      win_rate: wallet.win_rate,
-      amount: pos.amount || 0,
-      created_at: new Date(pos.timestamp*1000 || Date.now()),
-      event_start_at: market?.eventStartAt ? new Date(market.eventStartAt) : null,
-    });
-  }
+  const pickedOutcome = pos.outcome || `OPTION_${pos.outcomeIndex}`;
+  allNewSignals.push({
+    wallet_id: wallet.id,
+    signal: pos.title,
+    market_name: pos.title,
+    market_id: pos.conditionId,
+    event_slug: pos.eventSlug || pos.slug,
+    side: pos.side?.toUpperCase() || "BUY",
+    picked_outcome: pickedOutcome,
+    tx_hash: txHash,
+    pnl: pos.cashPnl ?? null,
+    outcome: "Pending",
+    resolved_outcome: null,
+    outcome_at: null,
+    win_rate: wallet.win_rate,
+    amount: pos.amount || 0,
+    created_at: new Date(pos.timestamp*1000 || Date.now()),
+    event_start_at: market?.eventStartAt ? new Date(market.eventStartAt) : null,
+  });
+}
 
   if (allNewSignals.length) {
     await supabase.from("signals").insert(allNewSignals);

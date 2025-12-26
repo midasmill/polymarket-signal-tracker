@@ -18,7 +18,7 @@ const LOSING_STREAK_THRESHOLD = parseInt(process.env.LOSING_STREAK_THRESHOLD || 
 const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "2", 10);
 const FORCE_SEND = process.env.FORCE_SEND === "true";
 
-const WIN_RATE_THRESHOLD = parseInt(process.env.WIN_RATE_THRESHOLD || "70");
+const WIN_RATE_THRESHOLD = parseInt(process.env.WIN_RATE_THRESHOLD || "0");
 
 const CONFIDENCE_THRESHOLDS = {
   "⭐": MIN_WALLETS_FOR_SIGNAL,

@@ -2,10 +2,9 @@
   "name": "midasmill",
   "version": "1.0.0",
   "type": "module",
-  "main": "tracker_cockroach.js",
+  "main": "tracker_supabase.js",
   "scripts": {
-    "start": "node tracker_cockroach.js",
-    "postinstall": "node import_cockroach.js"
+    "start": "node tracker_supabase.js",
   },
   "dependencies": {
     "@ethersproject/solidity": "^5.8.0",
@@ -17,7 +16,6 @@
     "ethers": "^6.16.0",
     "graphql-request": "^6.1.0",
     "keccak256": "^1.0.6",
-    "node-cron": "^4.2.1",
-    "pg": "^8.16.3"
+    "node-cron": "^4.2.1"
   }
 }

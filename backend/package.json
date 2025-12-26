@@ -1,16 +1,12 @@
 {
-  "name": "midasmill",
+  "name": "backend",
   "version": "1.0.0",
   "type": "module",
-  "main": "tracker_supabase.js",
-  "scripts": {
-    "start": "node tracker_supabase.js",
-  },
+  "main": "tracker.js",
   "dependencies": {
     "@ethersproject/solidity": "^5.8.0",
     "@supabase/supabase-js": "^2.89.0",
     "axios": "^1.13.2",
-    "csv-parser": "^3.0.0",
     "date-fns-tz": "^3.2.0",
     "dotenv": "^16.6.1",
     "ethers": "^6.16.0",

@@ -184,7 +184,7 @@ async function fetchAndInsertLeaderboardWallets() {
 =========================== */
 async function trackWallet(wallet) {
   const proxyWallet = wallet.polymarket_proxy_wallet;
-  if (!proxyWallet) return;
+  if (!proxyWallet) return console.warn(`Wallet ${wallet.id} has no proxy, skipping`);
 
   // Auto-unpause if win_rate >= 80%
   if (wallet.paused && wallet.win_rate >= 80) {
@@ -192,51 +192,54 @@ async function trackWallet(wallet) {
   }
 
   // Fetch positions
-  let positions = [];
-  try {
-    let limit = 100, offset = 0;
-    while (true) {
-      const url = `https://data-api.polymarket.com/positions?user=${proxyWallet}&limit=${limit}&offset=${offset}`;
-      const data = await fetchWithRetry(url, { headers: { "User-Agent": "Mozilla/5.0" } });
-      if (!Array.isArray(data) || !data.length) break;
-      positions.push(...data);
-      if (data.length < limit) break;
-      offset += limit;
-    }
-  } catch (err) { console.error(`Failed to fetch positions for wallet ${wallet.id}:`, err.message); }
-
-  const existingSignals = (await supabase.from("signals").select("*").eq("wallet_id", wallet.id)).data || [];
-  const existingTxs = new Set(existingSignals.map(s => s.tx_hash));
+  const positions = await fetchWalletPositions(proxyWallet);
+  if (!positions.length) return;
 
   const allNewSignals = [];
+  const existingSignalsRes = await supabase.from("signals").select("tx_hash, event_slug, picked_outcome").eq("wallet_id", wallet.id);
+  const existingTxs = new Set(existingSignalsRes.data.map(s => s.tx_hash));
 
   for (const pos of positions) {
-  const txHash = pos.asset;
-  if (existingTxs.has(txHash)) continue;
+    if (existingTxs.has(pos.asset)) continue;
 
-  const market = await fetchMarket(pos.eventSlug || pos.slug);
-  if (!market) continue; // skip closed or invalid markets
+    const market = await fetchMarket(pos.eventSlug || pos.slug);
+    if (!market) continue; // skip closed markets
 
-  const pickedOutcome = pos.outcome || `OPTION_${pos.outcomeIndex}`;
-  allNewSignals.push({
-    wallet_id: wallet.id,
-    signal: pos.title,
-    market_name: pos.title,
-    market_id: pos.conditionId,
-    event_slug: pos.eventSlug || pos.slug,
-    side: pos.side?.toUpperCase() || "BUY",
-    picked_outcome: pickedOutcome,
-    tx_hash: txHash,
-    pnl: pos.cashPnl ?? null,
-    outcome: "Pending",
-    resolved_outcome: null,
-    outcome_at: null,
-    win_rate: wallet.win_rate,
-    amount: pos.amount || 0,
-    created_at: new Date(pos.timestamp*1000 || Date.now()),
-    event_start_at: market?.eventStartAt ? new Date(market.eventStartAt) : null,
-  });
-}
+    // Reduce picks to 1 YES / 1 NO max
+    let outcomePick;
+    if (pos.side?.toUpperCase() === "BUY") outcomePick = "YES";
+    else if (pos.side?.toUpperCase() === "SELL") outcomePick = "NO";
+    else continue;
+
+    // Keep only first YES or NO per event
+    const existingEventSignal = allNewSignals.find(s => s.event_slug === pos.eventSlug);
+    if (existingEventSignal) {
+      // Already have one YES and/or NO
+      if (existingEventSignal.picked_outcome === outcomePick) continue; // skip duplicates
+      // Add opposite pick if only one exists → creates tie
+      existingEventSignal.picked_outcome = "TIE";
+      continue;
+    }
+
+    allNewSignals.push({
+      wallet_id: wallet.id,
+      signal: pos.title,
+      market_name: pos.title,
+      market_id: pos.conditionId,
+      event_slug: pos.eventSlug || pos.slug,
+      side: pos.side?.toUpperCase() || "BUY",
+      picked_outcome: outcomePick,
+      tx_hash: pos.asset,
+      pnl: pos.cashPnl ?? null,
+      outcome: "Pending",
+      resolved_outcome: null,
+      outcome_at: null,
+      win_rate: wallet.win_rate,
+      amount: pos.amount || 0,
+      created_at: new Date(pos.timestamp * 1000 || Date.now()),
+      event_start_at: market?.eventStartAt ? new Date(market.eventStartAt) : null,
+    });
+  }
 
   if (allNewSignals.length) {
     await supabase.from("signals").insert(allNewSignals);
@@ -248,38 +251,31 @@ async function trackWallet(wallet) {
    Wallet Live Picks Rebuild
 =========================== */
 async function rebuildWalletLivePicks() {
-  const { data: signals } = await supabase.from("signals").select("*, wallets(id, win_rate)").eq("outcome","Pending").not("picked_outcome","is",null);
+  const { data: signals } = await supabase
+    .from("signals")
+    .select("*, wallets(id, win_rate)")
+    .eq("outcome", "Pending")
+    .not("picked_outcome", "is", null);
+
   if (!signals?.length) return;
 
-  const walletEventMap = new Map();
-  for (const sig of signals) {
-    const key = `${sig.wallet_id}||${sig.event_slug}`;
-    const map = walletEventMap.get(key) || {};
-    map[sig.picked_outcome] = (map[sig.picked_outcome] || 0) + (sig.amount || 0);
-    walletEventMap.set(key, map);
-  }
-
   const livePicksMap = new Map();
-  for (const [key, totals] of walletEventMap.entries()) {
-    const sorted = Object.entries(totals).sort((a,b)=>b[1]-a[1]);
-    if (!sorted.length || (sorted.length>1 && sorted[0][1]===sorted[1][1])) continue;
-    const majorityOutcome = sorted[0][0];
-    const [walletId, eventSlug] = key.split("||");
-    const sig = signals.find(s=>s.wallet_id==walletId && s.event_slug===eventSlug && s.picked_outcome===majorityOutcome);
-    if (!sig) continue;
 
-    const liveKey = `${sig.market_id}||${majorityOutcome}`;
-    const existing = livePicksMap.get(liveKey) || { wallets: [], vote_count: 0 };
-    existing.wallets.push(sig.wallet_id);
-    existing.vote_count++;
-    existing.market_id = sig.market_id;
-    existing.market_name = sig.market_name;
-    existing.event_slug = sig.event_slug;
-    livePicksMap.set(liveKey, existing);
+  for (const sig of signals) {
+    const key = `${sig.market_id}||${sig.picked_outcome}`;
+    if (!livePicksMap.has(key)) {
+      livePicksMap.set(key, { wallets: [], vote_count: 0, market_id: sig.market_id, market_name: sig.market_name, event_slug: sig.event_slug });
+    }
+
+    const entry = livePicksMap.get(key);
+    entry.wallets.push(sig.wallet_id);
+    entry.vote_count++;
   }
 
-  const finalLivePicks = Array.from(livePicksMap.values()).map(p=>({...p,fetched_at:new Date()}));
-  if (finalLivePicks.length) await supabase.from("wallet_live_picks").upsert(finalLivePicks,{onConflict:["market_id","picked_outcome"]});
+  const finalLivePicks = Array.from(livePicksMap.values()).map(p => ({ ...p, fetched_at: new Date() }));
+  if (finalLivePicks.length) {
+    await supabase.from("wallet_live_picks").upsert(finalLivePicks, { onConflict: ["market_id", "picked_outcome"] });
+  }
 }
 
 /* ===========================

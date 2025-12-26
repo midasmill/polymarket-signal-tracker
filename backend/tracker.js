@@ -354,15 +354,19 @@ async function trackWallet(wallet) {
     let outcome = "Pending";
     let resolvedOutcome = null;
 
-if (pnl !== null && pos.resolved === true) {
-  if (pnl > 0) {
+if (pos.resolved === true) {
+  if (pos.cashPnl > 0) {
     outcome = "WIN";
     resolvedOutcome = pickedOutcome;
   } else {
     outcome = "LOSS";
     resolvedOutcome = pos.oppositeOutcome || pickedOutcome;
   }
+} else {
+  outcome = "Pending";
+  resolvedOutcome = null;
 }
+
 
 
 
@@ -519,83 +523,94 @@ const winRate = totalMarkets > 0 ? (marketWins / totalMarkets) * 100 : 0;
 =========================== */
 async function updateWalletMetricsJS() {
   try {
-    const { data: wallets, error: walletsErr } = await supabase.from("wallets").select("id");
+    const { data: wallets, error: walletsErr } = await supabase.from("wallets").select("*");
     if (walletsErr) { console.error("Failed to fetch wallets:", walletsErr); return; }
     if (!wallets?.length) return console.log("No wallets found");
 
-for (const wallet of wallets) {
-  const { data: resolvedSignals } = await supabase
-    .from("signals")
-    .select("market_id, picked_outcome, outcome")
-    .eq("wallet_id", wallet.id)
-    .in("outcome", ["WIN", "LOSS"]);
+    for (const wallet of wallets) {
+      try {
+        // 1️⃣ Fetch resolved signals
+        const { data: resolvedSignals, error: signalsErr } = await supabase
+          .from("signals")
+          .select("market_id, picked_outcome, outcome, created_at")
+          .eq("wallet_id", wallet.id)
+          .in("outcome", ["WIN", "LOSS"])
+          .order("created_at", { ascending: true });
 
-// Aggregate resolved signals per market
-const perMarket = {};
-for (const sig of resolvedSignals) {
-  if (!perMarket[sig.market_id]) perMarket[sig.market_id] = [];
-  perMarket[sig.market_id].push(sig);
-}
+        if (signalsErr) {
+          console.error(`Failed to fetch resolved signals for wallet ${wallet.id}:`, signalsErr);
+          continue; // ✅ valid inside for-of
+        }
 
-let marketWins = 0;
-const totalMarkets = Object.keys(perMarket).length;
+        // 2️⃣ Aggregate per market to handle multiple picks
+        const perMarket = {};
+        for (const sig of resolvedSignals) {
+          if (!perMarket[sig.market_id]) perMarket[sig.market_id] = [];
+          perMarket[sig.market_id].push(sig);
+        }
 
-for (const marketSignals of Object.values(perMarket)) {
-  // Count votes per picked_outcome
-  const counts = {};
-  for (const sig of marketSignals) {
-    if (!sig.picked_outcome) continue;
-    counts[sig.picked_outcome] = (counts[sig.picked_outcome] || 0) + 1;
-  }
+        let marketWins = 0;
+        const totalMarkets = Object.keys(perMarket).length;
 
-  // Determine majority pick
-  const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
-  if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) continue; // tie → skip market
+        for (const marketSignals of Object.values(perMarket)) {
+          // Count votes per picked_outcome
+          const counts = {};
+          for (const sig of marketSignals) {
+            if (!sig.picked_outcome) continue;
+            counts[sig.picked_outcome] = (counts[sig.picked_outcome] || 0) + 1;
+          }
 
-  const majorityPick = sorted[0][0];
-  const majoritySig = marketSignals.find(s => s.picked_outcome === majorityPick);
-  if (!majoritySig) continue;
+          // Determine majority pick
+          const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+          if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) continue; // tie → skip market
 
-  if (majoritySig.outcome === "WIN") marketWins++;
-}
+          const majorityPick = sorted[0][0];
+          const majoritySig = marketSignals.find(s => s.picked_outcome === majorityPick);
+          if (!majoritySig) continue;
 
-// Final win rate per wallet
-const winRate = totalMarkets > 0 ? (marketWins / totalMarkets) * 100 : 0;
+          if (majoritySig.outcome === "WIN") marketWins++;
+        }
 
-}
+        const winRate = totalMarkets > 0 ? (marketWins / totalMarkets) * 100 : 0;
 
-      if (signalsErr) { console.error(`Failed to fetch resolved signals for wallet ${wallet.id}:`, signalsErr); continue; }
-
-      const totalResolved = resolvedSignals?.length || 0;
-      const wins = resolvedSignals?.filter(s => s.outcome === "WIN").length || 0;
-      const winRate = totalResolved > 0 ? (wins / totalResolved) * 100 : 0;
-
-      let losingStreak = 0;
-      if (resolvedSignals?.length) {
+        // 3️⃣ Compute losing streak
+        let losingStreak = 0;
         for (let i = resolvedSignals.length - 1; i >= 0; i--) {
           if (resolvedSignals[i].outcome === "LOSS") losingStreak++;
           else break;
         }
+
+        // 4️⃣ Count live picks
+        const { data: liveSignals, error: liveSignalsErr } = await supabase
+          .from("signals")
+          .select("id")
+          .eq("wallet_id", wallet.id)
+          .eq("outcome", "Pending");
+
+        if (liveSignalsErr) console.error(`Failed to fetch live signals for wallet ${wallet.id}:`, liveSignalsErr.message);
+        const livePicksCount = liveSignals?.length || 0;
+
+        // 5️⃣ Determine paused
+        const paused = losingStreak >= LOSING_STREAK_THRESHOLD || winRate < 80;
+
+        // 6️⃣ Update wallet
+        const { error: updateErr } = await supabase
+          .from("wallets")
+          .update({
+            win_rate: winRate,
+            losing_streak: losingStreak,
+            live_picks: livePicksCount,
+            paused,
+            last_checked: new Date()
+          })
+          .eq("id", wallet.id);
+
+        if (updateErr) console.error(`Wallet ${wallet.id} update failed:`, updateErr);
+        else console.log(`Wallet ${wallet.id} — winRate: ${winRate.toFixed(2)}%, losingStreak: ${losingStreak}, livePicks: ${livePicksCount}, paused: ${paused}`);
+
+      } catch (walletErr) {
+        console.error(`Error processing wallet ${wallet.id}:`, walletErr.message);
       }
-
-      const { data: liveSignals, error: liveSignalsErr } = await supabase
-        .from("signals")
-        .select("id")
-        .eq("wallet_id", wallet.id)
-        .eq("outcome", "Pending");
-
-      if (liveSignalsErr) console.error(`Failed to fetch live signals for wallet ${wallet.id}:`, liveSignalsErr.message);
-
-      const livePicksCount = liveSignals?.length || 0;
-      const paused = losingStreak >= LOSING_STREAK_THRESHOLD || winRate < 80;
-
-      const { error: updateErr } = await supabase
-        .from("wallets")
-        .update({ win_rate: winRate, losing_streak: losingStreak, last_checked: new Date() })
-        .eq("id", wallet.id);
-
-      if (updateErr) console.error(`Wallet ${wallet.id} update failed:`, updateErr);
-      else console.log(`Wallet ${wallet.id} — winRate: ${winRate.toFixed(2)}%, losingStreak: ${losingStreak}, livePicks: ${livePicksCount}, paused: ${paused}`);
     }
 
     console.log("✅ Wallet metrics updated successfully.");
@@ -603,6 +618,7 @@ const winRate = totalMarkets > 0 ? (marketWins / totalMarkets) * 100 : 0;
     console.error("Error updating wallet metrics:", err.message);
   }
 }
+
 /* ===========================
    Send Result Notes
 =========================== */

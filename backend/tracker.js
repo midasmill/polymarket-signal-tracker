@@ -218,6 +218,82 @@ function getPick(sig) {
 }
 
 /* ===========================
+   Resolve wallet event outcome (amount-weighted)
+=========================== */
+async function resolveWalletEventOutcome(walletId, eventSlug) {
+  if (!walletId || !eventSlug) return null;
+
+  const { data: signals, error } = await supabase
+    .from("signals")
+    .select("picked_outcome, amount, outcome")
+    .eq("wallet_id", walletId)
+    .eq("event_slug", eventSlug)
+    .in("outcome", ["WIN", "LOSS"]);
+
+  if (error || !signals?.length) return null;
+
+  // 1️⃣ Sum amount per picked_outcome
+  const totals = {};
+  for (const sig of signals) {
+    if (!sig.picked_outcome) continue;
+    const amt = sig.amount || 0;
+    totals[sig.picked_outcome] = (totals[sig.picked_outcome] || 0) + amt;
+  }
+
+  const sorted = Object.entries(totals).sort((a, b) => b[1] - a[1]);
+
+  // 2️⃣ Tie or invalid → ignore event
+  if (!sorted.length) return null;
+  if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) return null;
+
+  const majorityPick = sorted[0][0];
+
+  // 3️⃣ Find outcome for that majority pick
+  const majoritySignal = signals.find(
+    s => s.picked_outcome === majorityPick
+  );
+
+  if (!majoritySignal) return null;
+
+  return majoritySignal.outcome; // "WIN" or "LOSS"
+}
+
+/* ===========================
+   Count wallet losing events today
+=========================== */
+async function countWalletDailyLosses(walletId, timezone = "UTC") {
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+
+  const endOfDay = new Date();
+  endOfDay.setHours(23, 59, 59, 999);
+
+  // 1️⃣ Get distinct events that resolved today
+  const { data: events, error } = await supabase
+    .from("signals")
+    .select("event_slug")
+    .eq("wallet_id", walletId)
+    .eq("outcome", "LOSS")
+    .gte("outcome_at", startOfDay.toISOString())
+    .lte("outcome_at", endOfDay.toISOString());
+
+  if (error || !events?.length) return 0;
+
+  const uniqueEvents = [...new Set(events.map(e => e.event_slug).filter(Boolean))];
+
+  // 2️⃣ Resolve each event properly
+  let lossCount = 0;
+
+  for (const eventSlug of uniqueEvents) {
+    const result = await resolveWalletEventOutcome(walletId, eventSlug);
+    if (result === "LOSS") lossCount++;
+  }
+
+  return lossCount;
+}
+
+
+/* ===========================
    Format Signal
 =========================== */
 function formatSignal(sig, confidence, emoji, eventType = "Signal Sent") {
@@ -593,96 +669,77 @@ async function trackWallet(wallet) {
   }
 }
 
+/* ===========================
+   Update Wallet Metrics
+=========================== */
 async function updateWalletMetricsJS() {
-  try {
-    const { data: wallets, error: walletsErr } = await supabase.from("wallets").select("*");
-    if (walletsErr) { console.error("Failed to fetch wallets:", walletsErr); return; }
-    if (!wallets?.length) return console.log("No wallets found");
+  console.log("🔄 Updating wallet metrics...");
 
-    for (const wallet of wallets) {
-      try {
-        const { data: resolvedSignals, error: signalsErr } = await supabase
-          .from("signals")
-          .select("market_id, picked_outcome, outcome, created_at")
-          .eq("wallet_id", wallet.id)
-          .in("outcome", ["WIN", "LOSS"])
-          .order("created_at", { ascending: true });
+  const { data: wallets, error: walletsErr } = await supabase
+    .from("wallets")
+    .select("id, paused");
 
-        if (signalsErr) {
-          console.error(`Failed to fetch resolved signals for wallet ${wallet.id}:`, signalsErr);
-          continue;
-        }
-
-        // Aggregate per market
-        const perMarket = {};
-        for (const sig of resolvedSignals) {
-          if (!perMarket[sig.market_id]) perMarket[sig.market_id] = [];
-          perMarket[sig.market_id].push(sig);
-        }
-
-        let marketWins = 0;
-        const totalMarkets = Object.keys(perMarket).length;
-
-        for (const marketSignals of Object.values(perMarket)) {
-          const counts = {};
-          for (const sig of marketSignals) {
-            if (!sig.picked_outcome) continue;
-            counts[sig.picked_outcome] = (counts[sig.picked_outcome] || 0) + 1;
-          }
-
-          const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
-          if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) continue;
-
-          const majorityPick = sorted[0][0];
-          const majoritySig = marketSignals.find(s => s.picked_outcome === majorityPick);
-          if (!majoritySig) continue;
-
-          if (majoritySig.outcome === "WIN") marketWins++;
-        }
-
-        const winRate = totalMarkets > 0 ? (marketWins / totalMarkets) * 100 : 0;
-
-        // Losing streak calculation remains but does not affect pause
-        let losingStreak = 0;
-        for (let i = resolvedSignals.length - 1; i >= 0; i--) {
-          if (resolvedSignals[i].outcome === "LOSS") losingStreak++;
-          else break;
-        }
-
-        const { data: liveSignals, error: liveSignalsErr } = await supabase
-          .from("signals")
-          .select("id")
-          .eq("wallet_id", wallet.id)
-          .eq("outcome", "Pending");
-
-        if (liveSignalsErr) console.error(`Failed to fetch live signals for wallet ${wallet.id}:`, liveSignalsErr.message);
-        const livePicksCount = liveSignals?.length || 0;
-
-        // ✅ Never auto-pause
-        const paused = wallet.paused; 
-
-        const { error: updateErr } = await supabase
-          .from("wallets")
-          .update({
-            win_rate: winRate,
-            losing_streak: losingStreak,
-            live_picks: livePicksCount,
-            paused,
-            last_checked: new Date()
-          })
-          .eq("id", wallet.id);
-
-        if (updateErr) console.error(`Wallet ${wallet.id} update failed:`, updateErr);
-        else console.log(`Wallet ${wallet.id} — winRate: ${winRate.toFixed(2)}%, losingStreak: ${losingStreak}, livePicks: ${livePicksCount}, paused: ${paused}`);
-      } catch (walletErr) {
-        console.error(`Error processing wallet ${wallet.id}:`, walletErr.message);
-      }
-    }
-
-    console.log("✅ Wallet metrics updated successfully.");
-  } catch (err) {
-    console.error("Error updating wallet metrics:", err.message);
+  if (walletsErr || !wallets?.length) {
+    console.error("Failed to fetch wallets:", walletsErr?.message);
+    return;
   }
+
+  for (const wallet of wallets) {
+    try {
+      // 1️⃣ Recalculate WIN / LOSS counts (event-level)
+      const { data: resolvedSignals, error: sigErr } = await supabase
+        .from("signals")
+        .select("event_slug, outcome")
+        .eq("wallet_id", wallet.id)
+        .in("outcome", ["WIN", "LOSS"]);
+
+      if (sigErr) {
+        console.error(`Signals fetch failed for wallet ${wallet.id}`, sigErr.message);
+        continue;
+      }
+
+      const uniqueEvents = [
+        ...new Set(resolvedSignals.map(s => s.event_slug).filter(Boolean)),
+      ];
+
+      let wins = 0;
+      let losses = 0;
+
+      for (const eventSlug of uniqueEvents) {
+        const result = await resolveWalletEventOutcome(wallet.id, eventSlug);
+        if (result === "WIN") wins++;
+        if (result === "LOSS") losses++;
+      }
+
+      const total = wins + losses;
+      const winRate = total > 0 ? Math.round((wins / total) * 100) : 0;
+
+      // 2️⃣ DAILY LOSS PAUSE LOGIC (ONLY RULE)
+      const dailyLosses = await countWalletDailyLosses(wallet.id);
+      const shouldPause = dailyLosses >= 3;
+
+      // 3️⃣ Update wallet
+      await supabase
+        .from("wallets")
+        .update({
+          win_rate: winRate,
+          paused: shouldPause,
+          last_checked: new Date(),
+        })
+        .eq("id", wallet.id);
+
+      if (shouldPause) {
+        console.log(
+          `⏸ Wallet ${wallet.id} paused (lost ${dailyLosses} events today)`
+        );
+      }
+
+    } catch (err) {
+      console.error(`Wallet ${wallet.id} update failed:`, err.message);
+    }
+  }
+
+  console.log("✅ Wallet metrics update complete");
 }
 
 

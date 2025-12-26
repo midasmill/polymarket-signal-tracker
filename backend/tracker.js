@@ -142,11 +142,11 @@ async function countWalletDailyLosses(walletId) {
 }
 
 /* ===========================
-   Fetch Leaderboard Wallets
+   Fetch Leaderboard Wallets (with PnL & volume filters)
 =========================== */
 async function fetchAndInsertLeaderboardWallets() {
   const categories = ["OVERALL","SPORTS"];
-  const periods = ["DAY","WEEK","MONTH","ALL"];
+  const periods = ["DAY","WEEK"];
   for (const cat of categories) {
     for (const period of periods) {
       try {
@@ -156,7 +156,7 @@ async function fetchAndInsertLeaderboardWallets() {
 
         for (const entry of data) {
           const proxyWallet = entry.proxyWallet;
-          if (!proxyWallet) continue;
+          if (!proxyWallet || entry.pnl < 1000000 || entry.vol >= 2 * entry.pnl) continue;
 
           const { data: existing } = await supabase
             .from("wallets")
@@ -167,14 +167,25 @@ async function fetchAndInsertLeaderboardWallets() {
 
           const { data: insertedWallet } = await supabase
             .from("wallets")
-            .insert({ polymarket_proxy_wallet: proxyWallet, polymarket_username: entry.userName || null, last_checked: new Date(), paused: false, losing_streak: 0, win_rate: 0, force_fetch: true })
-            .select("*").single();
+            .insert({
+              polymarket_proxy_wallet: proxyWallet,
+              polymarket_username: entry.userName || null,
+              last_checked: new Date(),
+              paused: false,
+              losing_streak: 0,
+              win_rate: 0,
+              force_fetch: true,
+            })
+            .select("*")
+            .single();
 
           // Track wallet immediately
           await trackWallet(insertedWallet);
         }
 
-      } catch (err) { console.error(`Leaderboard fetch failed (${cat}/${period}):`, err.message); }
+      } catch (err) {
+        console.error(`Leaderboard fetch failed (${cat}/${period}):`, err.message);
+      }
     }
   }
 }

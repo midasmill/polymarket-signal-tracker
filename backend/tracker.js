@@ -900,22 +900,25 @@ async function bulkUnpauseWallets() {
   else console.log(`✅ Bulk unpaused ${data?.length || 0} wallets over threshold`);
 }
 
+let isTrackerRunning = false; // prevents overlapping loops
+
 /* ===========================
    Tracker Loop
 =========================== */
 async function trackerLoop() {
-  try {
-    // 0️⃣ Bulk unpause eligible wallets first
-    await bulkUnpauseWallets();
+  if (isTrackerRunning) {
+    console.log("⏳ Tracker loop already running, skipping this cycle...");
+    return;
+  }
+  isTrackerRunning = true;
 
-    // 1️⃣ Fetch all wallets
-    const { data: wallets, error: walletsErr } = await supabase.from("wallets").select("*");
-    if (walletsErr) return console.error("Failed to fetch wallets:", walletsErr.message);
+  try {
+    const { data: wallets } = await supabase.from("wallets").select("*");
     if (!wallets?.length) return console.log("No wallets found");
 
     console.log(`[${new Date().toISOString()}] Tracking ${wallets.length} wallets...`);
 
-    // 2️⃣ Track each wallet
+    // 1️⃣ Track each wallet
     for (const wallet of wallets) {
       try { 
         await trackWallet(wallet); 
@@ -924,23 +927,27 @@ async function trackerLoop() {
       }
     }
 
-    // 3️⃣ Reprocess resolved picks (optional, based on REPROCESS flag)
-if (process.env.REPROCESS === "true") { 
-  await reprocessResolvedPicks(); 
-}
+    // 2️⃣ Optional: Reprocess resolved picks
+    if (process.env.REPROCESS === "true") {
+      console.log("⚡ REPROCESS flag detected — updating resolved picks...");
+      await reprocessResolvedPicks();
+      console.log("⚡ Finished reprocessing resolved picks.");
+    }
 
-    // 4️⃣ Rebuild wallet_live_picks
+    // 3️⃣ Rebuild live picks
     await rebuildWalletLivePicks();
 
-    // 5️⃣ Update wallet metrics (win rate, losing streak, paused)
+    // 4️⃣ Update wallet metrics
     await updateWalletMetricsJS();
 
-    // 6️⃣ Send majority signals to Telegram / Notes
+    // 5️⃣ Send majority signals
     await sendMajoritySignals();
 
     console.log("✅ Tracker loop completed successfully");
   } catch (err) {
-    console.error("Tracker loop error:", err.message);
+    console.error("Loop error:", err.message);
+  } finally {
+    isTrackerRunning = false;
   }
 }
 
@@ -956,19 +963,16 @@ async function main() {
     console.error("Failed to fetch leaderboard wallets:", err.message);
   }
 
-  // ✅ Optional: reprocess resolved picks if env flag is set
-  if (process.env.REPROCESS === "true") {
-    console.log("⚡ REPROCESS flag detected — updating resolved picks...");
-    await reprocessResolvedPicks();
-    console.log("⚡ Finished reprocessing resolved picks.");
-  }
-
+  // Run tracker loop immediately once
   await trackerLoop();
+
+  // Then schedule periodic execution
   setInterval(trackerLoop, POLL_INTERVAL);
 }
 
-// Call the main function
+// Start the tracker
 main();
+
 
 /* ===========================
    Cron daily at 7am

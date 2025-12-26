@@ -19,6 +19,5 @@
   },
   "scripts": {
     "start": "node tracker_cockroach.js",
-    "postinstall": "node import_cockroach.js"
   }
 }

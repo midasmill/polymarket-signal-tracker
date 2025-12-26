@@ -770,24 +770,31 @@ async function fetchAndInsertLeaderboardWallets() {
 }
 
 /* ===========================
-   Rebuild wallet_live_picks (Safe + Debug)
+   Rebuild wallet_live_picks
 =========================== */
 async function rebuildWalletLivePicks() {
   console.log("Rebuilding wallet_live_picks...");
 
   // 1️⃣ Fetch eligible wallets
-  const { data: eligibleWallets, error: walletErr } = await supabase
+  const { data: eligibleWallets, error: walletsErr } = await supabase
     .from("wallets")
-    .select("id, win_rate")
-    .eq("paused", false)
-    .gte("win_rate", WIN_RATE_THRESHOLD);
+    .select("id, win_rate, paused")
+    .gte("win_rate", WIN_RATE_THRESHOLD)
+    .eq("paused", false);
 
-  if (walletErr) return console.error("Failed to fetch wallets:", walletErr.message);
-  if (!eligibleWallets?.length) return console.log("No eligible wallets to process.");
+  if (walletsErr) {
+    console.error("Failed to fetch wallets:", walletsErr.message);
+    return;
+  }
+
+  if (!eligibleWallets?.length) {
+    console.log("No eligible wallets to process.");
+    return;
+  }
 
   const eligibleIds = eligibleWallets.map(w => w.id);
 
-  // 2️⃣ Fetch unresolved signals
+  // 2️⃣ Fetch unresolved signals from eligible wallets
   const { data: signals, error: signalsErr } = await supabase
     .from("signals")
     .select("*")
@@ -795,19 +802,20 @@ async function rebuildWalletLivePicks() {
     .eq("outcome", "Pending")
     .not("picked_outcome", "is", null);
 
-  if (signalsErr) return console.error("Failed to fetch signals:", signalsErr.message);
-  if (!signals?.length) return console.log("No pending signals found for eligible wallets.");
+  if (signalsErr) {
+    console.error("Failed to fetch signals:", signalsErr.message);
+    return;
+  }
 
-  console.log(`Fetched ${signals.length} pending signals for ${eligibleWallets.length} eligible wallets`);
+  if (!signals?.length) {
+    console.log("No pending signals to process.");
+    return;
+  }
 
-  // 3️⃣ Group signals by wallet + event_slug
+  // 3️⃣ Group by wallet + event to count majority picks per wallet
   const perWalletEvent = {};
   for (const sig of signals) {
-    if (!sig.event_slug) {
-      console.warn(`Skipping signal ${sig.id} — missing event_slug`);
-      continue;
-    }
-
+    if (!sig.event_slug) continue;
     const key = `${sig.wallet_id}||${sig.event_slug}`;
     perWalletEvent[key] ??= {};
     perWalletEvent[key][sig.picked_outcome] = (perWalletEvent[key][sig.picked_outcome] || 0) + 1;
@@ -816,29 +824,30 @@ async function rebuildWalletLivePicks() {
   const livePicks = [];
 
   for (const [key, counts] of Object.entries(perWalletEvent)) {
+    // Determine majority pick for wallet
     const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
-
-    // Debug log
     if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) {
-      console.log(`Skipping ${key} due to tie:`, sorted);
+      console.log(`Skipping wallet/event ${key} due to tie in picks`);
       continue; // tie → skip
     }
 
     const majorityPick = sorted[0][0];
-    const [walletIdRaw, eventSlug] = key.split("||");
-    const walletId = parseInt(walletIdRaw);
+    const [walletIdStr, eventSlug] = key.split("||");
+    const walletId = parseInt(walletIdStr);
 
-    // Find matching signal safely with type-insensitive comparison
+    // Find the first signal matching wallet+event+majorityPick
     const sig = signals.find(s =>
-      s.wallet_id == walletId &&
+      s.wallet_id === walletId &&
       s.event_slug === eventSlug &&
       s.picked_outcome === majorityPick
     );
 
     if (!sig) {
-      console.warn(`No signal found for wallet ${walletId}, event ${eventSlug}, majorityPick ${majorityPick}`);
+      console.log(`No matching signal found for wallet ${walletId}, event ${eventSlug}, pick ${majorityPick}`);
       continue;
     }
+
+    console.log("Adding live pick:", walletId, sig.event_slug, majorityPick);
 
     livePicks.push({
       wallet_id: walletId,
@@ -851,7 +860,7 @@ async function rebuildWalletLivePicks() {
       outcome: sig.outcome,
       resolved_outcome: sig.resolved_outcome,
       fetched_at: new Date(),
-      vote_count: 1, // placeholder, will count across wallets next
+      vote_count: 1, // will be aggregated next
       win_rate: sig.win_rate || 0
     });
   }
@@ -879,7 +888,6 @@ async function rebuildWalletLivePicks() {
 
   console.log(`✅ Rebuilt wallet_live_picks (${finalLivePicks.length})`);
 }
-
 
 
 /* ===========================

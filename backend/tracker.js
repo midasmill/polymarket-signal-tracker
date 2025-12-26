@@ -266,53 +266,50 @@ function determineOutcome(pos) {
 }
 
 /* ===========================
-   Reprocess All Resolved Picks
+   Reprocess resolved picks
 =========================== */
 async function reprocessResolvedPicks() {
   console.log("🔄 Reprocessing all resolved picks...");
 
   try {
-    // Fetch all signals that are WIN or LOSS
-    const { data: resolvedSignals, error } = await supabase
-      .from("signals")
-      .select("*")
-      .in("outcome", ["WIN", "LOSS"]);
+    const { data: wallets, error: walletsErr } = await supabase.from("wallets").select("id, polymarket_proxy_wallet");
+    if (walletsErr) return console.error("Failed to fetch wallets:", walletsErr.message);
+    if (!wallets?.length) return console.log("No wallets found for reprocessing.");
 
-    if (error) return console.error("Failed to fetch resolved signals:", error.message);
-    if (!resolvedSignals?.length) return console.log("No resolved signals to process.");
+    for (const wallet of wallets) {
+      if (!wallet.polymarket_proxy_wallet) continue;
 
-    let updatedCount = 0;
+      const positions = await fetchWalletPositions(wallet.polymarket_proxy_wallet);
 
-    for (const sig of resolvedSignals) {
-      const pos = await fetchWalletPosition(sig.wallet_id, sig.tx_hash); // fetch position by wallet + tx_hash
-      if (!pos) continue;
+      for (const pos of positions) {
+        const marketId = pos.conditionId;
+        const pickedOutcome = pos.outcome || `OPTION_${pos.outcomeIndex}`;
+        const pnl = pos.cashPnl ?? null;
 
-      let outcome, resolvedOutcome;
-      if (pos.resolved === true) {
-        if (pos.cashPnl > 0) {
-          outcome = "WIN";
-          resolvedOutcome = pos.outcome || `OPTION_${pos.outcomeIndex}`;
-        } else {
-          outcome = "LOSS";
-          resolvedOutcome = pos.oppositeOutcome || (pos.outcome || `OPTION_${pos.outcomeIndex}`);
+        let outcome = "Pending";
+        let resolvedOutcome = null;
+
+        // ✅ Updated resolution logic
+        if (pos.resolved === true) {
+          if (pos.cashPnl > 0) {
+            outcome = "WIN";
+            resolvedOutcome = pickedOutcome;
+          } else {
+            outcome = "LOSS";
+            resolvedOutcome = pos.oppositeOutcome || pickedOutcome;
+          }
         }
-      } else {
-        outcome = "Pending";
-        resolvedOutcome = null;
-      }
 
-      // Only update if outcome has changed
-      if (sig.outcome !== outcome || sig.resolved_outcome !== resolvedOutcome) {
+        // Update signal in DB if it exists
         await supabase
           .from("signals")
-          .update({ outcome, resolved_outcome: resolvedOutcome, outcome_at: pos.cashPnl !== null ? new Date() : null })
-          .eq("id", sig.id);
-
-        updatedCount++;
+          .update({ pnl, outcome, resolved_outcome: resolvedOutcome, outcome_at: pnl !== null ? new Date() : null })
+          .eq("wallet_id", wallet.id)
+          .eq("market_id", marketId);
       }
     }
 
-    console.log(`✅ Reprocessed resolved picks. Updated ${updatedCount} signals.`);
+    console.log("⚡ Finished reprocessing resolved picks.");
   } catch (err) {
     console.error("Error reprocessing resolved picks:", err.message);
   }

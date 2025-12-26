@@ -3,21 +3,21 @@
   "version": "1.0.0",
   "type": "module",
   "main": "tracker_cockroach.js",
+  "scripts": {
+    "start": "node tracker_cockroach.js",
+    "postinstall": "node import_cockroach.js"
+  },
   "dependencies": {
     "@ethersproject/solidity": "^5.8.0",
     "@supabase/supabase-js": "^2.89.0",
     "axios": "^1.13.2",
+    "csv-parser": "^3.0.0",
     "date-fns-tz": "^3.2.0",
     "dotenv": "^16.6.1",
     "ethers": "^6.16.0",
     "graphql-request": "^6.1.0",
     "keccak256": "^1.0.6",
     "node-cron": "^4.2.1",
-    "pg": "^8.16.3",
-    "csv-parser": "^3.0.0",
-    "fs": "^0.0.2"
-  },
-  "scripts": {
-    "start": "node tracker_cockroach.js",
+    "pg": "^8.16.3"
   }
 }

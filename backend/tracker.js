@@ -375,6 +375,7 @@ async function trackWallet(wallet) {
     console.log(`Wallet ${wallet.id} auto-unpaused (winRate=${wallet.win_rate.toFixed(2)}%)`);
   }
 
+  // Skip if still paused and not force_fetch
   if (wallet.paused && !wallet.force_fetch) return;
 
   // 1️⃣ Fetch positions
@@ -401,47 +402,46 @@ async function trackWallet(wallet) {
 
   const existingTxs = new Set(existingSignals?.map(s => s.tx_hash));
 
-// 4️⃣ Process positions
-for (const pos of positions) {
-  const marketId = pos.conditionId;
-  const pickedOutcome = pos.outcome || `OPTION_${pos.outcomeIndex}`;
-  const pnl = pos.cashPnl ?? null;
+  // 4️⃣ Process positions
+  for (const pos of positions) {
+    const marketId = pos.conditionId;
+    const pickedOutcome = pos.outcome || `OPTION_${pos.outcomeIndex}`;
+    const pnl = pos.cashPnl ?? null;
 
-  // ✅ Correct usage: destructure outcome once as const
-  const { outcome, resolvedOutcome } = determineOutcome(pos);
+    // ✅ Correct destructuring for outcome/resolvedOutcome
+    const { outcome, resolvedOutcome } = determineOutcome(pos);
 
-  const existingSig = existingSignals.find(s => s.market_id === marketId);
-  if (existingSig) {
-    await supabase
-      .from("signals")
-      .update({
+    const existingSig = existingSignals.find(s => s.market_id === marketId);
+    if (existingSig) {
+      await supabase
+        .from("signals")
+        .update({
+          pnl,
+          outcome,
+          resolved_outcome: resolvedOutcome,
+          outcome_at: pnl !== null ? new Date() : null
+        })
+        .eq("id", existingSig.id);
+    } else if (!existingTxs.has(pos.asset)) {
+      await supabase.from("signals").insert({
+        wallet_id: wallet.id,
+        signal: pos.title,
+        market_name: pos.title,
+        market_id: marketId,
+        event_slug: pos.eventSlug || pos.slug,
+        side: pos.side?.toUpperCase() || "BUY",
+        picked_outcome: pickedOutcome,
+        opposite_outcome: pos.oppositeOutcome || null,
+        tx_hash: pos.asset,
         pnl,
         outcome,
         resolved_outcome: resolvedOutcome,
-        outcome_at: pnl !== null ? new Date() : null
-      })
-      .eq("id", existingSig.id);
-  } else if (!existingTxs.has(pos.asset)) {
-    await supabase.from("signals").insert({
-      wallet_id: wallet.id,
-      signal: pos.title,
-      market_name: pos.title,
-      market_id: marketId,
-      event_slug: pos.eventSlug || pos.slug,
-      side: pos.side?.toUpperCase() || "BUY",
-      picked_outcome: pickedOutcome,
-      opposite_outcome: pos.oppositeOutcome || null,
-      tx_hash: pos.asset,
-      pnl,
-      outcome,
-      resolved_outcome: resolvedOutcome,
-      outcome_at: pnl !== null ? new Date() : null,
-      win_rate: wallet.win_rate,
-      created_at: new Date(pos.timestamp * 1000 || Date.now()),
-    });
+        outcome_at: pnl !== null ? new Date() : null,
+        win_rate: wallet.win_rate,
+        created_at: new Date(pos.timestamp * 1000 || Date.now()),
+      });
+    }
   }
-}
-
 
   // 5️⃣ Process unresolved trades
   const liveConditionIds = new Set(positions.filter(p => p.cashPnl === null).map(p => p.conditionId));
@@ -482,17 +482,16 @@ for (const pos of positions) {
   }
 
   // 6️⃣ Compute wallet metrics
-  const { data: resolvedSignals } = await supabase
+  let { data: resolvedSignals } = await supabase
     .from("signals")
     .select("market_id, picked_outcome, outcome, created_at")
     .eq("wallet_id", wallet.id)
     .in("outcome", ["WIN", "LOSS"])
     .order("created_at", { ascending: true });
 
-  // Guard: resolvedSignals might be empty
-  if (!resolvedSignals?.length) resolvedSignals = [];
+  resolvedSignals = resolvedSignals || [];
 
-  // Aggregate resolved signals per market
+  // Aggregate per market
   const perMarket = {};
   for (const sig of resolvedSignals) {
     if (!sig.market_id) continue;
@@ -511,7 +510,7 @@ for (const pos of positions) {
     }
 
     const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
-    if (!sorted.length) continue; // <-- SAFE GUARD
+    if (!sorted.length) continue; // safeguard
     if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) continue; // tie → skip
 
     const majorityPick = sorted[0][0];
@@ -531,7 +530,7 @@ for (const pos of positions) {
     .eq("outcome", "Pending");
 
   // 8️⃣ Determine pause status
-  let pausedStatus = wallet.force_fetch
+  const pausedStatus = wallet.force_fetch
     ? wallet.paused
     : (winRate < WIN_RATE_THRESHOLD || (resolvedSignals?.length && resolvedSignals[resolvedSignals.length - 1].outcome === "LOSS"));
 
@@ -539,7 +538,7 @@ for (const pos of positions) {
   await supabase
     .from("wallets")
     .update({
-      losing_streak: resolvedSignals?.filter(s => s.outcome === "LOSS").length || 0,
+      losing_streak: resolvedSignals.filter(s => s.outcome === "LOSS").length || 0,
       win_rate: winRate,
       live_picks: livePicksCount,
       paused: pausedStatus,
@@ -551,10 +550,9 @@ for (const pos of positions) {
     await supabase.from("wallets").update({ force_fetch: false }).eq("id", wallet.id);
   }
 
-  console.log(
-    `Wallet ${wallet.id} — winRate: ${winRate.toFixed(2)}%, livePicks: ${livePicksCount}, paused: ${pausedStatus}`
-  );
+  console.log(`Wallet ${wallet.id} — winRate: ${winRate.toFixed(2)}%, livePicks: ${livePicksCount}, paused: ${pausedStatus}`);
 }
+
 
 
 /* ===========================

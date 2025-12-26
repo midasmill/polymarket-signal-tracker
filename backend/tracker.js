@@ -823,7 +823,7 @@ async function sendMajoritySignals() {
    Leaderboard Wallets
 =========================== */
 async function fetchAndInsertLeaderboardWallets() {
-  const categories = ["OVERALL","POLITICS","SPORTS","CRYPTO","CULTURE","MENTIONS","WEATHER","ECONOMICS","TECH","FINANCE"];
+  const categories = ["OVERALL","SPORTS"];
   const timePeriods = ["DAY", "WEEK", "MONTH", "ALL"];
   let totalFetched = 0, totalInserted = 0, totalSkipped = 0;
 

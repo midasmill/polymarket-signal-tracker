@@ -121,21 +121,35 @@ async function fetchLatestTrades(user) {
   }
 }
 
+const marketCache = new Map();
+
 async function fetchMarket(eventSlug) {
   if (!eventSlug) return null;
   if (marketCache.has(eventSlug)) return marketCache.get(eventSlug);
 
-  const url = `https://data-api.polymarket.com/events/${eventSlug}`;
+  const url = `https://gamma-api.polymarket.com/markets/slug/${eventSlug}`;
+
   try {
-    const market = await fetchWithRetry(url, { headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" } });
+    const res = await fetch(url, {
+      headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
+    });
+
+    if (!res.ok) {
+      if (res.status === 404) console.log(`Market ${eventSlug} not found (404)`);
+      else console.error(`Market fetch error (${eventSlug}): HTTP ${res.status}`);
+      return null;
+    }
+
+    const market = await res.json();
     if (market) marketCache.set(eventSlug, market);
     return market;
   } catch (err) {
-    if (err.message.includes("404")) console.log(`Market ${eventSlug} not found (404)`);
-    else console.error(`Market fetch error (${eventSlug}):`, err.message);
+    console.error(`Market fetch error (${eventSlug}):`, err.message);
     return null;
   }
 }
+
+
 
 /* ===========================
    Confidence helpers
@@ -462,7 +476,7 @@ async function fetchWalletPositions(userId) {
 }
 
 /* ===========================
-   Optimized trackWallet
+   Optimized trackWallet (Gamma API)
 =========================== */
 async function trackWallet(wallet) {
   const proxyWallet = wallet.polymarket_proxy_wallet;
@@ -471,50 +485,56 @@ async function trackWallet(wallet) {
     return;
   }
 
+  // Auto-unpause if win_rate >= 80%
+  if (wallet.paused && wallet.win_rate >= 80) {
+    await supabase.from("wallets").update({ paused: false }).eq("id", wallet.id);
+  }
+
   // 1️⃣ Fetch positions & trades concurrently
   const [positions, trades] = await Promise.all([
     fetchWalletPositions(proxyWallet),
-    fetchLatestTrades(proxyWallet)
+    fetchLatestTrades(proxyWallet),
   ]);
 
   const positionMap = new Map(positions.map(p => [p.asset, p]));
   const liveConditionIds = new Set(positions.filter(p => p.cashPnl === null).map(p => p.conditionId));
 
-  const { data: existingSignals } = await supabase
+  const { data: existingSignals = [] } = await supabase
     .from("signals")
     .select("*")
     .eq("wallet_id", wallet.id);
 
   const existingTxs = new Set(existingSignals.map(s => s.tx_hash));
-  const signalMap = new Map(existingSignals.map(s => [`${s.tx_hash}`, s]));
-
-  const newSignals = [];
+  const allNewSignals = [];
 
   // 2️⃣ Process positions
   for (const pos of positions) {
     const txHash = pos.asset;
     const pickedOutcome = pos.outcome || `OPTION_${pos.outcomeIndex}`;
-    const pnl = pos.cashPnl ?? null;
 
-    // Market check
+    // Fetch market via Gamma API
     const market = await fetchMarket(pos.eventSlug || pos.slug);
-    if (!market || (market.status !== "OPEN" && market.status !== "RESOLVED")) continue;
-    if (market.status === "RESOLVED" && typeof pos.cashPnl !== "number") continue;
+    if (!market) continue;
 
-    const { outcome, resolvedOutcome } = determineOutcome(pos);
+    if (!market.active && !market.closed) continue; // skip markets not open/resolved
 
-    if (signalMap.has(txHash)) {
+    const resolvedOutcome = market.closed ? pickedOutcome : null;
+    const outcome = market.closed ? pickedOutcome : "Pending";
+
+    const existingSig = existingSignals.find(s => s.tx_hash === txHash);
+
+    if (existingSig) {
       await supabase
         .from("signals")
         .update({
-          pnl,
+          pnl: pos.cashPnl ?? null,
           outcome,
           resolved_outcome: resolvedOutcome,
-          outcome_at: pnl !== null ? new Date() : null
+          outcome_at: pos.cashPnl !== null ? new Date() : null,
         })
-        .eq("id", signalMap.get(txHash).id);
+        .eq("id", existingSig.id);
     } else if (!existingTxs.has(txHash)) {
-      newSignals.push({
+      allNewSignals.push({
         wallet_id: wallet.id,
         signal: pos.title,
         market_name: pos.title,
@@ -522,12 +542,11 @@ async function trackWallet(wallet) {
         event_slug: pos.eventSlug || pos.slug,
         side: pos.side?.toUpperCase() || "BUY",
         picked_outcome: pickedOutcome,
-        opposite_outcome: pos.oppositeOutcome || null,
         tx_hash: txHash,
-        pnl,
+        pnl: pos.cashPnl ?? null,
         outcome,
         resolved_outcome: resolvedOutcome,
-        outcome_at: pnl !== null ? new Date() : null,
+        outcome_at: pos.cashPnl !== null ? new Date() : null,
         win_rate: wallet.win_rate,
         amount: pos.amount || 0,
         created_at: new Date(pos.timestamp * 1000 || Date.now()),
@@ -540,13 +559,14 @@ async function trackWallet(wallet) {
     const txHash = trade.asset;
     if (!liveConditionIds.has(trade.conditionId)) continue;
     if (existingTxs.has(txHash)) continue;
+
     const pos = positionMap.get(txHash);
     if (pos && typeof pos.cashPnl === "number") continue;
 
     const market = await fetchMarket(trade.eventSlug || trade.slug);
-    if (!market || market.status !== "OPEN") continue;
+    if (!market || !market.active) continue; // only active markets
 
-    newSignals.push({
+    allNewSignals.push({
       wallet_id: wallet.id,
       signal: trade.title,
       market_name: trade.title,
@@ -565,12 +585,11 @@ async function trackWallet(wallet) {
     });
   }
 
-  if (newSignals.length) {
-    await supabase.from("signals").insert(newSignals);
-    console.log(`Inserted ${newSignals.length} new signals for wallet ${wallet.id}`);
+  if (allNewSignals.length) {
+    await supabase.from("signals").insert(allNewSignals);
+    console.log(`Inserted ${allNewSignals.length} new signals for wallet ${wallet.id}`);
   }
 }
-
 
 /* ===========================
    Update Wallet Metrics
@@ -645,7 +664,6 @@ await supabase
 
   console.log("✅ Wallet metrics update complete");
 }
-
 
 /* ===========================
    Send Result Notes
@@ -736,7 +754,6 @@ async function sendMajoritySignals(batchSize = 5, batchDelay = 1000) {
   console.log(`✅ All majority signals sent (${signalsToSend.length} picks)`);
 }
 
-
 /* ===========================
    Leaderboard Wallets
 =========================== */
@@ -801,8 +818,9 @@ async function fetchAndInsertLeaderboardWallets() {
 }
 
 /* ===========================
-   Concurrent Tracker Loop
+   Tracker loop
 =========================== */
+
 let isTrackerRunning = false;
 
 async function trackerLoop() {
@@ -819,7 +837,20 @@ async function trackerLoop() {
 
     console.log(`[${new Date().toISOString()}] Tracking ${wallets.length} wallets concurrently...`);
 
-    // 1️⃣ Track wallets concurrently
+    // ✅ Shared market cache for this loop
+    const marketCache = new Map();
+
+    // Wrap original fetchMarket to use shared cache
+    const originalFetchMarket = fetchMarket;
+    fetchMarket = async (eventSlug) => {
+      if (!eventSlug) return null;
+      if (marketCache.has(eventSlug)) return marketCache.get(eventSlug);
+      const market = await originalFetchMarket(eventSlug);
+      if (market) marketCache.set(eventSlug, market);
+      return market;
+    };
+
+    // Track wallets concurrently
     const walletPromises = wallets.map(wallet =>
       trackWallet(wallet).catch(err =>
         console.error(`Error tracking wallet ${wallet.id}:`, err.message)
@@ -828,20 +859,20 @@ async function trackerLoop() {
 
     await Promise.allSettled(walletPromises);
 
-    // 2️⃣ Optional: Reprocess resolved picks
+    // Optional: reprocess resolved picks
     if (process.env.REPROCESS === "true") {
       console.log("⚡ REPROCESS flag detected — updating resolved picks...");
       await reprocessResolvedPicks();
       console.log("⚡ Finished reprocessing resolved picks.");
     }
 
-    // 3️⃣ Rebuild live picks
+    // Rebuild live picks
     await rebuildWalletLivePicks();
 
-    // 4️⃣ Update wallet metrics
+    // Update wallet metrics
     await updateWalletMetricsJS();
 
-    // 5️⃣ Send majority signals
+    // Send majority signals
     await sendMajoritySignals();
 
     console.log("✅ Tracker loop completed successfully");
@@ -851,7 +882,6 @@ async function trackerLoop() {
     isTrackerRunning = false;
   }
 }
-
 
 /* ===========================
    Main Function

@@ -1,5 +1,5 @@
 {
-  "name": "backend",
+  "name": "midasmill",
   "version": "1.0.0",
   "type": "module",
   "main": "tracker_cockroach.js",
@@ -13,9 +13,10 @@
     "graphql-request": "^6.1.0",
     "keccak256": "^1.0.6",
     "node-cron": "^4.2.1"
+  },
+  "scripts": {
+    "start": "node tracker_cockroach.js",
+    "postinstall": "node import_cockroach.js",
+    "import-cockroach": "node import_cockroach.js"
   }
-}
-"scripts": {
-  "start": "node tracker_cockroach.js",
-  "postinstall": "node import_cockroach.js"
 }

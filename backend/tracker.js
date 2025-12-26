@@ -245,25 +245,25 @@ async function updateNotes(slug, text) {
 }
 
 /* ===========================
-   Resolution Helper
+   Determine outcome of a position
 =========================== */
 function determineOutcome(pos) {
-  if (!pos) return { outcome: "Pending", resolvedOutcome: null };
+  let outcome = "Pending";
+  let resolvedOutcome = null;
 
-  // Only resolve if the position is actually marked resolved
   if (pos.resolved === true) {
-    const pickedOutcome = pos.outcome || `OPTION_${pos.outcomeIndex}`;
-    if (typeof pos.cashPnl === "number") {
-      if (pos.cashPnl > 0) {
-        return { outcome: "WIN", resolvedOutcome: pickedOutcome };
-      } else {
-        return { outcome: "LOSS", resolvedOutcome: pos.oppositeOutcome || pickedOutcome };
-      }
+    if (pos.cashPnl > 0) {
+      outcome = "WIN";
+      resolvedOutcome = pos.outcome || `OPTION_${pos.outcomeIndex}`;
+    } else {
+      outcome = "LOSS";
+      resolvedOutcome = pos.oppositeOutcome || (pos.outcome || `OPTION_${pos.outcomeIndex}`);
     }
   }
 
-  return { outcome: "Pending", resolvedOutcome: null };
+  return { outcome, resolvedOutcome };
 }
+
 
 /* ===========================
    Reprocess resolved picks

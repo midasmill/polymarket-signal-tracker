@@ -1,6 +1,6 @@
+import csv from "csv-parser"; // correct for ESM
 import fs from "fs";
 import path from "path";
-import csvParser from "csv-parser";
 import pkg from "pg";
 const { Pool } = pkg;
 

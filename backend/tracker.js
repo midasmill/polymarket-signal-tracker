@@ -245,6 +245,27 @@ async function updateNotes(slug, text) {
 }
 
 /* ===========================
+   Resolution Helper
+=========================== */
+function determineOutcome(pos) {
+  if (!pos) return { outcome: "Pending", resolvedOutcome: null };
+
+  // Only resolve if the position is actually marked resolved
+  if (pos.resolved === true) {
+    const pickedOutcome = pos.outcome || `OPTION_${pos.outcomeIndex}`;
+    if (typeof pos.cashPnl === "number") {
+      if (pos.cashPnl > 0) {
+        return { outcome: "WIN", resolvedOutcome: pickedOutcome };
+      } else {
+        return { outcome: "LOSS", resolvedOutcome: pos.oppositeOutcome || pickedOutcome };
+      }
+    }
+  }
+
+  return { outcome: "Pending", resolvedOutcome: null };
+}
+
+/* ===========================
    Reprocess All Resolved Picks
 =========================== */
 async function reprocessResolvedPicks() {
@@ -414,15 +435,7 @@ async function trackWallet(wallet) {
     let outcome = "Pending";
     let resolvedOutcome = null;
 
-    if (pos.resolved === true) {
-      if (pos.cashPnl > 0) {
-        outcome = "WIN";
-        resolvedOutcome = pickedOutcome;
-      } else {
-        outcome = "LOSS";
-        resolvedOutcome = pos.oppositeOutcome || pickedOutcome;
-      }
-    }
+const { outcome, resolvedOutcome } = determineOutcome(pos);
 
     const existingSig = existingSignals.find(s => s.market_id === marketId);
     if (existingSig) {

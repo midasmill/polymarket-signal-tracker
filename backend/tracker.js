@@ -1,4 +1,6 @@
-import { createClient } from "@supabase/supabase-js";
+import pkg from "pg";
+const { Pool } = pkg;
+
 import fetch from "node-fetch";
 import cron from "node-cron";
 import http from "http";

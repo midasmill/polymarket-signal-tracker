@@ -921,13 +921,24 @@ async function trackerLoop() {
 
     console.log(`[${new Date().toISOString()}] Tracking ${wallets.length} wallets...`);
 
+    // 1️⃣ Track each wallet normally
     for (const wallet of wallets) {
       try { await trackWallet(wallet); } 
       catch (err) { console.error(`Error tracking wallet ${wallet.id}:`, err.message); }
     }
 
+    // 2️⃣ Reprocess resolved picks before updating metrics
+    if (process.env.REPROCESS) {  // optional flag
+      await reprocessResolvedPicks();
+    }
+
+    // 3️⃣ Rebuild live picks
     await rebuildWalletLivePicks();
+
+    // 4️⃣ Update wallet metrics (win rate, losing streak, paused)
     await updateWalletMetricsJS();
+
+    // 5️⃣ Send majority signals to Telegram / Notes
     await sendMajoritySignals();
 
     console.log("✅ Tracker loop completed successfully");
@@ -935,6 +946,7 @@ async function trackerLoop() {
     console.error("Loop error:", err.message);
   }
 }
+
 
 /* ===========================
    Main Function

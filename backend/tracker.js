@@ -45,6 +45,21 @@ process.on("uncaughtException", err => {
 });
 
 /* ===========================
+   Get Eligible Wallets
+=========================== */
+async function getEligibleWallets(minWinRate = 80) {
+  const { data, error } = await supabase
+    .from("wallets")
+    .select("id, win_rate")
+    .eq("paused", false)
+    .gte("win_rate", minWinRate);
+
+  if (error || !data?.length) return [];
+  return data;
+}
+
+
+/* ===========================
    Markdown helper
 =========================== */
 function toBlockquote(text) {
@@ -137,7 +152,6 @@ async function getMarketVoteCounts(marketId) {
     .select("wallet_id, side, picked_outcome, event_slug")
     .eq("market_id", marketId)
     .eq("outcome", "Pending")
-    .gte("win_rate", 80)
     .not("picked_outcome", "is", null);
 
   if (error || !signals?.length) return {};
@@ -339,10 +353,17 @@ async function trackWallet(wallet) {
     let outcome = "Pending";
     let resolvedOutcome = null;
 
-    if (pnl !== null) {
-      if (pnl > 0) { outcome = "WIN"; resolvedOutcome = pickedOutcome; }
-      else { outcome = "LOSS"; resolvedOutcome = pos.oppositeOutcome || pickedOutcome; }
-    }
+if (pnl !== null && pos.resolved === true) {
+  if (pnl > 0) {
+    outcome = "WIN";
+    resolvedOutcome = pickedOutcome;
+  } else {
+    outcome = "LOSS";
+    resolvedOutcome = pos.oppositeOutcome || pickedOutcome;
+  }
+}
+
+
 
     const existingSig = existingSignals.find(s => s.market_id === marketId);
     if (existingSig) {
@@ -536,43 +557,56 @@ async function sendResultNotes(sig, result) {
    Send Majority Signals
 =========================== */
 async function sendMajoritySignals() {
-  const { data: markets } = await supabase.from("signals").select("market_id", { distinct: true });
-  if (!markets?.length) return;
+  const { data: livePicks, error } = await supabase
+    .from("wallet_live_picks")
+    .select("*")
+    .eq("outcome", "Pending");
 
-  for (const { market_id } of markets) {
-    const { data: signals } = await supabase
-      .from("signals")
-      .select("*")
-      .gte("win_rate", 80)
-      .eq("outcome", "Pending")
-      .not("picked_outcome", "is", null);
+  if (error || !livePicks?.length) return;
 
-    if (!signals || signals.length < MIN_WALLETS_FOR_SIGNAL) continue;
+  const grouped = {};
 
-    const perWalletPick = {};
-    for (const sig of signals) perWalletPick[sig.wallet_id] = sig.picked_outcome;
+  // group by market + outcome
+  for (const pick of livePicks) {
+    const key = `${pick.market_id}||${pick.picked_outcome}`;
+    grouped[key] ??= [];
+    grouped[key].push(pick);
+  }
 
-    const pickCounts = {};
-    for (const pick of Object.values(perWalletPick)) pickCounts[pick] = (pickCounts[pick] || 0) + 1;
+  for (const group of Object.values(grouped)) {
+    const walletCount = group.length;
+    if (walletCount < 2) continue; // confidence threshold
 
-    const sorted = Object.entries(pickCounts).sort((a, b) => b[1] - a[1]);
-    if (!sorted.length) continue;
-    if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) continue;
-
-    const [majorityPick, walletCount] = sorted[0];
-    if (walletCount < MIN_WALLETS_FOR_SIGNAL) continue;
-
-    const sig = signals.find(s => s.picked_outcome === majorityPick);
-    if (!sig || (!FORCE_SEND && sig.signal_sent_at)) continue;
-
+    const sig = group[0];
     const confidence = getConfidenceEmoji(walletCount);
-    const emoji = RESULT_EMOJIS[sig.outcome] || "⚪";
-    const text = formatSignal({ ...sig, side: majorityPick }, confidence, emoji, "Signal Sent");
+
+    const text = `
+📊 *Polymarket Signal*
+${confidence}
+
+Market: ${sig.market_name}
+Pick: ${sig.picked_outcome}
+Wallets: ${walletCount}
+    `.trim();
+
+    // 🚫 prevent duplicate sends
+    const { data: sent } = await supabase
+      .from("signals")
+      .select("id")
+      .eq("market_id", sig.market_id)
+      .not("signal_sent_at", "is", null)
+      .limit(1);
+
+    if (sent?.length) continue;
 
     await sendTelegram(text);
     await updateNotes("polymarket-millionaires", text);
 
-    await supabase.from("signals").update({ signal_sent_at: new Date() }).eq("market_id", market_id);
+    // mark signal sent
+    await supabase
+      .from("signals")
+      .update({ signal_sent_at: new Date() })
+      .eq("market_id", sig.market_id);
   }
 }
 
@@ -645,55 +679,75 @@ async function fetchAndInsertLeaderboardWallets() {
 async function rebuildWalletLivePicks() {
   console.log("Rebuilding wallet_live_picks...");
 
+  const eligibleWallets = await getEligibleWallets(80);
+  if (!eligibleWallets.length) {
+    console.log("No eligible wallets");
+    return;
+  }
+
+  const eligibleWalletIds = eligibleWallets.map(w => w.id);
+
   const { data: signals, error } = await supabase
     .from("signals")
     .select("*")
     .eq("outcome", "Pending")
     .not("picked_outcome", "is", null)
-    .gte("win_rate", 80);
+    .in("wallet_id", eligibleWalletIds);
 
-  if (error) return console.error("Failed to fetch signals:", error.message);
-  if (!signals?.length) return console.log("No pending signals to process.");
+  if (error || !signals?.length) {
+    console.log("No pending signals");
+    return;
+  }
 
-  const grouped = {};
+  // wallet + market grouping
+  const groups = {};
   for (const sig of signals) {
-    if (!sig.event_slug) continue;
-    const key = `${sig.wallet_id}||${sig.event_slug}`;
-    grouped[key] ??= [];
-    grouped[key].push(sig);
+    const key = `${sig.wallet_id}||${sig.market_id}`;
+    groups[key] ??= [];
+    groups[key].push(sig);
   }
 
   const livePicks = [];
-  for (const group of Object.values(grouped)) {
-    const pickCounts = {};
-    for (const sig of group) pickCounts[sig.picked_outcome] = (pickCounts[sig.picked_outcome] || 0) + 1;
 
-    const sorted = Object.entries(pickCounts).sort((a, b) => b[1] - a[1]);
+  for (const group of Object.values(groups)) {
+    const voteCounts = {};
+
+    for (const sig of group) {
+      voteCounts[sig.picked_outcome] =
+        (voteCounts[sig.picked_outcome] || 0) + 1;
+    }
+
+    const sorted = Object.entries(voteCounts)
+      .sort((a, b) => b[1] - a[1]);
+
+    // tie or no majority → skip
+    if (!sorted.length) continue;
     if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) continue;
 
-    const majorityPick = sorted[0][0];
-    const sig = group.find(s => s.picked_outcome === majorityPick);
+    const [majorityOutcome, internalCount] = sorted[0];
+    const sig = group.find(s => s.picked_outcome === majorityOutcome);
 
     livePicks.push({
       wallet_id: sig.wallet_id,
       market_id: sig.market_id,
       market_name: sig.market_name,
       event_slug: sig.event_slug,
-      picked_outcome: majorityPick,
+      picked_outcome: majorityOutcome,
       side: sig.side,
-      pnl: sig.pnl,
-      outcome: sig.outcome,
-      resolved_outcome: sig.resolved_outcome,
+      pnl: null,
+      outcome: "Pending",
+      resolved_outcome: null,
       fetched_at: new Date(),
-      vote_count: pickCounts[majorityPick],
-      win_rate: sig.win_rate || 0
+      vote_count: internalCount, // per-wallet strength
     });
   }
 
   await supabase.from("wallet_live_picks").delete();
-  if (livePicks.length) await supabase.from("wallet_live_picks").insert(livePicks);
+  if (livePicks.length) {
+    await supabase.from("wallet_live_picks").insert(livePicks);
+  }
 
-  console.log(`✅ Rebuilt wallet_live_picks (${livePicks.length})`);
+  console.log(`✅ wallet_live_picks rebuilt (${livePicks.length})`);
 }
 
 /* ===========================

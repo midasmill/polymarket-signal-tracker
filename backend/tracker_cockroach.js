@@ -500,6 +500,17 @@ async function trackerLoop() {
   finally{ isTrackerRunning=false; }
 }
 
+
+
+(async () => {
+  try {
+    const { rows } = await query(`SELECT NOW()`);
+    console.log("✅ Connected to CockroachDB, time:", rows[0].now);
+  } catch (err) {
+    console.error("❌ CockroachDB connection failed:", err.message);
+  }
+})();
+
 /* ===========================
    Main Function
 =========================== */

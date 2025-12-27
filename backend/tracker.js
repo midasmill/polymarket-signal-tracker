@@ -258,19 +258,19 @@ async function trackWallet(wallet) {
       .eq("id", wallet.id);
   }
 
-  // 1️⃣ Fetch wallet positions/activities
+  // Fetch wallet positions
   let positions = [];
   try {
     positions = await fetchWalletPositions(proxyWallet);
     console.log(`[TRACK] Wallet ${wallet.id} fetched ${positions.length} activities`);
   } catch (err) {
-    console.error(`❌ Activity fetch failed (${err.message}) for ${proxyWallet}`);
+    console.error(`❌ Activity fetch failed for ${proxyWallet}:`, err.message);
     return;
   }
 
   if (!positions?.length) return;
 
-  // 2️⃣ Fetch existing signals ONCE
+  // Fetch existing signals
   const { data: existingSignals } = await supabase
     .from("signals")
     .select("tx_hash, event_slug, wallet_id")
@@ -285,24 +285,24 @@ async function trackWallet(wallet) {
     const eventSlug = pos.eventSlug || pos.slug;
     if (!eventSlug) continue;
 
-    // Skip if wallet already has a signal for this event
+    // 1️⃣ Enforce 1 signal per wallet per event
     if (existingEvents.has(eventSlug)) continue;
 
-    // Determine picked outcome
+    // 2️⃣ Determine picked outcome
     let pickedOutcome;
     const sideUpper = (pos.side || "").toUpperCase();
     if (sideUpper === "BUY") pickedOutcome = "YES";
     else if (sideUpper === "SELL") pickedOutcome = "NO";
-    else pickedOutcome = sideUpper || null; // keep team names, up/down, etc.
+    else pickedOutcome = sideUpper || null;
 
     if (!pickedOutcome) continue;
 
-    // Generate unique tx id
+    // 3️⃣ Generate unique tx id
     const syntheticTx = [proxyWallet, pos.asset, pos.timestamp, pos.title].join("-");
 
     if (existingTxs.has(syntheticTx)) continue;
 
-    // Fetch market & skip closed
+    // 4️⃣ Fetch market & skip closed
     const market = await fetchMarket(eventSlug);
     if (!market) continue;
 
@@ -327,7 +327,7 @@ async function trackWallet(wallet) {
 
   if (!newSignals.length) return;
 
-  // 3️⃣ Upsert signals to avoid duplicate key errors
+  // Upsert to avoid duplicate key errors
   const { error } = await supabase
     .from("signals")
     .upsert(newSignals, { onConflict: ["market_id", "wallet_id"] });
@@ -340,12 +340,50 @@ async function trackWallet(wallet) {
 }
 
 /* ===========================
+   Fetch Wallet Positions (DATA-API)
+=========================== */
+async function fetchWalletPositions(proxyWallet) {
+  if (!proxyWallet) throw new Error("Missing proxyWallet");
+
+  try {
+    const url = `https://data-api.polymarket.com/activity?limit=100&sortBy=TIMESTAMP&sortDirection=DESC&user=${proxyWallet}`;
+    const res = await fetch(url, {
+      headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" }
+    });
+
+    if (!res.ok) {
+      throw new Error(`${res.status} ${res.statusText}`);
+    }
+
+    const data = await res.json();
+    if (!Array.isArray(data)) return [];
+
+    // Map API response to your expected "position" format
+    return data.map(item => ({
+      asset: item.asset || "",
+      timestamp: item.timestamp || Date.now() / 1000,
+      conditionId: item.conditionId || null,
+      title: item.title || "",
+      slug: item.slug || null,
+      eventSlug: item.eventSlug || null,
+      side: item.side || "",        // can be BUY/SELL or other strings
+      cashPnl: item.usdcSize ?? null,
+      amount: item.size ?? null
+    }));
+
+  } catch (err) {
+    console.error(`❌ Activity fetch failed (fetchWalletPositions) for ${proxyWallet}:`, err.message);
+    return [];
+  }
+}
+
+/* ===========================
    Wallet Live Picks Rebuild (Patched, Safe)
 =========================== */
 async function rebuildWalletLivePicks() {
   const { data: signals } = await supabase
     .from("signals")
-    .select("*, wallets(id, win_rate)")
+    .select("*")
     .eq("outcome", "Pending")
     .not("picked_outcome", "is", null);
 
@@ -354,7 +392,7 @@ async function rebuildWalletLivePicks() {
   const livePicksMap = new Map();
 
   for (const sig of signals) {
-    // Skip wallets that have both sides for the same event
+    // Skip wallets with both sides for same event
     const walletSignals = signals.filter(
       s => s.wallet_id === sig.wallet_id && s.event_slug === sig.event_slug
     );
@@ -369,6 +407,7 @@ async function rebuildWalletLivePicks() {
         market_id: sig.market_id,
         market_name: sig.market_name,
         event_slug: sig.event_slug,
+        picked_outcome: sig.picked_outcome,
         side: sig.side || ""
       });
     }
@@ -379,10 +418,10 @@ async function rebuildWalletLivePicks() {
   }
 
   const finalLivePicks = Array.from(livePicksMap.values()).map(p => ({
-    wallet_id: p.wallets[0] || 0, // representative wallet
+    wallet_id: p.wallets[0] || 0, // representative wallet for NOT NULL
     market_id: p.market_id,
     picked_outcome: p.picked_outcome,
-    side: p.side || "",
+    side: p.side,
     pnl: null,
     outcome: null,
     resolved_outcome: null,

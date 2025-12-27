@@ -243,7 +243,7 @@ async function fetchWalletActivities(proxyWallet, retries = 3) {
 }
 
 /* ===========================
-   Track Wallet (Enhanced)
+   Track Wallet (Safe & Enhanced)
 =========================== */
 async function trackWallet(wallet) {
   const proxyWallet = wallet.polymarket_proxy_wallet;
@@ -260,8 +260,15 @@ async function trackWallet(wallet) {
       .eq("id", wallet.id);
   }
 
-  // 1️⃣ Fetch positions from Polymarket
-  const positions = await fetchWalletPositions(proxyWallet);
+  // 1️⃣ Fetch positions
+  let positions = [];
+  try {
+    positions = await fetchWalletPositions(proxyWallet);
+  } catch (err) {
+    console.error(`❌ Activity fetch failed for ${proxyWallet}:`, err.message);
+    return;
+  }
+
   console.log(`[TRACK] Wallet ${wallet.id} fetched ${positions.length} activities`);
   if (!positions?.length) return;
 
@@ -280,32 +287,31 @@ async function trackWallet(wallet) {
     const eventSlug = pos.eventSlug || pos.slug;
     if (!eventSlug) continue;
 
-    // 3️⃣ Skip if wallet already has a signal for this event
+    // Skip if wallet already has a signal for this event
     if (existingEvents.has(eventSlug)) continue;
 
-    // 4️⃣ Determine picked_outcome based on side and market type
+    // Determine picked_outcome
     let pickedOutcome;
-    let sideValue = pos.side?.toUpperCase() || "BUY";
-
+    const sideValue = pos.side?.toUpperCase() || "BUY";
     if (sideValue === "BUY") pickedOutcome = "YES";
     else if (sideValue === "SELL") pickedOutcome = "NO";
     else pickedOutcome = sideValue; // Over/Under or team name
 
-    // 5️⃣ Generate synthetic tx hash for uniqueness
+    // Synthetic tx hash
     const syntheticTx = [
       proxyWallet,
-      pos.asset,
-      pos.timestamp,
-      pos.amount
+      pos.asset || "",
+      pos.timestamp || Date.now(),
+      pos.amount || 0
     ].join("-");
 
     if (existingTxs.has(syntheticTx)) continue;
 
-    // 6️⃣ Fetch market (skip if closed)
+    // Fetch market and skip if closed
     const market = await fetchMarket(eventSlug);
     if (!market) continue;
 
-    // 7️⃣ Push new signal
+    // Push new signal
     newSignals.push({
       wallet_id: wallet.id,
       signal: pos.title,
@@ -316,7 +322,6 @@ async function trackWallet(wallet) {
       picked_outcome: pickedOutcome,
       tx_hash: syntheticTx,
       pnl: pos.cashPnl ?? null,
-      amount: pos.amount || 0,
       outcome: "Pending",
       resolved_outcome: null,
       outcome_at: null,
@@ -328,17 +333,18 @@ async function trackWallet(wallet) {
 
   if (!newSignals.length) return;
 
-  // 8️⃣ Insert signals
+  // 3️⃣ Upsert signals safely (avoid duplicate key error)
   const { error } = await supabase
     .from("signals")
-    .insert(newSignals);
+    .upsert(newSignals, { onConflict: ["wallet_id", "event_slug"] });
 
   if (error) {
     console.error(`❌ Failed inserting/upserting signals for wallet ${wallet.id}:`, error.message);
   } else {
-    console.log(`✅ Inserted ${newSignals.length} new signal(s) for wallet ${wallet.id}`);
+    console.log(`✅ Inserted/Upserted ${newSignals.length} signal(s) for wallet ${wallet.id}`);
   }
 }
+
 
 /* ===========================
    Fetch Wallet Activity (DATA-API)

@@ -96,6 +96,54 @@ function getConfidenceEmoji(count) {
 }
 
 /* ===========================
+   Fetch wallet positions
+=========================== */
+
+async function fetchWalletPositions(proxyWallet) {
+  try {
+    const url = `https://gamma-api.polymarket.com/activity?user=${proxyWallet}&limit=100`;
+
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json"
+      }
+    });
+
+    if (!res.ok) {
+      console.error(`Activity fetch failed ${res.status}`);
+      return [];
+    }
+
+    const data = await res.json();
+    if (!Array.isArray(data)) return [];
+
+    return data
+      .filter(a =>
+        a.type === "TRADE" &&
+        a.side &&
+        a.conditionId &&
+        (a.eventSlug || a.slug)
+      )
+      .map(a => ({
+        asset: a.asset,                 // outcome token
+        conditionId: a.conditionId,     // market id
+        eventSlug: a.eventSlug || a.slug,
+        side: a.side,                   // BUY / SELL
+        amount: Number(a.amount) || 0,
+        cashPnl: a.cashPnl ?? null,
+        timestamp: a.timestamp,
+        title: a.marketTitle || a.title
+      }));
+
+  } catch (err) {
+    console.error("fetchWalletPositions error:", err.message);
+    return [];
+  }
+}
+
+
+/* ===========================
    Wallet Helpers
 =========================== */
 async function resolveWalletEventOutcome(walletId, eventSlug) {

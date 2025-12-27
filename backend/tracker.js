@@ -40,7 +40,9 @@ function toBlockquote(text) {
 
 async function sendTelegram(text, useBlockquote = false) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
-  if (useBlockquote) text = toBlockquote(text);
+  if (useBlockquote) {
+    text = text.split("\n").map(line => `> ${line}`).join("\n"); // only apply if true
+  }
   try {
     await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: "POST",
@@ -459,15 +461,10 @@ async function fetchWalletPositions(proxyWallet) {
    Notes Update Helper (new lines)
 =========================== */
 async function updateNotes(slug, text) {
-  const noteText = text
-    .split("\n")
-    .map(line => `> ${line}`) // blockquote for readability
-    .join("\n");
-
+  const noteText = text.split("\n").join("\n"); // preserve line breaks
   const { data: notes } = await supabase.from("notes").select("content").eq("slug", slug).maybeSingle();
   let newContent = notes?.content || "";
 
-  // append new signal with a line break
   newContent += newContent ? `\n\n${noteText}` : noteText;
 
   await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", slug);
@@ -566,7 +563,7 @@ Signal Sent: ${new Date().toLocaleString("en-US", { timeZone: TIMEZONE })}`;
   // 4️⃣ Send signals & update Notes
   for (const sig of signalsToSend) {
     try {
-      await sendTelegram(sig.text, true); // blockquote formatting
+      await sendTelegram(sig.text, false); // blockquote formatting
       await updateNotes("polymarket-millionaires", sig.text);
       console.log(`✅ Sent signal for market ${sig.market_id}`);
     } catch (err) {

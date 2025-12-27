@@ -108,6 +108,10 @@ async function resolveWalletEventOutcome(walletId, eventSlug) {
 
   if (!signals?.length) return null;
 
+  // Ignore wallets that have both YES and NO for this event
+  const pickedOutcomes = new Set(signals.map(s => s.picked_outcome).filter(Boolean));
+  if (pickedOutcomes.size > 1) return null;
+
   // Count one vote per picked_outcome
   const totals = {};
   for (const sig of signals) {
@@ -123,6 +127,10 @@ async function resolveWalletEventOutcome(walletId, eventSlug) {
   const majoritySignal = signals.find(s => s.picked_outcome === majorityPick);
   return majoritySignal?.outcome || null;
 }
+
+/* ===========================
+   Count Daily Wallet Losses
+=========================== */
 
 async function countWalletDailyLosses(walletId) {
   const start = new Date(); start.setHours(0, 0, 0, 0);

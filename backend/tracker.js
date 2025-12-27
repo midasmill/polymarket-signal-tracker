@@ -191,11 +191,13 @@ async function fetchAndInsertLeaderboardWallets() {
 }
 
 /* ===========================
-   Fetch Wallet Positions (ACTIVITY-BASED)
+   Fetch Wallet Activity (DATA-API)
 =========================== */
 async function fetchWalletPositions(proxyWallet) {
   try {
-    const url = `https://gamma-api.polymarket.com/activity?user=${proxyWallet}&limit=100`;
+    const url =
+      `https://data-api.polymarket.com/activity` +
+      `?limit=100&sortBy=TIMESTAMP&sortDirection=DESC&user=${proxyWallet}`;
 
     const res = await fetch(url, {
       headers: {
@@ -214,20 +216,20 @@ async function fetchWalletPositions(proxyWallet) {
 
     return data
       .filter(a =>
-        a.type === "TRADE" &&
-        a.side &&
+        a.type === "TRADE" &&           // only real trades
+        a.side &&                       // BUY / SELL
         a.conditionId &&
         (a.eventSlug || a.slug)
       )
       .map(a => ({
-        asset: a.asset,                 // outcome token
-        conditionId: a.conditionId,     // market id
+        asset: a.asset,                        // outcome token
+        conditionId: a.conditionId,            // market id
         eventSlug: a.eventSlug || a.slug,
-        side: a.side,                   // BUY / SELL
-        amount: Number(a.amount) || 0,
-        cashPnl: a.cashPnl ?? null,
-        timestamp: a.timestamp,
-        title: a.marketTitle || a.title
+        side: a.side,                          // BUY / SELL
+        amount: Number(a.size || a.usdcSize) || 0,
+        cashPnl: null,                         // not in activity
+        timestamp: a.timestamp,                // already seconds
+        title: a.title
       }));
 
   } catch (err) {

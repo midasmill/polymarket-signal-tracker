@@ -101,19 +101,21 @@ function getConfidenceEmoji(count) {
 async function resolveWalletEventOutcome(walletId, eventSlug) {
   const { data: signals } = await supabase
     .from("signals")
-    .select("picked_outcome, amount, outcome")
+    .select("picked_outcome, outcome")
     .eq("wallet_id", walletId)
     .eq("event_slug", eventSlug)
     .in("outcome", ["WIN", "LOSS"]);
 
   if (!signals?.length) return null;
 
+  // Count one vote per picked_outcome
   const totals = {};
   for (const sig of signals) {
     if (!sig.picked_outcome) continue;
-    totals[sig.picked_outcome] = (totals[sig.picked_outcome] || 0) + (sig.amount || 0);
+    totals[sig.picked_outcome] = (totals[sig.picked_outcome] || 0) + 1;
   }
 
+  // Determine majority pick
   const sorted = Object.entries(totals).sort((a, b) => b[1] - a[1]);
   if (!sorted.length || (sorted.length > 1 && sorted[0][1] === sorted[1][1])) return null;
 
@@ -123,8 +125,9 @@ async function resolveWalletEventOutcome(walletId, eventSlug) {
 }
 
 async function countWalletDailyLosses(walletId) {
-  const start = new Date(); start.setHours(0,0,0,0);
-  const end = new Date(); end.setHours(23,59,59,999);
+  const start = new Date(); start.setHours(0, 0, 0, 0);
+  const end = new Date(); end.setHours(23, 59, 59, 999);
+
   const { data: events } = await supabase
     .from("signals")
     .select("event_slug")
@@ -132,12 +135,16 @@ async function countWalletDailyLosses(walletId) {
     .eq("outcome", "LOSS")
     .gte("outcome_at", start.toISOString())
     .lte("outcome_at", end.toISOString());
+
   if (!events?.length) return 0;
 
   let lossCount = 0;
-  for (const eventSlug of [...new Set(events.map(e => e.event_slug).filter(Boolean))]) {
-    if (await resolveWalletEventOutcome(walletId, eventSlug) === "LOSS") lossCount++;
+  const uniqueEvents = [...new Set(events.map(e => e.event_slug).filter(Boolean))];
+
+  for (const eventSlug of uniqueEvents) {
+    if ((await resolveWalletEventOutcome(walletId, eventSlug)) === "LOSS") lossCount++;
   }
+
   return lossCount;
 }
 

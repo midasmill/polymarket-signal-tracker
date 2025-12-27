@@ -243,7 +243,7 @@ async function fetchWalletActivities(proxyWallet, retries = 3) {
 }
 
 /* ===========================
-   Track Wallet (Safe & Enhanced)
+   Track Wallet (Patched)
 =========================== */
 async function trackWallet(wallet) {
   const proxyWallet = wallet.polymarket_proxy_wallet;
@@ -260,26 +260,24 @@ async function trackWallet(wallet) {
       .eq("id", wallet.id);
   }
 
-  // 1️⃣ Fetch positions
-  let positions = [];
-  try {
-    positions = await fetchWalletPositions(proxyWallet);
-  } catch (err) {
-    console.error(`❌ Activity fetch failed for ${proxyWallet}:`, err.message);
-    return;
-  }
-
+  // 1️⃣ Fetch positions from Polymarket
+  const positions = await fetchWalletPositions(proxyWallet);
   console.log(`[TRACK] Wallet ${wallet.id} fetched ${positions.length} activities`);
   if (!positions?.length) return;
 
   // 2️⃣ Fetch existing signals once
   const { data: existingSignals } = await supabase
     .from("signals")
-    .select("tx_hash, event_slug")
+    .select("tx_hash, event_slug, picked_outcome")
     .eq("wallet_id", wallet.id);
 
   const existingTxs = new Set(existingSignals.map(s => s.tx_hash));
-  const existingEvents = new Set(existingSignals.map(s => s.event_slug));
+  const eventPickMap = new Map(); // track YES/NO or side per event
+
+  for (const sig of existingSignals) {
+    if (!eventPickMap.has(sig.event_slug)) eventPickMap.set(sig.event_slug, new Set());
+    if (sig.picked_outcome) eventPickMap.get(sig.event_slug).add(sig.picked_outcome);
+  }
 
   const newSignals = [];
 
@@ -287,31 +285,33 @@ async function trackWallet(wallet) {
     const eventSlug = pos.eventSlug || pos.slug;
     if (!eventSlug) continue;
 
-    // Skip if wallet already has a signal for this event
-    if (existingEvents.has(eventSlug)) continue;
+    // 3️⃣ Skip if wallet already has all sides for this event
+    const existingPicks = eventPickMap.get(eventSlug) || new Set();
+    if (existingPicks.size >= 2) continue; // already has YES + NO or multiple sides
 
-    // Determine picked_outcome
+    // 4️⃣ Determine picked_outcome
     let pickedOutcome;
-    const sideValue = pos.side?.toUpperCase() || "BUY";
+    const sideValue = pos.side?.toUpperCase() || "";
+
     if (sideValue === "BUY") pickedOutcome = "YES";
     else if (sideValue === "SELL") pickedOutcome = "NO";
-    else pickedOutcome = sideValue; // Over/Under or team name
+    else pickedOutcome = sideValue; // Over/Under or team/side name
 
-    // Synthetic tx hash
+    // 5️⃣ Generate synthetic tx hash
     const syntheticTx = [
       proxyWallet,
-      pos.asset || "",
-      pos.timestamp || Date.now(),
-      pos.amount || 0
+      pos.asset,
+      pos.timestamp,
+      pos.amount
     ].join("-");
 
     if (existingTxs.has(syntheticTx)) continue;
 
-    // Fetch market and skip if closed
+    // 6️⃣ Fetch market (skip if closed)
     const market = await fetchMarket(eventSlug);
     if (!market) continue;
 
-    // Push new signal
+    // 7️⃣ Push new signal
     newSignals.push({
       wallet_id: wallet.id,
       signal: pos.title,
@@ -329,22 +329,23 @@ async function trackWallet(wallet) {
       created_at: new Date(pos.timestamp ? pos.timestamp * 1000 : Date.now()),
       event_start_at: market?.eventStartAt ? new Date(market.eventStartAt) : null
     });
+
+    // 8️⃣ Track new pick in memory
+    if (!eventPickMap.has(eventSlug)) eventPickMap.set(eventSlug, new Set());
+    eventPickMap.get(eventSlug).add(pickedOutcome);
   }
 
   if (!newSignals.length) return;
 
-  // 3️⃣ Upsert signals safely (avoid duplicate key error)
-  const { error } = await supabase
-    .from("signals")
-    .upsert(newSignals, { onConflict: ["wallet_id", "event_slug"] });
+  // 9️⃣ Insert new signals
+  const { error } = await supabase.from("signals").insert(newSignals);
 
   if (error) {
     console.error(`❌ Failed inserting/upserting signals for wallet ${wallet.id}:`, error.message);
   } else {
-    console.log(`✅ Inserted/Upserted ${newSignals.length} signal(s) for wallet ${wallet.id}`);
+    console.log(`✅ Inserted ${newSignals.length} new signal(s) for wallet ${wallet.id}`);
   }
 }
-
 
 /* ===========================
    Fetch Wallet Activity (DATA-API)
@@ -382,83 +383,70 @@ async function fetchWalletPositions(proxyWallet) {
 }
 
 /* ===========================
-   Wallet Live Picks Rebuild (Enhanced)
+   Wallet Live Picks Rebuild (Patched)
 =========================== */
 async function rebuildWalletLivePicks() {
-  // 1️⃣ Fetch all pending signals
-  const { data: signals, error } = await supabase
+  // 1️⃣ Fetch pending signals
+  const { data: signals } = await supabase
     .from("signals")
     .select("*, wallets(id, win_rate)")
     .eq("outcome", "Pending")
     .not("picked_outcome", "is", null);
 
-  if (error) {
-    console.error("❌ Failed fetching signals for live picks:", error.message);
-    return;
-  }
   if (!signals?.length) return;
 
-  // 2️⃣ Group signals by market + picked_outcome
   const livePicksMap = new Map();
 
   for (const sig of signals) {
-    const key = `${sig.market_id}||${sig.picked_outcome}`;
+    const eventSlug = sig.event_slug;
+    const marketId = sig.market_id;
+    const pickedOutcome = sig.picked_outcome;
+    const key = `${marketId}||${pickedOutcome}`;
+
     if (!livePicksMap.has(key)) {
       livePicksMap.set(key, {
-        market_id: sig.market_id,
-        picked_outcome: sig.picked_outcome,
+        market_id: marketId,
         market_name: sig.market_name,
-        event_slug: sig.event_slug,
-        side: sig.side,
-        wallets: [],
-        wallet_set: new Set(),
+        event_slug: eventSlug,
+        wallets: new Set(),
         vote_count: 0,
-        vote_counts: {},
-        confidence: 0,
-        fetched_at: new Date()
       });
     }
 
     const entry = livePicksMap.get(key);
 
-    // Avoid counting same wallet multiple times for same pick
-    if (!entry.wallet_set.has(sig.wallet_id)) {
-      entry.wallets.push(sig.wallet_id);
-      entry.wallet_set.add(sig.wallet_id);
+    // ✅ Avoid duplicate wallets per side
+    if (!entry.wallets.has(sig.wallet_id)) {
+      entry.wallets.add(sig.wallet_id);
       entry.vote_count++;
-
-      // Track side counts
-      entry.vote_counts[sig.side] = (entry.vote_counts[sig.side] || 0) + 1;
     }
   }
 
-  // 3️⃣ Prepare final array for upsert
+  // 2️⃣ Convert Sets to arrays and calculate confidence
   const finalLivePicks = Array.from(livePicksMap.values()).map(p => ({
     market_id: p.market_id,
-    picked_outcome: p.picked_outcome,
     market_name: p.market_name,
     event_slug: p.event_slug,
-    side: p.side,
-    wallets: p.wallets,
-    wallet_set: Array.from(p.wallet_set),
+    wallets: Array.from(p.wallets),
     vote_count: p.vote_count,
-    vote_counts: p.vote_counts,
-    confidence: p.vote_count, // you can map this to stars elsewhere
-    fetched_at: new Date()
+    confidence: p.vote_count, // you can map this to stars if needed
+    fetched_at: new Date(),
   }));
 
-  // 4️⃣ Upsert into wallet_live_picks safely
-  try {
-    await supabase
-      .from("wallet_live_picks")
-      .upsert(finalLivePicks, {
-        onConflict: ["market_id", "picked_outcome"]
-      });
-    console.log(`✅ Wallet live picks rebuilt: ${finalLivePicks.length} entries`);
-  } catch (err) {
-    console.error("❌ Failed upserting wallet live picks:", err.message);
+  if (!finalLivePicks.length) return;
+
+  // 3️⃣ Upsert to wallet_live_picks
+  const { error } = await supabase.from("wallet_live_picks").upsert(finalLivePicks, {
+    onConflict: ["market_id", "picked_outcome"]
+  });
+
+  if (error) {
+    console.error("❌ Failed upserting wallet live picks:", error.message);
+  } else {
+    console.log(`✅ Wallet live picks updated: ${finalLivePicks.length} entries`);
   }
 }
+
 
 /* ===========================
    Notes Update Helper (new lines)
@@ -536,55 +524,54 @@ async function updateWalletMetricsJS() {
 }
 
 /* ===========================
-   Signal Processing + Notes Update (Enhanced)
+   Signal Processing + Telegram Sending (Patched)
 =========================== */
 async function processAndSendSignals() {
   // 1️⃣ Fetch all live picks
-  const { data: livePicks, error } = await supabase
+  const { data: livePicks } = await supabase
     .from("wallet_live_picks")
     .select("*");
 
-  if (error) {
-    console.error("❌ Failed fetching wallet_live_picks:", error.message);
-    return;
-  }
   if (!livePicks?.length) return;
 
-  // 2️⃣ Prepare signals to send
   const signalsToSend = [];
 
   for (const pick of livePicks) {
-    const walletCount = pick.vote_count || 0;
-    const confidence = getConfidenceEmoji(walletCount);
+    // ✅ Skip if no wallets
+    if (!pick.wallets?.length) continue;
 
-    // Skip if below threshold or missing prediction
-    if (!confidence || !pick.picked_outcome) continue;
+    // 2️⃣ Calculate confidence emoji based on wallet count
+    const confidenceEmoji = getConfidenceEmoji(pick.vote_count);
 
-    const text = `📊 Market Event: ${pick.market_name}
-Prediction: ${pick.picked_outcome}
-Confidence: ${confidence}
-Signal Sent: ${new Date().toLocaleString("en-US",{timeZone:TIMEZONE})}`;
+    // 3️⃣ Compose message
+    const text = `⚡️ Market Event: ${pick.market_name || pick.event_slug}
+Prediction: ${pick.picked_outcome || "UNKNOWN"}
+Confidence: ${confidenceEmoji}
+Signal Sent: ${new Date().toLocaleString("en-US", { timeZone: TIMEZONE })}`;
 
-    signalsToSend.push({ market_id: pick.market_id, picked_outcome: pick.picked_outcome, text });
+    signalsToSend.push({
+      market_id: pick.market_id,
+      picked_outcome: pick.picked_outcome,
+      text,
+    });
   }
 
-  // 3️⃣ Send signals & mark as sent
+  // 4️⃣ Send signals & update Notes
   for (const sig of signalsToSend) {
     try {
-      await sendTelegram(sig.text);
+      await sendTelegram(sig.text, true); // blockquote formatting
       await updateNotes("polymarket-millionaires", sig.text);
-
-      // Mark signals as sent in original signals table
-      await supabase
-        .from("signals")
-        .update({ signal_sent_at: new Date() })
-        .eq("market_id", sig.market_id)
-        .eq("picked_outcome", sig.picked_outcome);
-
       console.log(`✅ Sent signal for market ${sig.market_id}`);
     } catch (err) {
       console.error(`❌ Failed to send signal for market ${sig.market_id}:`, err.message);
     }
+
+    // 5️⃣ Mark as sent
+    await supabase
+      .from("wallet_live_picks")
+      .update({ last_confidence_sent: new Date() })
+      .eq("market_id", sig.market_id)
+      .eq("picked_outcome", sig.picked_outcome);
   }
 }
 

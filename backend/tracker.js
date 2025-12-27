@@ -159,34 +159,6 @@ async function countWalletDailyLosses(walletId) {
 }
 
 /* ===========================
-   Count Daily Wallet Losses
-=========================== */
-async function countWalletDailyLosses(walletId) {
-  const start = new Date(); start.setHours(0, 0, 0, 0);
-  const end = new Date(); end.setHours(23, 59, 59, 999);
-
-  const { data: events } = await supabase
-    .from("signals")
-    .select("event_slug")
-    .eq("wallet_id", walletId)
-    .eq("outcome", "LOSS")
-    .gte("outcome_at", start.toISOString())
-    .lte("outcome_at", end.toISOString());
-
-  if (!events?.length) return 0;
-
-  let lossCount = 0;
-  const uniqueEvents = [...new Set(events.map(e => e.event_slug).filter(Boolean))];
-
-  for (const eventSlug of uniqueEvents) {
-    const outcome = await resolveWalletEventOutcome(walletId, eventSlug);
-    if (outcome === "LOSS") lossCount++;
-  }
-
-  return lossCount;
-}
-
-/* ===========================
    Fetch Leaderboard Wallets (with PnL & volume filters)
 =========================== */
 async function fetchAndInsertLeaderboardWallets() {

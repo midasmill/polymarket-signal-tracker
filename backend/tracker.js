@@ -106,7 +106,7 @@ function getConfidenceEmoji(count) {
 async function resolveWalletEventOutcome(walletId, eventSlug) {
   const { data: signals } = await supabase
     .from("signals")
-    .select("picked_outcome, amount, outcome")
+    .select("picked_outcome, outcome")
     .eq("wallet_id", walletId)
     .eq("event_slug", eventSlug)
     .in("outcome", ["WIN", "LOSS"]);
@@ -114,11 +114,11 @@ async function resolveWalletEventOutcome(walletId, eventSlug) {
   if (!signals?.length) return null;
 
   // Count total per picked_outcome
-  const totals = {};
-  for (const sig of signals) {
-    if (!sig.picked_outcome) continue;
-    totals[sig.picked_outcome] = (totals[sig.picked_outcome] || 0) + (sig.amount || 0);
-  }
+const totals = {};
+for (const sig of signals) {
+  if (!sig.picked_outcome) continue;
+  totals[sig.picked_outcome] = (totals[sig.picked_outcome] || 0) + 1;
+}
 
   // If wallet has picks on both sides, ignore this event
   if (Object.keys(totals).length > 1) return null;
@@ -305,7 +305,6 @@ async function trackWallet(wallet) {
       proxyWallet,
       pos.asset,
       pos.timestamp,
-      pos.amount
     ].join("-");
 
     if (existingTxs.has(syntheticTx)) continue;
@@ -320,7 +319,6 @@ async function trackWallet(wallet) {
       picked_outcome: pickedOutcome,
       tx_hash: syntheticTx,
       pnl: pos.cashPnl ?? null,
-      amount: pos.amount || 0,
       outcome: "Pending",
       resolved_outcome: null,
       outcome_at: null,
@@ -447,7 +445,6 @@ async function fetchWalletPositions(proxyWallet) {
       slug: item.slug || "",
       timestamp: item.timestamp || Math.floor(Date.now() / 1000),
       side: item.side || "BUY",               // default to BUY if missing
-      amount: Number(item.size ?? item.usdcSize ?? 0),
       cashPnl: Number(item.usdcSize ?? item.size ?? 0), // can adjust later
     }));
   } catch (err) {

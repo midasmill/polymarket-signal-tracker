@@ -275,22 +275,23 @@ async function trackWallet(wallet) {
     // 3️⃣ Skip if wallet already has a signal for this event
     if (existingEvents.has(eventSlug)) continue;
 
-    // 4️⃣ Determine picked_outcome
-    let pickedOutcome;
-    let sideValue = pos.side?.toUpperCase() || "BUY";
+// 4️⃣ Determine picked_outcome
+let pickedOutcome;
+let sideValue = pos.side?.toUpperCase() || "BUY";
 
-    // Handle different market types
-    if (pos.title?.includes(" vs. ")) {
-      // Team market (sports game)
-      const [teamA, teamB] = pos.title.split(" vs. ").map(s => s.trim());
-      pickedOutcome = sideValue === "BUY" ? teamA : teamB;
-    } else if (/Over|Under/i.test(pos.title)) {
-      // Over/Under market
-      pickedOutcome = sideValue === "BUY" ? "OVER" : "UNDER";
-    } else {
-      // Default Yes/No binary
-      pickedOutcome = sideValue === "BUY" ? "YES" : "NO";
-    }
+// Handle different market types
+if (pos.title?.includes(" vs. ")) {
+  // Team market (sports game)
+  const [teamA, teamB] = pos.title.split(" vs. ").map(s => s.trim());
+  pickedOutcome = sideValue === "BUY" ? teamA : teamB;
+} else if (/Over|Under/i.test(pos.title)) {
+  // Over/Under market
+  pickedOutcome = sideValue === "BUY" ? "OVER" : "UNDER";
+} else {
+  // Default Yes/No binary
+  pickedOutcome = sideValue === "BUY" ? "YES" : "NO";
+}
+
 
     // 5️⃣ Generate synthetic tx hash for uniqueness
     const syntheticTx = [
@@ -331,7 +332,7 @@ async function trackWallet(wallet) {
   // 8️⃣ Insert signals
   const { error } = await supabase
     .from("signals")
-    .insert(newSignals);
+    .upsert(newSignals);
 
   if (error) {
     console.error(`❌ Failed inserting/upserting signals for wallet ${wallet.id}:`, error.message);
@@ -389,14 +390,14 @@ async function rebuildWalletLivePicks() {
   for (const p of livePicksMap.values()) {
     const voteCount = p.vote_count;
 
-    // Determine confidence based on number of wallets
-    let confidence = null;
-    for (const [stars, threshold] of Object.entries(CONFIDENCE_THRESHOLDS).sort((a, b) => b[1] - a[1])) {
-      if (voteCount >= threshold) {
-        confidence = stars;
-        break;
-      }
+  // Determine confidence based on number of wallets
+  let confidence = null;
+  for (const [stars, threshold] of Object.entries(CONFIDENCE_THRESHOLDS).sort((a, b) => b[1] - a[1])) {
+    if (voteCount >= threshold) {
+      confidence = stars;
+      break;
     }
+  }
 
     if (!confidence) continue; // skip if below 1⭐ threshold
 
@@ -550,7 +551,7 @@ async function processAndSendSignals() {
     const confidenceEmoji = getConfidenceEmoji(pick.vote_count);
 
     // 3️⃣ Compose message
-    const text = `⚡️ Market Event: ${pick.market_name || pick.event_slug}
+const text = `⚡️ Market Event: ${pick.market_name || pick.event_slug}
 Prediction: ${pick.picked_outcome || "UNKNOWN"}
 Confidence: ${confidenceEmoji}
 Signal Sent: ${new Date().toLocaleString("en-US", { timeZone: TIMEZONE })}`;

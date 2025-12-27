@@ -564,7 +564,7 @@ Signal Sent: ${new Date().toLocaleString("en-US", { timeZone: TIMEZONE })}`;
   for (const sig of signalsToSend) {
     try {
       await sendTelegram(sig.text, false); // blockquote formatting
-      await updateNotes("polymarket-millionaires", sig.text);
+      await updateNotes("midas-sports", sig.text);
       console.log(`✅ Sent signal for market ${sig.market_id}`);
     } catch (err) {
       console.error(`❌ Failed to send signal for market ${sig.market_id}:`, err.message);

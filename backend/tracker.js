@@ -193,49 +193,36 @@ async function fetchAndInsertLeaderboardWallets() {
 /* ===========================
    Fetch Wallet Activity (DATA-API)
 =========================== */
-async function fetchWalletPositions(proxyWallet) {
-  try {
-    const url =
-      `https://data-api.polymarket.com/activity` +
-      `?limit=100&sortBy=TIMESTAMP&sortDirection=DESC&user=${proxyWallet}`;
+async function fetchWalletActivities(proxyWallet, retries = 3) {
+  if (!proxyWallet) return [];
 
-    const res = await fetch(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json"
+  const url = `https://data-api.polymarket.com/activity?limit=100&sortBy=TIMESTAMP&sortDirection=DESC&user=${proxyWallet}`;
+
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(url, {
+        headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
+      });
+
+      if (res.status === 404) {
+        console.warn(`❌ Activity fetch 404 for wallet ${proxyWallet}`);
+        return [];
       }
-    });
 
-    if (!res.ok) {
-      console.error(`❌ Activity fetch failed (${res.status}) for ${proxyWallet}`);
-      return [];
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      const data = await res.json();
+      if (!Array.isArray(data)) return [];
+      return data;
+
+    } catch (err) {
+      console.error(`❌ Activity fetch attempt ${attempt} failed for wallet ${proxyWallet}: ${err.message}`);
+      if (attempt < retries) await new Promise(r => setTimeout(r, 1000 * attempt));
     }
-
-    const data = await res.json();
-    if (!Array.isArray(data)) return [];
-
-    return data
-      .filter(a =>
-        a.type === "TRADE" &&           // only real trades
-        a.side &&                       // BUY / SELL
-        a.conditionId &&
-        (a.eventSlug || a.slug)
-      )
-      .map(a => ({
-        asset: a.asset,                        // outcome token
-        conditionId: a.conditionId,            // market id
-        eventSlug: a.eventSlug || a.slug,
-        side: a.side,                          // BUY / SELL
-        amount: Number(a.size || a.usdcSize) || 0,
-        cashPnl: null,                         // not in activity
-        timestamp: a.timestamp,                // already seconds
-        title: a.title
-      }));
-
-  } catch (err) {
-    console.error("❌ fetchWalletPositions error:", err.message);
-    return [];
   }
+
+  console.error(`❌ Activity fetch failed after ${retries} attempts for wallet ${proxyWallet}`);
+  return [];
 }
 
 /* ===========================

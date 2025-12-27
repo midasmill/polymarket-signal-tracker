@@ -392,13 +392,14 @@ async function rebuildWalletLivePicks() {
   const livePicksMap = new Map();
 
   for (const sig of signals) {
-    // Skip wallets with both sides for same event
+    // Ignore wallets that have multiple sides for the same event
     const walletSignals = signals.filter(
       s => s.wallet_id === sig.wallet_id && s.event_slug === sig.event_slug
     );
     const pickedOutcomes = new Set(walletSignals.map(s => s.picked_outcome).filter(Boolean));
     if (pickedOutcomes.size > 1) continue;
 
+    // Unique key includes market_id + picked_outcome
     const key = `${sig.market_id}||${sig.picked_outcome}`;
     if (!livePicksMap.has(key)) {
       livePicksMap.set(key, {
@@ -413,14 +414,16 @@ async function rebuildWalletLivePicks() {
     }
 
     const entry = livePicksMap.get(key);
-    entry.wallets.push(sig.wallet_id);
-    entry.vote_count++;
+    if (!entry.wallets.includes(sig.wallet_id)) {
+      entry.wallets.push(sig.wallet_id);
+      entry.vote_count++;
+    }
   }
 
   const finalLivePicks = Array.from(livePicksMap.values()).map(p => ({
-    wallet_id: p.wallets[0] || 0, // representative wallet for NOT NULL
+    wallet_id: p.wallets[0], // representative wallet
     market_id: p.market_id,
-    picked_outcome: p.picked_outcome,
+    picked_outcome: p.picked_outcome, // ✅ prediction now preserved
     side: p.side,
     pnl: null,
     outcome: null,
@@ -429,7 +432,7 @@ async function rebuildWalletLivePicks() {
     market_name: p.market_name,
     event_slug: p.event_slug,
     vote_count: p.vote_count,
-    vote_counts: {},
+    vote_counts: {}, // optional: can store JSON breakdown
     confidence: p.vote_count,
     wallets: p.wallets
   }));
@@ -440,58 +443,6 @@ async function rebuildWalletLivePicks() {
       .upsert(finalLivePicks, { onConflict: ["market_id", "picked_outcome"] });
 
     if (error) console.error("❌ Failed upserting wallet live picks:", error.message);
-  }
-}
-
-/* ===========================
-   Signal Processing + Notes Update
-=========================== */
-async function processAndSendSignals() {
-  // 1️⃣ Fetch all live picks
-  const { data: livePicks } = await supabase.from("wallet_live_picks").select("*");
-  if (!livePicks?.length) return;
-
-  // 2️⃣ Group by market_id + picked_outcome
-  const grouped = new Map();
-  for (const pick of livePicks) {
-    const key = `${pick.market_id}||${pick.picked_outcome}`;
-    if (!grouped.has(key)) grouped.set(key, []);
-    grouped.get(key).push(pick);
-  }
-
-  const signalsToSend = [];
-
-  // 3️⃣ Prepare signals
-  for (const [key, picks] of grouped.entries()) {
-    const walletCount = picks.length;
-    const confidence = getConfidenceEmoji(walletCount);
-    if (!confidence) continue; // skip if below threshold
-
-    const sig = picks[0]; // representative pick
-    const text = `📊 Market Event: ${sig.market_name}
-Prediction: ${sig.picked_outcome}
-Confidence: ${confidence}
-Signal Sent: ${new Date().toLocaleString("en-US",{timeZone:TIMEZONE})}`;
-
-    signalsToSend.push({ market_id: sig.market_id, picked_outcome: sig.picked_outcome, text });
-
-    // mark signals as sent
-    await supabase
-      .from("signals")
-      .update({ signal_sent_at: new Date() })
-      .eq("market_id", sig.market_id)
-      .eq("picked_outcome", sig.picked_outcome);
-  }
-
-  // 4️⃣ Send signals & update Notes
-  for (const sig of signalsToSend) {
-    try {
-      await sendTelegram(sig.text);
-      await updateNotes("polymarket-millionaires", sig.text); // line breaks included
-      console.log(`✅ Sent signal for market ${sig.market_id}`);
-    } catch (err) {
-      console.error(`Failed to send signal for market ${sig.market_id}:`, err.message);
-    }
   }
 }
 
@@ -567,6 +518,61 @@ async function updateWalletMetricsJS() {
         last_checked: new Date()
       })
       .eq("id", wallet.id);
+  }
+}
+
+/* ===========================
+   Process and Send Signals 
+=========================== */
+
+async function processAndSendSignals() {
+  // 1️⃣ Fetch all live picks
+  const { data: livePicks } = await supabase
+    .from("wallet_live_picks")
+    .select("*")
+    .not("picked_outcome", "is", null);
+
+  if (!livePicks?.length) return;
+
+  const signalsToSend = [];
+  const sentKeys = new Set(); // prevent duplicates
+
+  for (const pick of livePicks) {
+    const key = `${pick.market_id}||${pick.picked_outcome}`;
+    if (sentKeys.has(key)) continue; // skip duplicates
+    sentKeys.add(key);
+
+    // 2️⃣ Determine confidence emoji
+    const confidenceEmoji = getConfidenceEmoji(pick.vote_count);
+
+    // Skip if below threshold
+    if (!confidenceEmoji) continue;
+
+    // 3️⃣ Build Telegram message
+    const text = `📊 Market Event: ${pick.market_name}
+Prediction: ${pick.picked_outcome} ${pick.side ? `(${pick.side})` : ""}
+Confidence: ${confidenceEmoji} (${pick.vote_count} votes)
+Signal Sent: ${new Date().toLocaleString("en-US", { timeZone: TIMEZONE })}`;
+
+    signalsToSend.push({ market_id: pick.market_id, picked_outcome: pick.picked_outcome, text });
+
+    // 4️⃣ Mark as sent in signals table
+    await supabase
+      .from("signals")
+      .update({ signal_sent_at: new Date(), last_confidence_sent: confidenceEmoji })
+      .eq("market_id", pick.market_id)
+      .eq("picked_outcome", pick.picked_outcome);
+  }
+
+  // 5️⃣ Send Telegram messages
+  for (const sig of signalsToSend) {
+    try {
+      await sendTelegram(sig.text);
+      await updateNotes("polymarket-millionaires", sig.text); // append to notes
+      console.log(`✅ Sent signal for market ${sig.market_id}`);
+    } catch (err) {
+      console.error(`❌ Failed to send signal for market ${sig.market_id}:`, err.message);
+    }
   }
 }
 

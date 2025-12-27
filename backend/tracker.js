@@ -96,54 +96,6 @@ function getConfidenceEmoji(count) {
 }
 
 /* ===========================
-   Fetch wallet positions
-=========================== */
-
-async function fetchWalletPositions(proxyWallet) {
-  try {
-    const url = `https://gamma-api.polymarket.com/activity?user=${proxyWallet}&limit=100`;
-
-    const res = await fetch(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json"
-      }
-    });
-
-    if (!res.ok) {
-      console.error(`Activity fetch failed ${res.status}`);
-      return [];
-    }
-
-    const data = await res.json();
-    if (!Array.isArray(data)) return [];
-
-    return data
-      .filter(a =>
-        a.type === "TRADE" &&
-        a.side &&
-        a.conditionId &&
-        (a.eventSlug || a.slug)
-      )
-      .map(a => ({
-        asset: a.asset,                 // outcome token
-        conditionId: a.conditionId,     // market id
-        eventSlug: a.eventSlug || a.slug,
-        side: a.side,                   // BUY / SELL
-        amount: Number(a.amount) || 0,
-        cashPnl: a.cashPnl ?? null,
-        timestamp: a.timestamp,
-        title: a.marketTitle || a.title
-      }));
-
-  } catch (err) {
-    console.error("fetchWalletPositions error:", err.message);
-    return [];
-  }
-}
-
-
-/* ===========================
    Wallet Helpers
 =========================== */
 async function resolveWalletEventOutcome(walletId, eventSlug) {
@@ -239,6 +191,52 @@ async function fetchAndInsertLeaderboardWallets() {
 }
 
 /* ===========================
+   Fetch Wallet Positions (ACTIVITY-BASED)
+=========================== */
+async function fetchWalletPositions(proxyWallet) {
+  try {
+    const url = `https://gamma-api.polymarket.com/activity?user=${proxyWallet}&limit=100`;
+
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json"
+      }
+    });
+
+    if (!res.ok) {
+      console.error(`❌ Activity fetch failed (${res.status}) for ${proxyWallet}`);
+      return [];
+    }
+
+    const data = await res.json();
+    if (!Array.isArray(data)) return [];
+
+    return data
+      .filter(a =>
+        a.type === "TRADE" &&
+        a.side &&
+        a.conditionId &&
+        (a.eventSlug || a.slug)
+      )
+      .map(a => ({
+        asset: a.asset,                 // outcome token
+        conditionId: a.conditionId,     // market id
+        eventSlug: a.eventSlug || a.slug,
+        side: a.side,                   // BUY / SELL
+        amount: Number(a.amount) || 0,
+        cashPnl: a.cashPnl ?? null,
+        timestamp: a.timestamp,
+        title: a.marketTitle || a.title
+      }));
+
+  } catch (err) {
+    console.error("❌ fetchWalletPositions error:", err.message);
+    return [];
+  }
+}
+
+/* ===========================
    Track Wallet
 =========================== */
 async function trackWallet(wallet) {
@@ -257,8 +255,13 @@ async function trackWallet(wallet) {
   }
 
   // Fetch positions from Polymarket
-  const positions = await fetchWalletPositions(proxyWallet);
-  if (!positions?.length) return;
+const positions = await fetchWalletPositions(proxyWallet);
+
+console.log(
+  `[TRACK] Wallet ${wallet.id} fetched ${positions.length} activities`
+);
+
+if (!positions?.length) return;
 
   // Fetch existing signals ONCE
   const { data: existingSignals } = await supabase
@@ -343,7 +346,7 @@ async function trackWallet(wallet) {
   } else {
     console.log(
       `✅ Inserted ${newSignals.length} new signal(s) for wallet ${wallet.id}`
-    );
+    );  
   }
 }
 
@@ -490,6 +493,7 @@ async function trackerLoop() {
     if (!wallets?.length) return;
 
     await Promise.allSettled(wallets.map(trackWallet));
+    await fetchWalletPositions();
     await rebuildWalletLivePicks();
     await processAndSendSignals();
     await updateWalletMetricsJS();

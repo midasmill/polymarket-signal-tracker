@@ -321,7 +321,6 @@ async function trackWallet(wallet) {
       outcome_at: null,
       win_rate: wallet.win_rate,
       created_at: new Date(pos.timestamp ? pos.timestamp * 1000 : Date.now()),
-      event_start_at: market.eventStartAt ? new Date(market.eventStartAt) : null
     });
   }
 

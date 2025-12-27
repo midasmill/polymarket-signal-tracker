@@ -195,68 +195,110 @@ async function fetchAndInsertLeaderboardWallets() {
 =========================== */
 async function trackWallet(wallet) {
   const proxyWallet = wallet.polymarket_proxy_wallet;
-  if (!proxyWallet) return console.warn(`Wallet ${wallet.id} has no proxy, skipping`);
-
-  // Auto-unpause if win_rate >= 80%
-  if (wallet.paused && wallet.win_rate >= 80) {
-    await supabase.from("wallets").update({ paused: false }).eq("id", wallet.id);
+  if (!proxyWallet) {
+    console.warn(`Wallet ${wallet.id} has no proxy, skipping`);
+    return;
   }
 
-  // Fetch positions
-  const positions = await fetchWalletPositions(proxyWallet);
-  if (!positions.length) return;
+  // Auto-unpause if win_rate >= 80
+  if (wallet.paused && wallet.win_rate >= 80) {
+    await supabase
+      .from("wallets")
+      .update({ paused: false })
+      .eq("id", wallet.id);
+  }
 
-  const allNewSignals = [];
-  const existingSignalsRes = await supabase.from("signals").select("tx_hash, event_slug, picked_outcome").eq("wallet_id", wallet.id);
-  const existingTxs = new Set(existingSignalsRes.data.map(s => s.tx_hash));
+  // Fetch positions from Polymarket
+  const positions = await fetchWalletPositions(proxyWallet);
+  if (!positions?.length) return;
+
+  // Fetch existing signals ONCE
+  const { data: existingSignals } = await supabase
+    .from("signals")
+    .select("tx_hash, event_slug")
+    .eq("wallet_id", wallet.id);
+
+  const existingTxs = new Set(existingSignals.map(s => s.tx_hash));
+  const existingEvents = new Set(existingSignals.map(s => s.event_slug));
+
+  const newSignals = [];
 
   for (const pos of positions) {
-    if (existingTxs.has(pos.asset)) continue;
+    const eventSlug = pos.eventSlug || pos.slug;
+    if (!eventSlug) continue;
 
-    const market = await fetchMarket(pos.eventSlug || pos.slug);
-    if (!market) continue; // skip closed markets
+    // 1️⃣ Enforce 1 signal per wallet per event
+    if (existingEvents.has(eventSlug)) continue;
 
-    // Reduce picks to 1 YES / 1 NO max
-    let outcomePick;
-    if (pos.side?.toUpperCase() === "BUY") outcomePick = "YES";
-    else if (pos.side?.toUpperCase() === "SELL") outcomePick = "NO";
+    // 2️⃣ Determine side
+    let pickedOutcome;
+    if (pos.side?.toUpperCase() === "BUY") pickedOutcome = "YES";
+    else if (pos.side?.toUpperCase() === "SELL") pickedOutcome = "NO";
     else continue;
 
-    // Keep only first YES or NO per event
-    const existingEventSignal = allNewSignals.find(s => s.event_slug === pos.eventSlug);
-    if (existingEventSignal) {
-      // Already have one YES and/or NO
-      if (existingEventSignal.picked_outcome === outcomePick) continue; // skip duplicates
-      // Add opposite pick if only one exists → creates tie
-      existingEventSignal.picked_outcome = "TIE";
-      continue;
-    }
+    // 3️⃣ Generate a REAL unique trade id
+    const syntheticTx = [
+      proxyWallet,
+      pos.asset,
+      pos.timestamp,
+      pos.amount
+    ].join("-");
 
-    allNewSignals.push({
+    if (existingTxs.has(syntheticTx)) continue;
+
+    // 4️⃣ Fetch market & skip closed
+    const market = await fetchMarket(eventSlug);
+    if (!market) continue;
+
+    newSignals.push({
       wallet_id: wallet.id,
       signal: pos.title,
       market_name: pos.title,
       market_id: pos.conditionId,
-      event_slug: pos.eventSlug || pos.slug,
-      side: pos.side?.toUpperCase() || "BUY",
-      picked_outcome: outcomePick,
-      tx_hash: pos.asset,
+      event_slug: eventSlug,
+
+      side: pos.side.toUpperCase(),
+      picked_outcome: pickedOutcome,
+
+      tx_hash: syntheticTx,
+
       pnl: pos.cashPnl ?? null,
+      amount: pos.amount || 0,
+
       outcome: "Pending",
       resolved_outcome: null,
       outcome_at: null,
+
       win_rate: wallet.win_rate,
-      amount: pos.amount || 0,
-      created_at: new Date(pos.timestamp * 1000 || Date.now()),
-      event_start_at: market?.eventStartAt ? new Date(market.eventStartAt) : null,
+
+      created_at: new Date(
+        pos.timestamp ? pos.timestamp * 1000 : Date.now()
+      ),
+
+      event_start_at: market.eventStartAt
+        ? new Date(market.eventStartAt)
+        : null
     });
   }
 
-  if (allNewSignals.length) {
-    await supabase.from("signals").insert(allNewSignals);
-    console.log(`Inserted ${allNewSignals.length} new signals for wallet ${wallet.id}`);
+  if (!newSignals.length) return;
+
+  const { error } = await supabase
+    .from("signals")
+    .insert(newSignals);
+
+  if (error) {
+    console.error(
+      `❌ Failed inserting signals for wallet ${wallet.id}:`,
+      error.message
+    );
+  } else {
+    console.log(
+      `✅ Inserted ${newSignals.length} new signal(s) for wallet ${wallet.id}`
+    );
   }
 }
+
 
 /* ===========================
    Wallet Live Picks Rebuild

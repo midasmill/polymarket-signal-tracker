@@ -439,6 +439,41 @@ async function trackWallet(wallet) {
       `✅ Inserted ${newSignals.length} new signal(s) for wallet ${wallet.id}`
     );
   }
+
+// 8️⃣ Update wallet event exposure (PER EVENT)
+const affectedEvents = [
+  ...new Set(newSignals.map(s => s.event_slug))
+];
+
+for (const eventSlug of affectedEvents) {
+  const totals = await getWalletOutcomeTotals(wallet.id, eventSlug);
+  const entries = Object.entries(totals).sort((a, b) => b[1] - a[1]);
+
+  if (!entries.length) continue;
+
+  const [netOutcome, netAmount] = entries[0];
+
+  // Optional hedge ignore (<5% difference)
+  const secondAmount = entries[1]?.[1] ?? 0;
+  if (secondAmount > 0 && netAmount / secondAmount < 1.05) continue;
+
+  // Get market_id safely
+  const marketId =
+    newSignals.find(s => s.event_slug === eventSlug)?.market_id || null;
+
+  await supabase
+    .from("wallet_event_exposure")
+    .upsert({
+      wallet_id: wallet.id,
+      event_slug: eventSlug,
+      market_id: marketId,
+      totals,
+      net_outcome: netOutcome,
+      net_amount: netAmount,
+      updated_at: new Date()
+    });
+}
+   
 }
 
 /* ===========================

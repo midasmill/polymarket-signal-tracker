@@ -590,13 +590,12 @@ async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
       if (attempt < maxRetries) await new Promise(r => setTimeout(r, retryDelayMs));
     }
 
-    // Still unresolved after retries
     if (!market || !(market.umaResolutionStatus === "resolved" || market.automaticallyResolved)) {
       stillPending.push({ market_id, event_slug });
       continue;
     }
 
-    // --- Parse outcomes/outcomePrices in case they are strings ---
+    // --- Parse outcomes/outcomePrices ---
     let outcomes = market.outcomes;
     let outcomePrices = market.outcomePrices;
 
@@ -606,11 +605,26 @@ async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
     if (typeof outcomePrices === "string") {
       try { outcomePrices = JSON.parse(outcomePrices); } catch { outcomePrices = []; }
     }
-    if (Array.isArray(outcomePrices)) outcomePrices = outcomePrices.map(String);
+    if (Array.isArray(outcomePrices)) outcomePrices = outcomePrices.map(Number);
 
-    // Determine winning outcome
-    const winnerIndex = outcomePrices?.indexOf("1");
-    const winningOutcome = market.outcome || (winnerIndex >= 0 ? outcomes[winnerIndex] : null);
+    // --- Determine winning outcome ---
+    let winningOutcome = market.outcome; // already set sometimes
+    if (!winningOutcome) {
+      const winnerIndex = outcomePrices?.findIndex(p => p === 1);
+      if (winnerIndex >= 0 && outcomes[winnerIndex]) winningOutcome = outcomes[winnerIndex];
+    }
+
+    // Fallback: use score from events if automaticallyResolved but outcome missing
+    if (!winningOutcome && market.events?.length) {
+      const ev = market.events[0];
+      if (ev?.ended && ev?.score) {
+        const scoreParts = ev.score.split("-").map(Number);
+        if (scoreParts.length === 2) {
+          const [home, away] = scoreParts;
+          winningOutcome = home > away ? outcomes[0] : outcomes[1];
+        }
+      }
+    }
 
     if (!winningOutcome) {
       console.log(`⚠️ Could not determine winning outcome for market ${market_id} (${event_slug})`);
@@ -622,7 +636,7 @@ async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
     const resultEmoji = RESULT_EMOJIS[result] || "";
     const ids = signalsGroup.map(s => s.id);
 
-    // Update all signals
+    // --- Update signals ---
     const { error: updateSignalsError } = await supabase
       .from("signals")
       .update({
@@ -638,7 +652,7 @@ async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
       continue;
     }
 
-    // Update wallet_live_picks
+    // --- Update wallet_live_picks ---
     const { error: updateLivePicksError } = await supabase
       .from("wallet_live_picks")
       .update({

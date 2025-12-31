@@ -532,7 +532,7 @@ for (const sig of signals) {
 }
 
 /* ===========================
-   Resolve Markets & Send TRADE RESULT ALERT (DEBUG + RETRY + DAILY SUMMARY + LOG + NEW ALERT FORMAT)
+   Resolve Markets & Send TRADE RESULT ALERT (RETRY + DAILY SUMMARY + LOG + NEW ALERT FORMAT)
 =========================== */
 async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
   const { data: pending, error } = await supabase
@@ -642,11 +642,12 @@ async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
     }
 
     // --- TRADE RESULT ALERT ---
+    const resolvedDate = new Date(market.resolvedAt || market.endDate).toLocaleString("en-US", { timeZone: TIMEZONE, hour12: true });
     const tradeResultText = `📈 TRADE RESULT ALERT
 Market Event: [${market_name || event_slug}](https://polymarket.com/market/${event_slug})
 Prediction: ${picked_outcome}
 Result: ${result} ${resultEmoji}
-Event Resolved: ${new Date(market.resolvedAt || market.endDate).toLocaleString("en-US", { timeZone: TIMEZONE, hour12: true })}`;
+Event Resolved: ${resolvedDate}`;
 
     try {
       await sendTelegram(tradeResultText, false);
@@ -662,16 +663,16 @@ Event Resolved: ${new Date(market.resolvedAt || market.endDate).toLocaleString("
     // --- NEW TRADE SIGNAL ALERT ---
     for (const sig of signalsGroup) {
       if (!sig.sent_alert) {
+        const startDate = sig.event_start ? new Date(sig.event_start) : null;
         const newTradeText = `⚡️ NEW TRADE SIGNAL
 Market Event: [${market_name || event_slug}](https://polymarket.com/market/${event_slug})
 Prediction: ${sig.picked_outcome}
 Confidence: ${sig.confidence || "⭐"}
-Event Start: ${new Date(sig.event_start).toLocaleString("en-US", { timeZone: TIMEZONE, hour12: true })}`;
+${startDate ? `Event Start: ${startDate.toLocaleString("en-US", { timeZone: TIMEZONE, hour12: true })}` : ""}`;
 
         try {
           await sendTelegram(newTradeText, false);
           await updateNotes("midas-sports", newTradeText);
-          // Mark as sent
           await supabase.from("signals").update({ sent_alert: true }).eq("id", sig.id);
           console.log(`✅ NEW TRADE SIGNAL sent for ${sig.id}`);
         } catch (err) {
@@ -681,7 +682,7 @@ Event Start: ${new Date(sig.event_start).toLocaleString("en-US", { timeZone: TIM
     }
   }
 
-  // Daily summary + log
+  // --- Daily summary + log ---
   console.log("📊 Daily Resolution Summary");
   console.log(`Total Pending Signals: ${totalPending}`);
   console.log(`Signals Resolved Today: ${resolvedCount}`);
@@ -699,7 +700,6 @@ Event Start: ${new Date(sig.event_start).toLocaleString("en-US", { timeZone: TIM
     });
   }
 }
-
 
 /* ===========================
    Count Wallet Daily Losses

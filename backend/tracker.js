@@ -539,7 +539,7 @@ for (const sig of signals) {
 }
 
 /* ===========================
-   Resolve Markets & Send TRADE RESULT ALERT
+   Resolve Markets & Send TRADE RESULT ALERT (Wallet Picks Only)
 =========================== */
 async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
   const { data: pending, error } = await supabase
@@ -565,7 +565,7 @@ async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
   const resolvedMarkets = [];
   const stillPending = [];
 
-  // Group signals by market_id + picked_outcome
+  // Group by market_id + picked_outcome
   const marketOutcomeMap = new Map();
   for (const sig of pending) {
     if (!sig.picked_outcome) continue;
@@ -578,7 +578,7 @@ async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
     const { event_slug, market_id, picked_outcome, market_name, event_start } = signalsGroup[0];
     let market = null;
 
-    // Retry loop to fetch market
+    // Retry loop
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         market = await fetchMarket(event_slug);
@@ -588,7 +588,7 @@ async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
         } else if (!(market.umaResolutionStatus === "resolved" || market.automaticallyResolved)) {
           console.log(`⚠️ Attempt ${attempt}: Market ${market_id} (${event_slug}) not resolved yet`);
         } else {
-          break; // Market resolved
+          break; // market is resolved
         }
       } catch (err) {
         console.error(`❌ Attempt ${attempt}: Failed fetching market ${event_slug}:`, err.message);
@@ -597,7 +597,7 @@ async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
       if (attempt < maxRetries) await new Promise(r => setTimeout(r, retryDelayMs));
     }
 
-    // Skip unresolved markets
+    // Still unresolved after retries
     if (!market || !(market.umaResolutionStatus === "resolved" || market.automaticallyResolved)) {
       stillPending.push({ market_id, event_slug });
       continue;
@@ -628,6 +628,19 @@ async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
     const result = picked_outcome === winningOutcome ? "WIN" : "LOSS";
     const resultEmoji = RESULT_EMOJIS[result] || "";
     const ids = signalsGroup.map(s => s.id);
+
+    // --- Check if this pick exists in wallet_live_picks ---
+    const { data: livePick } = await supabase
+      .from("wallet_live_picks")
+      .select("*")
+      .eq("market_id", market_id)
+      .eq("picked_outcome", picked_outcome)
+      .single();
+
+    if (!livePick) {
+      console.log(`ℹ️ Skipping alerts for market ${market_id} (${picked_outcome}) — not in wallet_live_picks`);
+      continue; // skip alerts, still update signals below
+    }
 
     // --- Update signals table ---
     const { error: updateSignalsError } = await supabase
@@ -662,7 +675,7 @@ async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
       continue;
     }
 
-    // --- Send TRADE RESULT ALERT ---
+    // --- TRADE RESULT ALERT ---
     const resolvedDate = new Date(market.resolvedAt || market.endDate).toLocaleString("en-US", { timeZone: TIMEZONE, hour12: true });
     const tradeResultText = `📈 TRADE RESULT ALERT
 Market Event: [${market_name || event_slug}](https://polymarket.com/market/${event_slug})
@@ -673,7 +686,7 @@ Event Resolved: ${resolvedDate}`;
     try {
       await sendTelegram(tradeResultText, false);
       await updateNotes("midas-sports", tradeResultText);
-      console.log(`✅ TRADE RESULT ALERT sent & outcomes updated for market ${market_id} (${picked_outcome})`);
+      console.log(`✅ TRADE RESULT ALERT sent for market ${market_id} (${picked_outcome})`);
       resolvedCount += signalsGroup.length;
       resolvedMarkets.push({ market_id, event_slug, picked_outcome, result });
     } catch (err) {
@@ -681,7 +694,7 @@ Event Resolved: ${resolvedDate}`;
       stillPending.push({ market_id, event_slug });
     }
 
-    // --- Send NEW TRADE SIGNAL ALERTS if not already sent ---
+    // --- NEW TRADE SIGNAL ALERT (Wallet Only) ---
     for (const sig of signalsGroup) {
       if (!sig.sent_alert) {
         const startDate = sig.event_start ? new Date(sig.event_start) : null;
@@ -708,7 +721,6 @@ ${startDate ? `Event Start: ${startDate.toLocaleString("en-US", { timeZone: TIME
   console.log(`Total Pending Signals: ${totalPending}`);
   console.log(`Signals Resolved Today: ${resolvedCount}`);
   console.log(`Signals Still Pending: ${stillPending.length}`);
-
   if (resolvedMarkets.length) {
     console.log("✅ Resolved Markets:");
     resolvedMarkets.forEach(m => {
@@ -722,6 +734,7 @@ ${startDate ? `Event Start: ${startDate.toLocaleString("en-US", { timeZone: TIME
     });
   }
 }
+
 
 /* ===========================
    Count Wallet Daily Losses

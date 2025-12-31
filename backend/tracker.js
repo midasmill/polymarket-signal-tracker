@@ -134,17 +134,19 @@ async function fetchMarket(eventSlug) {
     const market = await res.json();
     marketCache.set(eventSlug, market);
 
-    // Extract resolved outcome if market is closed
-    if (market.closed) {
+    // ✅ Determine winning outcome for resolved/closed markets
+    if (market.closed && market.automaticallyResolved) {
+      // Outcomes array is ["USC","TCU"], description explains rules
+      // Check which side won using market.description or market.events[0].score
       const event = market.events?.[0];
-      if (event?.ended || market.automaticallyResolved) {
-        // Use score or outcomes array to determine winner
-        if (market.outcomes && market.outcomes.length > 0) {
-          market.outcome = market.outcomes.includes(event.score)
-            ? event.score
-            : market.outcomes[1]; // fallback if score not in outcomes
-        } else {
-          market.outcome = null;
+      if (event) {
+        const outcomes = market.outcomes || [];
+        // Example rule: if score shows USC won, pick "USC"
+        if (event.score) {
+          const [scoreA, scoreB] = event.score.split("-").map(Number);
+          if (scoreA > scoreB) market.outcome = outcomes[0]; // first outcome wins
+          else if (scoreB > scoreA) market.outcome = outcomes[1]; // second outcome wins
+          else market.outcome = null; // tie, optional
         }
       }
     }

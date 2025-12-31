@@ -333,7 +333,7 @@ async function fetchWalletActivities(proxyWallet, retries = 3) {
 }
 
 /* ===========================
-   Track Wallet (DEBUG FIXED)
+   Track Wallet (DEBUG FIXED – INCLUDE ZERO AMOUNT)
 =========================== */
 async function trackWallet(wallet) {
   const proxyWallet = wallet.polymarket_proxy_wallet;
@@ -377,11 +377,10 @@ async function trackWallet(wallet) {
     if (!eventSlug) continue;
 
     // ✅ Calculate amount reliably
-    let amount = 0;
-    if (pos.usdcSize && Number(pos.usdcSize) > 0) amount = Number(pos.usdcSize);
-    else if (pos.size && Number(pos.size) > 0) amount = Number(pos.size);
-    else if (pos.amount && Number(pos.amount) > 0) amount = Number(pos.amount);
-    else if (pos.cashPnl && Number(pos.cashPnl) > 0) amount = Number(pos.cashPnl);
+    let amount = Number(pos.usdcSize ?? pos.size ?? pos.amount ?? pos.cashPnl ?? 0);
+
+    // If amount is 0, treat as prediction-only event (assign default $1000)
+    if (amount === 0) amount = 1000;
 
     if (amount < 1000) {
       console.log(`[SKIP] Wallet ${wallet.id} event ${eventSlug} amount ${amount} < 1000`);
@@ -445,6 +444,7 @@ async function trackWallet(wallet) {
     return;
   }
 
+  // 3️⃣ Upsert signals safely
   await supabase.from("signals").upsert(newSignals, {
     onConflict: ["wallet_id", "event_slug", "picked_outcome"]
   });
@@ -477,7 +477,7 @@ async function trackWallet(wallet) {
 }
 
 /* ===========================
-   Rebuild Wallet Live Picks (DEBUG)
+   Rebuild Wallet Live Picks (DEBUG FIXED – INCLUDE ZERO AMOUNT)
 =========================== */
 async function rebuildWalletLivePicks() {
   const { data: signals, error } = await supabase
@@ -495,8 +495,7 @@ async function rebuildWalletLivePicks() {
     `)
     .eq("outcome", "Pending")
     .eq("wallets.paused", false)
-    .gte("wallets.win_rate", WIN_RATE_THRESHOLD)
-    .gte("amount", 1000);
+    .gte("wallets.win_rate", WIN_RATE_THRESHOLD);
 
   if (error) {
     console.error("❌ Failed fetching signals:", error.message);
@@ -518,6 +517,12 @@ async function rebuildWalletLivePicks() {
   const resolvedPicks = await Promise.all(
     [...walletEventMap.values()].map(async walletSignals => {
       const { wallet_id, event_slug, market_id, market_name } = walletSignals[0];
+
+      // Treat amount=0 as fallback 1000 for net pick calculation
+      for (const sig of walletSignals) {
+        if (!sig.amount || sig.amount === 0) sig.amount = 1000;
+      }
+
       const netPick = await getWalletNetPick(wallet_id, event_slug);
       if (!netPick) {
         console.log(`[SKIP] Wallet ${wallet_id} event ${event_slug} has no net pick (maybe low exposure or hedge)`);
@@ -586,6 +591,7 @@ async function rebuildWalletLivePicks() {
     console.log(`✅ Wallet live picks rebuilt (${finalLivePicks.length})`);
   }
 }
+
 
 /* ===========================
    Fetch Wallet Activity (DATA-API)

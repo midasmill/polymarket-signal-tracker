@@ -917,9 +917,6 @@ async function trackerLoop() {
     // 4️⃣ Send alerts (NO RETURN EXPECTED)
     await processAndSendSignals();
 
-    // 5️⃣ Resolve markets
-    await resolveMarkets();
-
     // 6️⃣ Update wallet metrics
     await updateWalletMetricsJS();
 

@@ -393,7 +393,11 @@ async function processAndSendSignals() {
   let sentCount = 0;
 
   for (const pick of livePicks) {
-    const confidenceEmoji = pick.confidence || getConfidenceEmoji(pick.vote_count);
+    // Convert numeric confidence to emoji only for display
+    const confidenceEmoji = Object.entries(CONFIDENCE_THRESHOLDS)
+      .find(([, threshold]) => threshold === pick.confidence)?.[0]
+      || getConfidenceEmoji(pick.vote_count);
+
     const marketLabel = pick.market_name || pick.event_slug || "Market";
     const marketLink = pick.market_url || (pick.event_slug ? `https://polymarket.com/market/${pick.event_slug}` : null);
 
@@ -413,7 +417,7 @@ async function processAndSendSignals() {
       }
 
       const text = `NEW TRADE ALERT
-🎖️ Market Event: ${marketLink ? `[${marketLabel}](${marketLink})` : marketLabel}
+⚡️ Market Event: ${marketLink ? `[${marketLabel}](${marketLink})` : marketLabel}
 Prediction: ${pick.picked_outcome}
 Confidence: ${confidenceEmoji}`;
 
@@ -426,7 +430,7 @@ Confidence: ${confidenceEmoji}`;
         console.error("❌ Failed sending NEW TRADE ALERT:", err.message);
       }
 
-      continue; // don't allow result on same loop
+      continue; // skip result processing for new signals
     }
 
     // 2️⃣ TRADE RESULT ALERT
@@ -445,7 +449,7 @@ Confidence: ${confidenceEmoji}`;
       }
 
       const resultText = `TRADE RESULT ALERT
-🎖️ Market Event: ${marketLink ? `[${marketLabel}](${marketLink})` : marketLabel}
+⚡️ Market Event: ${marketLink ? `[${marketLabel}](${marketLink})` : marketLabel}
 Prediction: ${pick.picked_outcome}
 Result: ${pick.outcome} ${resultEmoji}
 Confidence: ${confidenceEmoji}`;
@@ -540,7 +544,7 @@ async function resolveMarkets() {
 
     // Build TRADE RESULT ALERT
     const text = `TRADE RESULT ALERT
-🎖️ Market Event: [${market_name || event_slug}](https://polymarket.com/market/${event_slug})
+⚡️ Market Event: [${market_name || event_slug}](https://polymarket.com/market/${event_slug})
 Prediction: ${picked_outcome}
 Result: ${result} ${resultEmoji}`;
 

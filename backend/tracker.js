@@ -593,7 +593,7 @@ for (const sig of signals) {
 }
 
 /* ===========================
-   Resolve Markets & Send TRADE RESULT ALERT (DEBUG + LIVE)
+   Resolve Markets & Send TRADE RESULT ALERT (DEBUG + DAILY SUMMARY)
 =========================== */
 async function resolveMarkets() {
   const { data: pending, error } = await supabase
@@ -607,12 +607,16 @@ async function resolveMarkets() {
     return;
   }
 
-  if (!pending?.length) {
+  const totalPending = pending?.length || 0;
+  if (!totalPending) {
     console.log("ℹ️ No pending signals to resolve.");
     return;
   }
 
-  console.log(`🔍 Resolving ${pending.length} pending signals...`);
+  console.log(`🔍 Resolving ${totalPending} pending signals...`);
+
+  let resolvedCount = 0;
+  const stillPending = [];
 
   // Group by market_id + picked_outcome
   const marketOutcomeMap = new Map();
@@ -631,16 +635,19 @@ async function resolveMarkets() {
       market = await fetchMarket(event_slug);
     } catch (err) {
       console.error(`❌ Failed fetching market for ${event_slug}:`, err.message);
+      stillPending.push(event_slug);
       continue;
     }
 
     if (!market) {
       console.log(`⚠️ Market data missing for event_slug ${event_slug}`);
+      stillPending.push(event_slug);
       continue;
     }
 
     if (!market.resolved) {
       console.log(`⚠️ Market ${market_id} (${event_slug}) not resolved yet`);
+      stillPending.push(event_slug);
       continue;
     }
 
@@ -662,6 +669,7 @@ async function resolveMarkets() {
 
     if (updateSignalsError) {
       console.error(`❌ Failed updating signals for market ${market_id} (${picked_outcome}):`, updateSignalsError.message);
+      stillPending.push(event_slug);
       continue;
     }
 
@@ -678,6 +686,7 @@ async function resolveMarkets() {
 
     if (updateLivePicksError) {
       console.error(`❌ Failed updating wallet_live_picks for market ${market_id} (${picked_outcome}):`, updateLivePicksError.message);
+      stillPending.push(event_slug);
       continue;
     }
 
@@ -691,10 +700,19 @@ Result: ${result} ${resultEmoji}`;
       await sendTelegram(text, false);
       await updateNotes("midas-sports", text);
       console.log(`✅ TRADE RESULT ALERT sent & outcomes updated for market ${market_id} (${picked_outcome})`);
+      resolvedCount += signalsGroup.length;
     } catch (err) {
       console.error(`❌ Failed sending TRADE RESULT ALERT for market ${market_id}:`, err.message);
+      stillPending.push(event_slug);
     }
   }
+
+  // Daily summary
+  console.log("📊 Daily Resolution Summary");
+  console.log(`Total Pending Signals: ${totalPending}`);
+  console.log(`Signals Resolved Today: ${resolvedCount}`);
+  console.log(`Signals Still Pending: ${stillPending.length}`);
+  if (stillPending.length) console.log(`Pending Events: ${stillPending.join(", ")}`);
 }
 
 /* ===========================

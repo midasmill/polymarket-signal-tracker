@@ -898,8 +898,6 @@ async function trackerLoop() {
       .select("market_id");
 
     const rebuiltCount = livePicks?.length || 0;
-
-    await syncWalletPickOutcomes();
      
     // 4️⃣ Send alerts (NO RETURN EXPECTED)
     await processAndSendSignals();

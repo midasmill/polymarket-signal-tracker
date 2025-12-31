@@ -124,25 +124,18 @@ async function fetchWithRetry(url, options = {}, retries = 3, delay = 1000) {
 
 async function fetchMarket(eventSlug) {
   if (!eventSlug) return null;
-  // Check cache
   if (marketCache.has(eventSlug)) return marketCache.get(eventSlug);
-
   try {
     const res = await fetch(`https://gamma-api.polymarket.com/markets/slug/${eventSlug}`, {
       headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
     });
     if (!res.ok) return null;
-
     const market = await res.json();
-
-    // Cache it even if closed/resolved
+    // Skip closed markets
+    if (market.closed) return null;
     marketCache.set(eventSlug, market);
-
     return market;
-  } catch (err) {
-    console.error(`❌ Fetch error for ${eventSlug}:`, err.message);
-    return null;
-  }
+  } catch { return null; }
 }
 
 function getConfidenceEmoji(count) {
@@ -539,10 +532,9 @@ for (const sig of signals) {
 }
 
 /* ===========================
-   Resolve Markets & Send Alerts (Refactored)
+   Resolve Markets & Send TRADE RESULT ALERT (RETRY + DAILY SUMMARY + LOG + NEW ALERT FORMAT)
 =========================== */
 async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
-  // Fetch all pending signals
   const { data: pending, error } = await supabase
     .from("signals")
     .select("*")
@@ -562,6 +554,10 @@ async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
 
   console.log(`🔍 Resolving ${totalPending} pending signals...`);
 
+  let resolvedCount = 0;
+  const resolvedMarkets = [];
+  const stillPending = [];
+
   // Group by market_id + picked_outcome
   const marketOutcomeMap = new Map();
   for (const sig of pending) {
@@ -571,51 +567,11 @@ async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
     marketOutcomeMap.get(key).push(sig);
   }
 
-  let resolvedCount = 0;
-  const resolvedMarkets = [];
-  const stillPending = [];
-
   for (const [key, signalsGroup] of marketOutcomeMap.entries()) {
     const { event_slug, market_id, picked_outcome, market_name, event_start } = signalsGroup[0];
-
-    // ------------------------------
-    // Step 1: Ensure wallet_live_picks
-    // ------------------------------
-    if (signalsGroup.length >= 2) {
-      // Upsert into wallet_live_picks
-      try {
-        const { error: upsertError } = await supabase
-          .from("wallet_live_picks")
-          .upsert({
-            market_id,
-            picked_outcome,
-            vote_count: signalsGroup.length,
-            outcome: "Pending",
-            resolved_outcome: null,
-          }, { onConflict: ["market_id", "picked_outcome"] });
-
-        if (upsertError) console.error("❌ wallet_live_picks upsert failed:", upsertError.message);
-
-        // Send NEW TRADE SIGNAL alert for wallet_live_picks
-        const startDate = event_start ? new Date(event_start) : null;
-        const newTradeText = `⚡️ NEW TRADE SIGNAL
-Market Event: [${market_name || event_slug}](https://polymarket.com/market/${event_slug})
-Prediction: ${picked_outcome}
-Confidence: ${signalsGroup[0].confidence || "⭐"}
-${startDate ? `Event Start: ${startDate.toLocaleString("en-US", { timeZone: TIMEZONE, hour12: true })}` : ""}`;
-
-        await sendTelegram(newTradeText, false);
-        await updateNotes("midas-sports", newTradeText);
-
-      } catch (err) {
-        console.error("❌ Failed sending NEW TRADE SIGNAL:", err.message);
-      }
-    }
-
-    // ------------------------------
-    // Step 2: Fetch market and resolve
-    // ------------------------------
     let market = null;
+
+    // Retry loop
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         market = await fetchMarket(event_slug);
@@ -639,9 +595,7 @@ ${startDate ? `Event Start: ${startDate.toLocaleString("en-US", { timeZone: TIME
       continue;
     }
 
-    // ------------------------------
-    // Step 3: Determine winning outcome
-    // ------------------------------
+    // --- Parse outcomes/outcomePrices ---
     let outcomes = market.outcomes;
     let outcomePrices = market.outcomePrices;
 
@@ -651,10 +605,26 @@ ${startDate ? `Event Start: ${startDate.toLocaleString("en-US", { timeZone: TIME
     if (typeof outcomePrices === "string") {
       try { outcomePrices = JSON.parse(outcomePrices); } catch { outcomePrices = []; }
     }
-    if (Array.isArray(outcomePrices)) outcomePrices = outcomePrices.map(String);
+    if (Array.isArray(outcomePrices)) outcomePrices = outcomePrices.map(Number);
 
-    const winnerIndex = outcomePrices?.indexOf("1");
-    const winningOutcome = market.outcome || (winnerIndex >= 0 ? outcomes[winnerIndex] : null);
+    // --- Determine winning outcome ---
+    let winningOutcome = market.outcome; // already set sometimes
+    if (!winningOutcome) {
+      const winnerIndex = outcomePrices?.findIndex(p => p === 1);
+      if (winnerIndex >= 0 && outcomes[winnerIndex]) winningOutcome = outcomes[winnerIndex];
+    }
+
+    // Fallback: use score from events if automaticallyResolved but outcome missing
+    if (!winningOutcome && market.events?.length) {
+      const ev = market.events[0];
+      if (ev?.ended && ev?.score) {
+        const scoreParts = ev.score.split("-").map(Number);
+        if (scoreParts.length === 2) {
+          const [home, away] = scoreParts;
+          winningOutcome = home > away ? outcomes[0] : outcomes[1];
+        }
+      }
+    }
 
     if (!winningOutcome) {
       console.log(`⚠️ Could not determine winning outcome for market ${market_id} (${event_slug})`);
@@ -662,44 +632,85 @@ ${startDate ? `Event Start: ${startDate.toLocaleString("en-US", { timeZone: TIME
       continue;
     }
 
-    // ------------------------------
-    // Step 4: Update wallet_live_picks with resolved outcome
-    // ------------------------------
-    try {
-      const { error: updateError } = await supabase
-        .from("wallet_live_picks")
-        .update({
-          outcome: picked_outcome === winningOutcome ? "WIN" : "LOSS",
-          resolved_outcome: winningOutcome,
-        })
-        .eq("market_id", market_id)
-        .eq("picked_outcome", picked_outcome);
+    const result = picked_outcome === winningOutcome ? "WIN" : "LOSS";
+    const resultEmoji = RESULT_EMOJIS[result] || "";
+    const ids = signalsGroup.map(s => s.id);
 
-      if (updateError) console.error("❌ Failed updating wallet_live_picks:", updateError.message);
+    // --- Update signals ---
+    const { error: updateSignalsError } = await supabase
+      .from("signals")
+      .update({
+        outcome: result,
+        resolved_outcome: winningOutcome,
+        outcome_at: new Date()
+      })
+      .in("id", ids);
 
-      // Send TRADE RESULT ALERT
-      const resolvedDate = new Date(market.resolvedAt || market.endDate).toLocaleString("en-US", { timeZone: TIMEZONE, hour12: true });
-      const tradeResultText = `📈 TRADE RESULT ALERT
+    if (updateSignalsError) {
+      console.error(`❌ Failed updating signals for market ${market_id} (${picked_outcome}):`, updateSignalsError.message);
+      stillPending.push({ market_id, event_slug });
+      continue;
+    }
+
+    // --- Update wallet_live_picks ---
+    const { error: updateLivePicksError } = await supabase
+      .from("wallet_live_picks")
+      .update({
+        outcome: result,
+        resolved_outcome: winningOutcome,
+        vote_count: signalsGroup.length
+      })
+      .eq("market_id", market_id)
+      .eq("picked_outcome", picked_outcome);
+
+    if (updateLivePicksError) {
+      console.error(`❌ Failed updating wallet_live_picks for market ${market_id} (${picked_outcome}):`, updateLivePicksError.message);
+      stillPending.push({ market_id, event_slug });
+      continue;
+    }
+
+    // --- TRADE RESULT ALERT ---
+    const resolvedDate = new Date(market.resolvedAt || market.endDate).toLocaleString("en-US", { timeZone: TIMEZONE, hour12: true });
+    const tradeResultText = `📈 TRADE RESULT ALERT
 Market Event: [${market_name || event_slug}](https://polymarket.com/market/${event_slug})
 Prediction: ${picked_outcome}
-Result: ${picked_outcome === winningOutcome ? "WIN" : "LOSS"}
+Result: ${result} ${resultEmoji}
 Event Resolved: ${resolvedDate}`;
 
+    try {
       await sendTelegram(tradeResultText, false);
       await updateNotes("midas-sports", tradeResultText);
-
+      console.log(`✅ TRADE RESULT ALERT sent & outcomes updated for market ${market_id} (${picked_outcome})`);
       resolvedCount += signalsGroup.length;
-      resolvedMarkets.push({ market_id, event_slug, picked_outcome, result: picked_outcome === winningOutcome ? "WIN" : "LOSS" });
-
+      resolvedMarkets.push({ market_id, event_slug, picked_outcome, result });
     } catch (err) {
-      console.error("❌ Failed resolving wallet_live_picks:", err.message);
+      console.error(`❌ Failed sending TRADE RESULT ALERT for market ${market_id}:`, err.message);
       stillPending.push({ market_id, event_slug });
+    }
+
+    // --- NEW TRADE SIGNAL ALERT ---
+    for (const sig of signalsGroup) {
+      if (!sig.sent_alert) {
+        const startDate = sig.event_start ? new Date(sig.event_start) : null;
+        const newTradeText = `⚡️ NEW TRADE SIGNAL
+Market Event: [${market_name || event_slug}](https://polymarket.com/market/${event_slug})
+Prediction: ${sig.picked_outcome}
+Confidence: ${sig.confidence || "⭐"}
+${startDate ? `Event Start: ${startDate.toLocaleString("en-US", { timeZone: TIMEZONE, hour12: true })}` : ""}`;
+
+        try {
+          await sendTelegram(newTradeText, false);
+          await updateNotes("midas-sports", newTradeText);
+          await supabase.from("signals").update({ sent_alert: true }).eq("id", sig.id);
+          console.log(`✅ NEW TRADE SIGNAL sent for ${sig.id}`);
+        } catch (err) {
+          console.error(`❌ Failed sending NEW TRADE SIGNAL for ${sig.id}:`, err.message);
+        }
+      }
     }
   }
 
-  // ------------------------------
-  // Step 5: Daily summary (only wallet_live_picks)
-  // ------------------------------
+  // --- Daily summary + log ---
   console.log("📊 Daily Resolution Summary");
   console.log(`Total Pending Signals: ${totalPending}`);
   console.log(`Signals Resolved Today: ${resolvedCount}`);
@@ -717,6 +728,7 @@ Event Resolved: ${resolvedDate}`;
     });
   }
 }
+
 
 
 /* ===========================

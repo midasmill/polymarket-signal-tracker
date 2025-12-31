@@ -532,7 +532,7 @@ for (const sig of signals) {
 }
 
 /* ===========================
-   Resolve Markets & Send TRADE RESULT ALERT (RETRY + DAILY SUMMARY + LOG + NEW ALERT FORMAT + DEBUG)
+   Resolve Markets & Send TRADE RESULT ALERT (RETRY + DAILY SUMMARY + LOG + NEW ALERT FORMAT)
 =========================== */
 async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
   const { data: pending, error } = await supabase
@@ -596,7 +596,7 @@ async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
       continue;
     }
 
-    // --- Parse outcomes/outcomePrices ---
+    // --- Parse outcomes/outcomePrices in case they are strings ---
     let outcomes = market.outcomes;
     let outcomePrices = market.outcomePrices;
 
@@ -608,27 +608,19 @@ async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
     }
     if (Array.isArray(outcomePrices)) outcomePrices = outcomePrices.map(String);
 
-    // --- Determine winning outcome ---
-    let winningOutcome = market.outcome; // use market.outcome if present
-    if (!winningOutcome) {
-      const winnerIndex = outcomePrices?.indexOf("1");
-      if (winnerIndex >= 0 && outcomes[winnerIndex]) winningOutcome = outcomes[winnerIndex];
-    }
+    // --- DEBUG LOG ---
+    console.log("DEBUG:", {
+      market_id,
+      event_slug,
+      outcomes,
+      outcomePrices,
+      marketOutcomeStatus: market.umaResolutionStatus,
+      automaticallyResolved: market.automaticallyResolved
+    });
 
-    // Fallback: use events.score if automaticallyResolved but outcome missing
-    if (!winningOutcome && market.events?.length) {
-      const ev = market.events[0];
-      if (ev?.ended && ev?.score) {
-        const scoreParts = ev.score.split("-").map(Number);
-        if (scoreParts.length === 2) {
-          const [home, away] = scoreParts;
-          winningOutcome = home > away ? outcomes[0] : outcomes[1];
-        }
-      }
-    }
-
-    // --- DEBUG LOG: resolved outcome ---
-    console.log(`🟢 Market ${market_id} (${event_slug}) resolved winner:`, winningOutcome);
+    // Determine winning outcome
+    const winnerIndex = outcomePrices?.findIndex(p => p === "1");
+    const winningOutcome = market.outcome || (winnerIndex >= 0 ? outcomes[winnerIndex] : null);
 
     if (!winningOutcome) {
       console.log(`⚠️ Could not determine winning outcome for market ${market_id} (${event_slug})`);
@@ -732,6 +724,7 @@ ${startDate ? `Event Start: ${startDate.toLocaleString("en-US", { timeZone: TIME
     });
   }
 }
+
 
 /* ===========================
    Count Wallet Daily Losses

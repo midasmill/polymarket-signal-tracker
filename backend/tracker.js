@@ -244,7 +244,7 @@ async function fetchAndInsertLeaderboardWallets() {
 }
 
 /* ===========================
-   Track Wallet (FIXED: insert signals even if market not found)
+   Track Wallet (FULL FIXED)
 =========================== */
 async function trackWallet(wallet) {
   const proxyWallet = wallet.polymarket_proxy_wallet;
@@ -317,7 +317,7 @@ async function trackWallet(wallet) {
     // 5️⃣ Push new signal
     newSignals.push({
       wallet_id: wallet.id,
-      market_id: pos.conditionId,
+      market_id: pos.conditionId || "unknown",
       market_name: pos.title || eventSlug,
       event_slug: eventSlug,
       picked_outcome: pickedOutcome,
@@ -333,16 +333,39 @@ async function trackWallet(wallet) {
     console.log(`[NEW SIGNAL] Wallet ${wallet.id} event ${eventSlug} -> ${pickedOutcome} amount ${amount}`);
   }
 
+  // 6️⃣ Upsert all new signals (fixed for missing markets)
   if (!newSignals.length) {
     console.log(`[INFO] Wallet ${wallet.id} no new signals to insert`);
     return;
   }
 
-  // 6️⃣ Upsert all new signals
-  await supabase.from("signals").upsert(newSignals, {
-    onConflict: ["wallet_id", "event_slug", "picked_outcome"]
-  });
-  console.log(`[UPSERT] Wallet ${wallet.id} inserted/updated ${newSignals.length} signals`);
+  const signalsToUpsert = newSignals.map(s => ({
+    wallet_id: s.wallet_id || 0,
+    market_id: s.market_id || "unknown",
+    market_name: s.market_name || s.event_slug || "unknown",
+    event_slug: s.event_slug || "unknown",
+    picked_outcome: s.picked_outcome || "UNKNOWN",
+    side: s.side || "BUY",
+    tx_hash: s.tx_hash || "",
+    amount: s.amount || 1000,
+    outcome: s.outcome || "Pending",
+    win_rate: s.win_rate ?? 0,
+    created_at: s.created_at || new Date(),
+    event_start_at: s.event_start_at || null
+  }));
+
+  const { data: upserted, error: upsertError } = await supabase
+    .from("signals")
+    .upsert(signalsToUpsert, {
+      onConflict: ["wallet_id", "event_slug", "picked_outcome"]
+    });
+
+  if (upsertError) {
+    console.error(`[UPSERT ERROR] Wallet ${wallet.id}:`, upsertError.message);
+    console.error("Payload:", signalsToUpsert);
+  } else {
+    console.log(`[UPSERT] Wallet ${wallet.id} inserted/updated ${upserted?.length || 0} signals`);
+  }
 
   // 7️⃣ Update wallet event exposure
   const affectedEvents = [...new Set(newSignals.map(s => s.event_slug))];
@@ -370,7 +393,6 @@ async function trackWallet(wallet) {
     console.log(`[EXPOSURE] Wallet ${wallet.id} event ${eventSlug} net ${netOutcome} amount ${netAmount}`);
   }
 }
-
 
 /* ===========================
    Get Wallet Outcome Totals (fallback applied)
@@ -458,18 +480,24 @@ async function rebuildWalletLivePicks() {
 
   // 2️⃣ Resolve net pick per wallet/event
   const resolvedPicks = await Promise.all([...walletEventMap.values()].map(async walletSignals => {
-    const { wallet_id, event_slug, market_id, market_name } = walletSignals[0];
+    const { wallet_id, event_slug } = walletSignals[0];
     const netPick = await getWalletNetPick(wallet_id, event_slug);
     if (!netPick) { 
       console.log(`[SKIP] Wallet ${wallet_id} event ${event_slug} has no net pick`); 
       return null; 
     }
+
+    // Use first market_id / market_name as fallback if missing
+    const market_id = walletSignals[0].market_id || "unknown";
+    const market_name = walletSignals[0].market_name || event_slug;
+
     console.log(`[NET PICK] Wallet ${wallet_id} event ${event_slug} -> ${netPick}`);
+
     return {
       wallet_id,
       event_slug,
       market_id,
-      market_name: market_name || event_slug, // fallback if missing
+      market_name,
       picked_outcome: netPick
     };
   }));
@@ -528,6 +556,7 @@ async function rebuildWalletLivePicks() {
   if (upsertError) console.error("❌ Failed upserting wallet_live_picks:", upsertError.message);
   else console.log(`✅ Wallet live picks rebuilt (${finalLivePicks.length})`);
 }
+
 
 /* ===========================
    Fetch Wallet Activity (DATA-API)

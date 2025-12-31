@@ -328,11 +328,12 @@ async function rebuildWalletLivePicks() {
 
     if (voteCount < MIN_WALLETS_FOR_SIGNAL) continue;
 
-    let confidence = null;
-    for (const [stars, threshold] of Object.entries(CONFIDENCE_THRESHOLDS)
+    // ✅ Determine numeric confidence for DB
+    let confidenceNum = 1; // default
+    for (const [, threshold] of Object.entries(CONFIDENCE_THRESHOLDS)
       .sort((a, b) => b[1] - a[1])) {
       if (voteCount >= threshold) {
-        confidence = stars;
+        confidenceNum = threshold;
         break;
       }
     }
@@ -345,14 +346,14 @@ async function rebuildWalletLivePicks() {
       picked_outcome: pick.picked_outcome,
       wallets: walletIds,
       vote_count: voteCount,
-      confidence,
+      confidence: confidenceNum, // store numeric value
       fetched_at: new Date()
     });
   }
 
   if (!finalLivePicks.length) return;
 
-  // 4️⃣ Upsert (NO .single, NO silent failure)
+  // 4️⃣ Upsert (numeric confidence, avoids type errors)
   for (const pick of finalLivePicks) {
     console.log(
       `[LIVE PICK] ${pick.market_name} | ${pick.picked_outcome} | Wallets: ${pick.vote_count} | IDs: ${pick.wallets.join(", ")}`

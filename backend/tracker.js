@@ -818,7 +818,7 @@ Signal Sent: ${now.toLocaleString("en-US", { timeZone: "America/New_York" })} ES
 }
 
 /* ===========================
-   Tracker Loop (Enhanced)
+   Tracker Loop (Refactored)
 =========================== */
 let isTrackerRunning = false;
 async function trackerLoop() {
@@ -840,13 +840,11 @@ async function trackerLoop() {
     // 2️⃣ Track wallets concurrently
     await Promise.allSettled(wallets.map(trackWallet));
 
-    // 3️⃣ Rebuild live picks from updated signals
-    await rebuildWalletLivePicks();
+    // 3️⃣ Rebuild wallet live picks AND send signals in one step
+    await rebuildAndSendLivePicks();
 
-    await resolveMarkets(); 
-
-    // 4️⃣ Process and send signals
-    await processAndSendAllNotifications();
+    // 4️⃣ Resolve resolved markets
+    await resolveMarkets();
 
     // 5️⃣ Update wallet metrics (win_rate, paused, daily losses)
     await updateWalletMetricsJS();
@@ -859,16 +857,16 @@ async function trackerLoop() {
 }
 
 /* ===========================
-   Main Entry
+   Main Entry (Refactored)
 =========================== */
 async function main() {
   console.log("🚀 POLYMARKET TRACKER LIVE 🚀");
 
-  // 1️⃣ Initial fetch leaderboard and wallet tracking
+  // 1️⃣ Initial leaderboard fetch and tracker run
   await fetchAndInsertLeaderboardWallets().catch(err => console.error(err));
   await trackerLoop();
 
-  // 2️⃣ Set continuous polling
+  // 2️⃣ Continuous polling
   setInterval(trackerLoop, POLL_INTERVAL);
 
   // 3️⃣ Daily cron for leaderboard refresh
@@ -878,10 +876,10 @@ async function main() {
     await trackerLoop();
   }, { timezone: TIMEZONE });
 
-  // 4️⃣ Heartbeat log
+  // 4️⃣ Heartbeat log every 60 seconds
   setInterval(() => console.log(`[HEARTBEAT] Tracker alive @ ${new Date().toISOString()}`), 60_000);
 
-  // 5️⃣ Simple HTTP server for health check
+  // 5️⃣ HTTP server for health check
   const PORT = process.env.PORT || 3000;
   http.createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "text/plain" });

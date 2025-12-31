@@ -715,7 +715,7 @@ if (sig.outcome === "LOSS") losses++;
 }
 
 /* ===========================
-   Process & Send NEW TRADE ALERTS
+   Process & Send Signals (NEW TRADE + RESULT ALERTS)
 =========================== */
 async function processAndSendSignals() {
   const { data: livePicks, error } = await supabase
@@ -729,42 +729,55 @@ async function processAndSendSignals() {
   if (!livePicks?.length) return;
 
   for (const pick of livePicks) {
-    // Skip if already sent
-    if (pick.signal_sent_at) continue;
-
-    // Must have wallets
-    if (!pick.wallets || pick.wallets.length === 0) continue;
-
-    // Must meet minimum wallet count
-    if (pick.vote_count < MIN_WALLETS_FOR_SIGNAL) continue;
-
-    // Confidence emoji purely for display
     const confidenceEmoji = pick.confidence || getConfidenceEmoji(pick.vote_count);
 
-    // Build message
-    const text = `NEW TRADE ALERT
+    // 1️⃣ NEW TRADE ALERT
+    if (!pick.signal_sent_at && pick.vote_count >= MIN_WALLETS_FOR_SIGNAL) {
+      const newTradeText = `NEW TRADE ALERT
 🎖️ Market Event: [${pick.market_name || pick.event_slug}](https://polymarket.com/market/${pick.event_slug})
 Prediction: ${pick.picked_outcome}
 Confidence: ${confidenceEmoji}`;
 
-    try {
-      // Send Telegram
-      await sendTelegram(text, false);
+      try {
+        await sendTelegram(newTradeText, false);
+        await updateNotes("midas-sports", newTradeText);
 
-      // Update Notes page
-      await updateNotes("midas-sports", text);
+        console.log(`✅ NEW TRADE ALERT sent for market ${pick.market_id} (${pick.picked_outcome})`);
 
-      console.log(`✅ NEW TRADE ALERT sent for market ${pick.market_id} (${pick.picked_outcome})`);
+        // Mark as sent
+        await supabase
+          .from("wallet_live_picks")
+          .update({ signal_sent_at: new Date(), last_confidence_sent: confidenceEmoji })
+          .eq("market_id", pick.market_id)
+          .eq("picked_outcome", pick.picked_outcome);
+      } catch (err) {
+        console.error(`❌ Failed sending NEW TRADE ALERT for market ${pick.market_id}:`, err.message);
+      }
+    }
 
-      // Mark as sent
-      await supabase
-        .from("wallet_live_picks")
-        .update({ signal_sent_at: new Date(), last_confidence_sent: confidenceEmoji })
-        .eq("market_id", pick.market_id)
-        .eq("picked_outcome", pick.picked_outcome);
+    // 2️⃣ TRADE RESULT ALERT (if outcome resolved and not yet sent)
+    if (pick.outcome && !pick.result_sent_at) {
+      const resultEmoji = RESULT_EMOJIS[pick.outcome] || "";
+      const resultText = `TRADE RESULT ALERT
+🎖️ Market Event: [${pick.market_name || pick.event_slug}](https://polymarket.com/market/${pick.event_slug})
+Prediction: ${pick.picked_outcome}
+Result: ${pick.outcome} ${resultEmoji}`;
 
-    } catch (err) {
-      console.error(`❌ Failed sending NEW TRADE ALERT for market ${pick.market_id}:`, err.message);
+      try {
+        await sendTelegram(resultText, false);
+        await updateNotes("midas-sports", resultText);
+
+        console.log(`✅ TRADE RESULT ALERT sent for market ${pick.market_id} (${pick.picked_outcome})`);
+
+        // Mark result as sent
+        await supabase
+          .from("wallet_live_picks")
+          .update({ result_sent_at: new Date() })
+          .eq("market_id", pick.market_id)
+          .eq("picked_outcome", pick.picked_outcome);
+      } catch (err) {
+        console.error(`❌ Failed sending TRADE RESULT ALERT for market ${pick.market_id}:`, err.message);
+      }
     }
   }
 }

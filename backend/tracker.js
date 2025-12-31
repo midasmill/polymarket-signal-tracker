@@ -17,6 +17,14 @@ const WIN_RATE_THRESHOLD = parseInt(process.env.WIN_RATE_THRESHOLD || "0", 10);
 const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "2", 10);
 const FORCE_SEND = process.env.FORCE_SEND === "true";
 
+const CONFIDENCE_THRESHOLDS = {
+  "⭐": 2,
+  "⭐⭐": 5,
+  "⭐⭐⭐": 10,
+  "⭐⭐⭐⭐": 20,
+  "⭐⭐⭐⭐⭐": 50
+};
+
 const RESULT_EMOJIS = { WIN: "✅", LOSS: "❌", Pending: "⚪" };
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) throw new Error("Supabase keys required");
@@ -29,10 +37,9 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 process.on("unhandledRejection", err => console.error("🔥 Unhandled rejection:", err));
 process.on("uncaughtException", err => console.error("🔥 Uncaught exception:", err));
 
-/**
- * Returns total $ amount picked per outcome
- * for a wallet on a specific event
- */
+/* ===========================
+   Total $ Amount per Picked Outcome for a Wallet on a Specific Event
+=========================== */
 async function getWalletOutcomeTotals(walletId, eventSlug) {
   const { data, error } = await supabase
     .from("signals")
@@ -54,15 +61,9 @@ async function getWalletOutcomeTotals(walletId, eventSlug) {
   return totals;
 }
 
-/**
- * Returns the wallet's NET picked_outcome for an event
- * based on total $ amount per side
- *
- * Example:
- *  YES: 3000
- *  NO:  2900
- *  => YES
- */
+/* ===========================
+   Returns the wallet's NET picked_outcome for an event based on total $ per side
+=========================== */
 async function getWalletNetPick(walletId, eventSlug) {
   const totals = await getWalletOutcomeTotals(walletId, eventSlug);
 
@@ -498,45 +499,26 @@ for (const eventSlug of affectedEvents) {
 }
 
 /* ===========================
-   Confidence
-=========================== */
-
-const CONFIDENCE_THRESHOLDS = {
-  "⭐": 2,
-  "⭐⭐": 5,
-  "⭐⭐⭐": 10,
-  "⭐⭐⭐⭐": 20,
-  "⭐⭐⭐⭐⭐": 50
-};
-
-/* ===========================
    Rebuild Wallet Live Picks
 =========================== */
 async function rebuildWalletLivePicks() {
   const { data: signals, error } = await supabase
     .from("signals")
-    .select(`
-      wallet_id,
-      market_id,
-      market_name,
-      event_slug,
-      picked_outcome,
-      pnl,
-      wallets!inner(paused, win_rate)
-    `)
-    .eq("outcome", "Pending")
-    .eq("wallets.paused", false)
-    .gte("wallets.win_rate", WIN_RATE_THRESHOLD);
+    .select("wallet_id, market_id, market_name, event_slug, picked_outcome")
+    .eq("outcome", "Pending");
 
-  if (error || !signals?.length) return;
+  if (error) return console.error("❌ Failed fetching signals:", error.message);
+  if (!signals?.length) return console.log("⚠️ No pending signals found.");
 
+  // Aggregate picks per market + outcome
   const livePicksMap = new Map();
 
   for (const sig of signals) {
-    if (!sig.picked_outcome || !sig.wallet_id) continue;
-    const pickKey = `${sig.market_id}||${sig.picked_outcome}`;
-    if (!livePicksMap.has(pickKey)) {
-      livePicksMap.set(pickKey, {
+    if (!sig.wallet_id || !sig.picked_outcome) continue;
+
+    const key = `${sig.market_id}||${sig.picked_outcome}`;
+    if (!livePicksMap.has(key)) {
+      livePicksMap.set(key, {
         market_id: sig.market_id,
         market_name: sig.market_name,
         event_slug: sig.event_slug,
@@ -545,34 +527,66 @@ async function rebuildWalletLivePicks() {
         vote_count: 0
       });
     }
-    const entry = livePicksMap.get(pickKey);
+
+    const entry = livePicksMap.get(key);
     if (!entry.wallets.includes(sig.wallet_id)) {
       entry.wallets.push(sig.wallet_id);
       entry.vote_count++;
     }
   }
 
-  const finalLivePicks = [];
-
+  console.log("🏗️ Candidate live picks:");
   for (const p of livePicksMap.values()) {
-    if (p.vote_count < MIN_WALLETS_FOR_SIGNAL) continue;
+    console.log(`Market: ${p.market_id}, Outcome: ${p.picked_outcome}, Wallets: ${p.wallets.join(", ")}, Vote Count: ${p.vote_count}`);
+  }
+
+  // Filter by min wallets & compute confidence
+  const finalLivePicks = [];
+  for (const pick of livePicksMap.values()) {
+    if (pick.vote_count < MIN_WALLETS_FOR_SIGNAL) {
+      console.log(`❌ Pick skipped (vote_count < MIN_WALLETS_FOR_SIGNAL): ${pick.market_id} - ${pick.picked_outcome}`);
+      continue;
+    }
+
     let confidence = null;
-    for (const [stars, threshold] of Object.entries(CONFIDENCE_THRESHOLDS)
-      .sort((a, b) => b[1] - a[1])) {
-      if (p.vote_count >= threshold) {
+    for (const [stars, threshold] of Object.entries(CONFIDENCE_THRESHOLDS).sort((a, b) => b[1] - a[1])) {
+      if (pick.vote_count >= threshold) {
         confidence = stars;
         break;
       }
     }
-    if (!confidence) continue;
-    finalLivePicks.push({ ...p, confidence, fetched_at: new Date() });
+
+    if (!confidence) {
+      console.log(`❌ Pick skipped (no confidence matched): ${pick.market_id} - ${pick.picked_outcome}, Votes: ${pick.vote_count}`);
+      continue;
+    }
+
+    finalLivePicks.push({ ...pick, confidence, fetched_at: new Date() });
+    console.log(`✅ Pick ready: ${pick.market_id} - ${pick.picked_outcome}, Votes: ${pick.vote_count}, Confidence: ${confidence}`);
   }
 
-  if (!finalLivePicks.length) return;
+  if (!finalLivePicks.length) return console.log("⚠️ No picks passed thresholds.");
 
-  await supabase
-    .from("wallet_live_picks")
-    .upsert(finalLivePicks, { onConflict: ["market_id", "picked_outcome"] });
+  // Upsert picks and merge wallets safely
+  for (const pick of finalLivePicks) {
+    const { data: existing } = await supabase
+      .from("wallet_live_picks")
+      .select("wallets, vote_count")
+      .eq("market_id", pick.market_id)
+      .eq("picked_outcome", pick.picked_outcome)
+      .single()
+      .catch(() => null);
+
+    const mergedWallets = existing?.wallets ? Array.from(new Set([...existing.wallets, ...pick.wallets])) : pick.wallets;
+
+    await supabase
+      .from("wallet_live_picks")
+      .upsert({
+        ...pick,
+        wallets: mergedWallets,
+        vote_count: mergedWallets.length
+      }, { onConflict: ["market_id", "picked_outcome"] });
+  }
 
   console.log(`✅ Wallet live picks rebuilt (${finalLivePicks.length})`);
 }
@@ -663,7 +677,6 @@ if (!sig) continue;
 if (sig.outcome === "WIN") wins++;
 if (sig.outcome === "LOSS") losses++;
 
-
       // Determine majority outcome for this wallet/event
       const outcome = signalsForEvent[0]?.outcome || null;
       if (outcome === "WIN") wins++;
@@ -692,7 +705,7 @@ if (sig.outcome === "LOSS") losses++;
    Signal Processing + Telegram Sending (Fixed)
 =========================== */
 async function processAndSendSignals() {
-  // 1️⃣ Fetch all live picks that are eligible for sending
+  // 1️⃣ Fetch all live picks
   const { data: livePicks, error } = await supabase
     .from("wallet_live_picks")
     .select("*");
@@ -710,21 +723,23 @@ async function processAndSendSignals() {
     // ✅ Enforce minimum wallets
     if (pick.vote_count < MIN_WALLETS_FOR_SIGNAL) continue;
 
-    // ✅ Prevent duplicate alerts unless forced
+    // ✅ Ensure we don’t skip picks accidentally
     const lastSent = pick.signal_sent_at ? new Date(pick.signal_sent_at) : null;
     if (lastSent && !FORCE_SEND) continue;
 
     // 2️⃣ Compute confidence emoji
     const confidenceEmoji = getConfidenceEmoji(pick.vote_count);
 
-    // 3️⃣ Construct notification text
+    // 3️⃣ Construct message
     const text = `⚡️ Market Event: ${pick.market_name || pick.event_slug}
 Prediction: ${pick.picked_outcome || "UNKNOWN"}
 Confidence: ${confidenceEmoji}
+Wallets: ${pick.wallets.join(", ")}
+Vote Count: ${pick.vote_count}
 Signal Sent: ${new Date().toLocaleString("en-US", { timeZone: TIMEZONE })}`;
 
     try {
-      // 4️⃣ Send Telegram message
+      // 4️⃣ Send Telegram
       await sendTelegram(text, false);
 
       // 5️⃣ Update Notes
@@ -732,12 +747,12 @@ Signal Sent: ${new Date().toLocaleString("en-US", { timeZone: TIMEZONE })}`;
 
       console.log(`✅ Sent signal for market ${pick.market_id} (${pick.picked_outcome})`);
 
-      // 6️⃣ Mark as sent (atomic per pick)
+      // 6️⃣ Mark as sent
       await supabase
         .from("wallet_live_picks")
         .update({
           signal_sent_at: new Date(),
-          last_confidence_sent: confidenceEmoji // optional for display
+          last_confidence_sent: confidenceEmoji
         })
         .eq("market_id", pick.market_id)
         .eq("picked_outcome", pick.picked_outcome);

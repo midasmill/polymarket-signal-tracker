@@ -593,9 +593,9 @@ for (const sig of signals) {
 }
 
 /* ===========================
-   Resolve Markets & Send TRADE RESULT ALERT (DEBUG + DAILY SUMMARY)
+   Resolve Markets & Send TRADE RESULT ALERT (DEBUG + RETRY + DAILY SUMMARY)
 =========================== */
-async function resolveMarkets() {
+async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
   const { data: pending, error } = await supabase
     .from("signals")
     .select("*")
@@ -629,24 +629,27 @@ async function resolveMarkets() {
 
   for (const [key, signalsGroup] of marketOutcomeMap.entries()) {
     const { event_slug, market_id, picked_outcome, market_name } = signalsGroup[0];
+    let market = null;
 
-    let market;
-    try {
-      market = await fetchMarket(event_slug);
-    } catch (err) {
-      console.error(`❌ Failed fetching market for ${event_slug}:`, err.message);
-      stillPending.push(event_slug);
-      continue;
+    // Retry loop
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        market = await fetchMarket(event_slug);
+        if (!market) {
+          console.log(`⚠️ Attempt ${attempt}: Market data missing for ${event_slug}`);
+        } else if (!market.resolved) {
+          console.log(`⚠️ Attempt ${attempt}: Market ${market_id} (${event_slug}) not resolved yet`);
+        } else {
+          break; // market resolved
+        }
+      } catch (err) {
+        console.error(`❌ Attempt ${attempt}: Failed fetching market ${event_slug}:`, err.message);
+      }
+
+      if (attempt < maxRetries) await new Promise(r => setTimeout(r, retryDelayMs));
     }
 
-    if (!market) {
-      console.log(`⚠️ Market data missing for event_slug ${event_slug}`);
-      stillPending.push(event_slug);
-      continue;
-    }
-
-    if (!market.resolved) {
-      console.log(`⚠️ Market ${market_id} (${event_slug}) not resolved yet`);
+    if (!market || !market.resolved) {
       stillPending.push(event_slug);
       continue;
     }
@@ -654,7 +657,6 @@ async function resolveMarkets() {
     const winningOutcome = market.outcome;
     const result = picked_outcome === winningOutcome ? "WIN" : "LOSS";
     const resultEmoji = RESULT_EMOJIS[result] || "";
-
     const ids = signalsGroup.map(s => s.id);
 
     // Update all signals
@@ -714,6 +716,7 @@ Result: ${result} ${resultEmoji}`;
   console.log(`Signals Still Pending: ${stillPending.length}`);
   if (stillPending.length) console.log(`Pending Events: ${stillPending.join(", ")}`);
 }
+
 
 /* ===========================
    Count Wallet Daily Losses

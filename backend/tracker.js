@@ -869,32 +869,50 @@ async function trackerLoop() {
 }
 
 /* ===========================
-   Main Entry (Fixed)
+   Main Entry (Enhanced Logging)
 =========================== */
 async function main() {
   console.log("🚀 POLYMARKET TRACKER LIVE 🚀");
 
-  // 1️⃣ Initial tracker run (includes leaderboard fetch)
+  // 1️⃣ Initial leaderboard fetch and insert new wallets
+  console.log("📥 Fetching leaderboard wallets...");
+  const newWallets = await fetchAndInsertLeaderboardWallets();
+
+  if (newWallets?.length) {
+    for (const wallet of newWallets) {
+      const count = await trackWallet(wallet);
+      console.log(`📊 New leaderboard wallet ${wallet.polymarket_proxy_wallet} inserted with ${count} new signal(s)`);
+    }
+  } else {
+    console.log("⚪ No new leaderboard wallets inserted.");
+  }
+
+  // 2️⃣ Track all existing wallets immediately
   await trackerLoop();
 
-  // 2️⃣ Continuous polling
+  // 3️⃣ Continuous polling
   setInterval(trackerLoop, POLL_INTERVAL);
 
-  // 3️⃣ Daily cron for leaderboard refresh
+  // 4️⃣ Daily cron for leaderboard refresh
   cron.schedule("0 7 * * *", async () => {
     console.log("📅 Daily cron running...");
+    const dailyNewWallets = await fetchAndInsertLeaderboardWallets();
+    if (dailyNewWallets?.length) {
+      for (const wallet of dailyNewWallets) {
+        const count = await trackWallet(wallet);
+        console.log(`📊 Daily new wallet ${wallet.polymarket_proxy_wallet} inserted with ${count} new signal(s)`);
+      }
+    }
     await trackerLoop();
   }, { timezone: TIMEZONE });
 
-  // 4️⃣ Heartbeat log every 60 seconds
+  // 5️⃣ Heartbeat log every 60 seconds
   setInterval(() => console.log(`[HEARTBEAT] Tracker alive @ ${new Date().toISOString()}`), 60_000);
 
-  // 5️⃣ HTTP server for health check
+  // 6️⃣ HTTP server for health check
   const PORT = process.env.PORT || 3000;
   http.createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "text/plain" });
     res.end("Polymarket tracker running\n");
   }).listen(PORT, () => console.log(`Tracker listening on port ${PORT}`));
 }
-
-main();

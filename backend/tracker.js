@@ -394,22 +394,15 @@ async function processAndSendSignals() {
   for (const pick of livePicks) {
     const confidenceEmoji = pick.confidence || getConfidenceEmoji(pick.vote_count);
     const marketLabel = pick.market_name || pick.event_slug || "Market";
-    const marketLink =
-      pick.event_slug
-        ? `https://polymarket.com/market/${pick.event_slug}`
-        : pick.market_url;
+    const marketLink = pick.market_url || (pick.event_slug ? `https://polymarket.com/market/${pick.event_slug}` : null);
 
-    /* ===========================
-       1️⃣ NEW TRADE ALERT
-    =========================== */
-    if (!pick.signal_sent_at) {
-      // Mark FIRST (idempotent)
+    console.log(`[SEND SIGNAL] ${marketLabel} | Outcome: ${pick.picked_outcome} | Wallets: ${pick.vote_count} | Confidence: ${confidenceEmoji}`);
+
+    // 1️⃣ NEW TRADE ALERT
+    if (!pick.signal_sent_at && pick.vote_count >= MIN_WALLETS_FOR_SIGNAL) {
       const { error: markError } = await supabase
         .from("wallet_live_picks")
-        .update({
-          signal_sent_at: new Date(),
-          last_confidence_sent: confidenceEmoji
-        })
+        .update({ signal_sent_at: new Date(), last_confidence_sent: confidenceEmoji })
         .eq("market_id", pick.market_id)
         .eq("picked_outcome", pick.picked_outcome);
 
@@ -432,12 +425,10 @@ Confidence: ${confidenceEmoji}`;
         console.error("❌ Failed sending NEW TRADE ALERT:", err.message);
       }
 
-      continue; // 🚨 do NOT allow result on same loop
+      continue; // don't allow result on same loop
     }
 
-    /* ===========================
-       2️⃣ TRADE RESULT ALERT
-    =========================== */
+    // 2️⃣ TRADE RESULT ALERT
     if (pick.outcome && !pick.result_sent_at) {
       const resultEmoji = RESULT_EMOJIS[pick.outcome] || "";
 
@@ -455,7 +446,8 @@ Confidence: ${confidenceEmoji}`;
       const resultText = `TRADE RESULT ALERT
 🎖️ Market Event: ${marketLink ? `[${marketLabel}](${marketLink})` : marketLabel}
 Prediction: ${pick.picked_outcome}
-Result: ${pick.outcome} ${resultEmoji}`;
+Result: ${pick.outcome} ${resultEmoji}
+Confidence: ${confidenceEmoji}`;
 
       try {
         await sendTelegram(resultText, false);

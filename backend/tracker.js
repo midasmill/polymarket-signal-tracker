@@ -333,7 +333,7 @@ async function fetchWalletActivities(proxyWallet, retries = 3) {
 }
 
 /* ===========================
-   Track Wallet (DEBUG)
+   Track Wallet (DEBUG FIXED)
 =========================== */
 async function trackWallet(wallet) {
   const proxyWallet = wallet.polymarket_proxy_wallet;
@@ -361,7 +361,7 @@ async function trackWallet(wallet) {
 
   console.log(`[POSITIONS] Wallet ${wallet.id} fetched ${positions.length} positions`);
 
-  // 2️⃣ Existing signals for wallet
+  // 2️⃣ Existing signals
   const { data: existingSignals } = await supabase
     .from("signals")
     .select("tx_hash, event_slug, picked_outcome")
@@ -376,7 +376,13 @@ async function trackWallet(wallet) {
     const eventSlug = pos.eventSlug || pos.slug;
     if (!eventSlug) continue;
 
-    const amount = Number(pos.usdcSize ?? pos.size ?? pos.amount ?? 0);
+    // ✅ Calculate amount reliably
+    let amount = 0;
+    if (pos.usdcSize && Number(pos.usdcSize) > 0) amount = Number(pos.usdcSize);
+    else if (pos.size && Number(pos.size) > 0) amount = Number(pos.size);
+    else if (pos.amount && Number(pos.amount) > 0) amount = Number(pos.amount);
+    else if (pos.cashPnl && Number(pos.cashPnl) > 0) amount = Number(pos.cashPnl);
+
     if (amount < 1000) {
       console.log(`[SKIP] Wallet ${wallet.id} event ${eventSlug} amount ${amount} < 1000`);
       continue;
@@ -384,7 +390,6 @@ async function trackWallet(wallet) {
 
     const sideValue = pos.side?.toUpperCase() || "BUY";
     let pickedOutcome;
-
     if (pos.title?.includes(" vs. ")) {
       const [a, b] = pos.title.split(" vs. ").map(s => s.trim());
       pickedOutcome = sideValue === "BUY" ? a : b;
@@ -401,13 +406,11 @@ async function trackWallet(wallet) {
       amount
     ].join("-");
 
-    // Skip exact duplicate tx
     if (existingTxs.has(txHash)) {
       console.log(`[SKIP] Wallet ${wallet.id} tx ${txHash} already exists`);
       continue;
     }
 
-    // Skip if wallet already has same outcome for this event
     if (existingPairs.has(`${eventSlug}||${pickedOutcome}`)) {
       console.log(`[SKIP] Wallet ${wallet.id} event ${eventSlug} already has outcome ${pickedOutcome}`);
       continue;
@@ -442,7 +445,6 @@ async function trackWallet(wallet) {
     return;
   }
 
-  // 3️⃣ Upsert signals safely
   await supabase.from("signals").upsert(newSignals, {
     onConflict: ["wallet_id", "event_slug", "picked_outcome"]
   });

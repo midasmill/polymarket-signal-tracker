@@ -371,7 +371,7 @@ async function fetchWalletActivities(proxyWallet, retries = 3) {
 }
 
 /* ===========================
-   Track Wallet (Enhanced / Fixed)
+   Track Wallet (Enhanced / Safe)
 =========================== */
 async function trackWallet(wallet) {
   const proxyWallet = wallet.polymarket_proxy_wallet;
@@ -386,6 +386,7 @@ async function trackWallet(wallet) {
       .from("wallets")
       .update({ paused: false })
       .eq("id", wallet.id);
+    console.log(`[TRACK] Wallet ${wallet.id} auto-unpaused (win_rate=${wallet.win_rate})`);
   }
 
   // 1️⃣ Fetch positions from Polymarket
@@ -394,12 +395,15 @@ async function trackWallet(wallet) {
   if (!positions?.length) return;
 
   // 2️⃣ Fetch existing signals ONCE
-  const { data: existingSignals } = await supabase
+  const { data: existingSignals = [] } = await supabase
     .from("signals")
-    .select("tx_hash, event_slug, picked_outcome")
+    .select("wallet_id, event_slug, picked_outcome, tx_hash")
     .eq("wallet_id", wallet.id);
 
   const existingTxs = new Set(existingSignals.map(s => s.tx_hash));
+  const existingEventOutcome = new Set(
+    existingSignals.map(s => `${s.event_slug}||${s.picked_outcome}`)
+  );
 
   const newSignals = [];
 
@@ -423,19 +427,14 @@ async function trackWallet(wallet) {
       pickedOutcome = sideValue === "BUY" ? "YES" : "NO";
     }
 
-    // ✅ Skip ONLY if SAME wallet already picked SAME outcome for this event
-    const alreadyPickedSameSide = existingSignals.some(
-      s =>
-        s.event_slug === eventSlug &&
-        s.picked_outcome === pickedOutcome
-    );
-    if (alreadyPickedSameSide) continue;
+    // ✅ Skip if SAME wallet already picked SAME outcome for this event
+    if (existingEventOutcome.has(`${eventSlug}||${pickedOutcome}`)) continue;
 
     // 4️⃣ Generate synthetic tx hash
     const syntheticTx = [
       proxyWallet,
-      pos.asset,
-      pos.timestamp,
+      pos.asset || "",
+      pos.timestamp || Date.now(),
       pos.cashPnl
     ].join("-");
 
@@ -463,18 +462,21 @@ async function trackWallet(wallet) {
       created_at: new Date(
         pos.timestamp ? pos.timestamp * 1000 : Date.now()
       ),
-      event_start_at: market?.eventStartAt
-        ? new Date(market.eventStartAt)
-        : null
+      event_start_at: market?.eventStartAt ? new Date(market.eventStartAt) : null
     });
   }
 
-  if (!newSignals.length) return;
+  if (!newSignals.length) {
+    console.log(`[TRACK] Wallet ${wallet.id} has no new signals to insert`);
+    return;
+  }
 
-  // 7️⃣ Insert signals
-  const { error } = await supabase
+  // 7️⃣ Upsert signals safely with unique constraint
+  const { error, data } = await supabase
     .from("signals")
-    .upsert(newSignals);
+    .upsert(newSignals, {
+      onConflict: ["wallet_id", "event_slug", "picked_outcome"]
+    });
 
   if (error) {
     console.error(
@@ -483,139 +485,10 @@ async function trackWallet(wallet) {
     );
   } else {
     console.log(
-      `✅ Inserted ${newSignals.length} new signal(s) for wallet ${wallet.id}`
+      `✅ Wallet ${wallet.id} inserted/updated ${data.length} signal(s)`
     );
   }
 }
-
-/* ===========================
-   Confidence
-=========================== */
-
-const CONFIDENCE_THRESHOLDS = {
-  "⭐": 2,
-  "⭐⭐": 5,
-  "⭐⭐⭐": 10,
-  "⭐⭐⭐⭐": 20,
-  "⭐⭐⭐⭐⭐": 50
-};
-
-/* ===========================
-   Rebuild Wallet Live Picks (Fixed)
-=========================== */
-async function rebuildWalletLivePicks() {
-  const { data: signals, error } = await supabase
-    .from("signals")
-    .select(`
-      wallet_id,
-      market_id,
-      market_name,
-      event_slug,
-      pnl,
-      picked_outcome,
-      wallets!inner (
-        paused,
-        win_rate
-      )
-    `)
-    .eq("outcome", "Pending")
-    .eq("wallets.paused", false)
-    .gte("wallets.win_rate", WIN_RATE_THRESHOLD)
-    .gte("pnl", 1000);
-
-  if (error || !signals?.length) return;
-
-  // Group signals by wallet + event
-  const walletEventMap = new Map();
-  for (const sig of signals) {
-    const key = `${sig.wallet_id}||${sig.event_slug}`;
-    if (!walletEventMap.has(key)) walletEventMap.set(key, []);
-    walletEventMap.get(key).push(sig);
-  }
-
-  const livePicksMap = new Map();
-
-  for (const [key, walletSignals] of walletEventMap.entries()) {
-    const { wallet_id, event_slug, market_id, market_name } = walletSignals[0];
-
-    // 1️⃣ Determine net pick
-    let netPick = await getWalletNetPick(wallet_id, event_slug);
-
-    // 2️⃣ If hedged (null), pick side with most wallets ≥ 2
-    if (!netPick) {
-      const outcomeCounts = {};
-      for (const ws of walletSignals) {
-        outcomeCounts[ws.picked_outcome] = (outcomeCounts[ws.picked_outcome] || 0) + 1;
-      }
-      const sorted = Object.entries(outcomeCounts).sort((a, b) => b[1] - a[1]);
-      if (sorted[0]?.[1] >= 2) netPick = sorted[0][0];
-    }
-
-    if (!netPick) continue;
-
-    const pickKey = `${market_id}||${netPick}`;
-    if (!livePicksMap.has(pickKey)) {
-      livePicksMap.set(pickKey, {
-        market_id,
-        market_name,
-        event_slug,
-        picked_outcome: netPick,
-        wallets: [],
-        vote_count: 0
-      });
-    }
-
-    const entry = livePicksMap.get(pickKey);
-    entry.wallets.push(wallet_id);
-    entry.vote_count++;
-  }
-
-  // 3️⃣ Build final picks with confidence
-  const finalLivePicks = [];
-  for (const p of livePicksMap.values()) {
-    if (p.vote_count < MIN_WALLETS_FOR_SIGNAL) continue;
-
-    let confidence = null;
-    for (const [stars, threshold] of Object.entries(CONFIDENCE_THRESHOLDS)
-      .sort((a, b) => b[1] - a[1])) {
-      if (p.vote_count >= threshold) {
-        confidence = stars;
-        break;
-      }
-    }
-    if (!confidence) continue;
-
-    finalLivePicks.push({
-      ...p,
-      confidence,
-      fetched_at: new Date()
-    });
-  }
-
-  if (!finalLivePicks.length) return;
-
-  await supabase
-    .from("wallet_live_picks")
-    .upsert(finalLivePicks, {
-      onConflict: ["market_id", "picked_outcome"]
-    });
-
-  console.log(`✅ Wallet live picks rebuilt (${finalLivePicks.length})`);
-}
-
-/* ===========================
-   Notes Update Helper (new lines)
-=========================== */
-async function updateNotes(slug, text) {
-  const noteText = text.split("\n").join("\n"); // preserve line breaks
-  const { data: notes } = await supabase.from("notes").select("content").eq("slug", slug).maybeSingle();
-  let newContent = notes?.content || "";
-
-  newContent += newContent ? `\n\n${noteText}` : noteText;
-
-  await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", slug);
-}
-
 
 /* ===========================
    Wallet Metrics Update

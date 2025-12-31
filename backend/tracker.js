@@ -331,43 +331,46 @@ async function processWalletLivePicks(maxRetries = 3, retryDelayMs = 5000) {
     }
   }
 
-  // --- 3️⃣ Aggregate picks by market + normalized outcome ---
-  const livePicksMap = new Map();
-  const marketCache = new Map();
+// --- 3️⃣ Aggregate picks by market + normalized outcome (team names instead of YES/NO) ---
+const livePicksMap = new Map();
+const marketCache = new Map();
 
-  for (const [_, pick] of Object.entries(walletEventMap)) {
-    let normalizedOutcome = pick.picked_outcome.trim().toUpperCase();
+for (const [_, pick] of Object.entries(walletEventMap)) {
+  let normalizedOutcome = pick.picked_outcome.trim().toUpperCase();
 
-    // Normalize YES/NO to team or OVER/UNDER
-    if (normalizedOutcome === "YES" || normalizedOutcome === "NO") {
-      let market = marketCache.get(pick.market_id);
-      if (!market) {
-        try {
-          market = await fetchMarket(pick.market_id);
-          marketCache.set(pick.market_id, market);
-        } catch { market = null; }
-      }
-      if (market?.name?.includes(" vs. ")) {
-        const [teamA, teamB] = market.name.split(" vs. ").map(s => s.trim());
-        normalizedOutcome = normalizedOutcome === "YES" ? teamA : teamB;
-      } else if (/Over|Under/i.test(market?.name || "")) {
-        normalizedOutcome = normalizedOutcome === "YES" ? "OVER" : "UNDER";
-      }
+  let market = marketCache.get(pick.market_id);
+  if (!market) {
+    try {
+      market = await fetchMarket(pick.market_id);
+      marketCache.set(pick.market_id, market);
+    } catch {
+      market = null;
     }
-
-    const key = `${pick.market_id || pick.market_name}||${normalizedOutcome}`;
-    if (!livePicksMap.has(key)) {
-      livePicksMap.set(key, {
-        market_id: pick.market_id,
-        market_name: pick.market_name,
-        event_slug: pick.market_name,
-        market_url: pick.market_name ? `https://polymarket.com/market/${pick.market_name}` : null,
-        picked_outcome: normalizedOutcome,
-        wallets: new Set()
-      });
-    }
-    livePicksMap.get(key).wallets.add(pick.wallet_id);
   }
+
+  // Only normalize if it's YES/NO
+  if (normalizedOutcome === "YES" || normalizedOutcome === "NO") {
+    if (market?.name?.includes(" vs. ")) {
+      const [teamA, teamB] = market.name.split(" vs. ").map(s => s.trim());
+      normalizedOutcome = normalizedOutcome === "YES" ? teamA : teamB;
+    } else if (/Over|Under/i.test(market?.name || "")) {
+      normalizedOutcome = normalizedOutcome === "YES" ? "OVER" : "UNDER";
+    }
+  }
+
+  const key = `${pick.market_id || pick.market_name}||${normalizedOutcome}`;
+  if (!livePicksMap.has(key)) {
+    livePicksMap.set(key, {
+      market_id: pick.market_id,
+      market_name: pick.market_name,
+      event_slug: pick.event_slug,
+      market_url: pick.market_name ? `https://polymarket.com/market/${pick.market_name}` : null,
+      picked_outcome: normalizedOutcome, // store normalized outcome immediately
+      wallets: new Set()
+    });
+  }
+  livePicksMap.get(key).wallets.add(pick.wallet_id);
+}
 
   // --- 4️⃣ Filter picks and calculate confidence ---
   const finalLivePicks = [];

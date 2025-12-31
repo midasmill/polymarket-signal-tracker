@@ -299,47 +299,51 @@ async function trackWallet(wallet) {
 }
 
 /* ===========================
-   Rebuild & Resolve Wallet Live Picks (Normalized per wallet/event)
+   Optimized Rebuild & Resolve Wallet Live Picks
 =========================== */
-async function processWalletLivePicks(maxRetries = 3, retryDelayMs = 5000) {
-// --- 0️⃣ Normalize old wallet_live_picks with YES/NO to actual team names or OVER/UNDER ---
-const { data: oldPicks, error: oldError } = await supabase
-  .from("wallet_live_picks")
-  .select("*")
-  .in("picked_outcome", ["YES", "NO"]);
+async function processWalletLivePicksOptimized(maxRetries = 3, retryDelayMs = 5000) {
+  const marketCache = new Map(); // Cache markets by market_id or event_slug
 
-if (!oldError && oldPicks?.length) {
-  for (const pick of oldPicks) {
-    let normalizedOutcome = pick.picked_outcome.trim().toUpperCase();
-    let market = null;
+  // --- 0️⃣ Normalize old wallet_live_picks (YES/NO → team or OVER/UNDER) ---
+  const { data: oldPicks, error: oldError } = await supabase
+    .from("wallet_live_picks")
+    .select("*")
+    .in("picked_outcome", ["YES", "NO"]);
 
-    try {
-      market = await fetchMarket(pick.market_id);
-    } catch {}
-
-    if (market && (normalizedOutcome === "YES" || normalizedOutcome === "NO")) {
-      if (market.name?.includes(" vs. ")) {
-        const [teamA, teamB] = market.name.split(" vs. ").map(s => s.trim());
-        normalizedOutcome = normalizedOutcome === "YES" ? teamA : teamB;
-      } else if (/Over|Under/i.test(market?.name || "")) {
-        normalizedOutcome = normalizedOutcome === "YES" ? "OVER" : "UNDER";
+  if (!oldError && oldPicks?.length) {
+    for (const pick of oldPicks) {
+      let normalizedOutcome = pick.picked_outcome.trim().toUpperCase();
+      let market = marketCache.get(pick.market_id);
+      if (!market) {
+        try {
+          market = await fetchMarket(pick.market_id);
+          marketCache.set(pick.market_id, market);
+        } catch {}
       }
 
-      try {
-        await supabase
-          .from("wallet_live_picks")
-          .update({ picked_outcome: normalizedOutcome })
-          .eq("market_id", pick.market_id)
-          .eq("picked_outcome", pick.picked_outcome);
+      if (market && (normalizedOutcome === "YES" || normalizedOutcome === "NO")) {
+        if (market.name?.includes(" vs. ")) {
+          const [teamA, teamB] = market.name.split(" vs. ").map(s => s.trim());
+          normalizedOutcome = normalizedOutcome === "YES" ? teamA : teamB;
+        } else if (/Over|Under/i.test(market?.name || "")) {
+          normalizedOutcome = normalizedOutcome === "YES" ? "OVER" : "UNDER";
+        }
 
-        console.log(`[NORMALIZE] Updated ${pick.market_id} pick ${pick.picked_outcome} → ${normalizedOutcome}`);
-      } catch (err) {
-        console.error(`❌ Failed normalizing old pick ${pick.market_id}:`, err.message);
+        try {
+          await supabase
+            .from("wallet_live_picks")
+            .update({ picked_outcome: normalizedOutcome })
+            .eq("market_id", pick.market_id)
+            .eq("picked_outcome", pick.picked_outcome);
+          console.log(`[NORMALIZE] Updated ${pick.market_id} pick ${pick.picked_outcome} → ${normalizedOutcome}`);
+        } catch (err) {
+          console.error(`❌ Failed normalizing old pick ${pick.market_id}:`, err.message);
+        }
       }
     }
   }
-}   
-   // --- 1️⃣ Fetch pending signals ---
+
+  // --- 1️⃣ Fetch pending signals ---
   const { data: signals, error: sigError } = await supabase
     .from("signals")
     .select(`
@@ -372,11 +376,9 @@ if (!oldError && oldPicks?.length) {
     }
   }
 
-  // --- 3️⃣ Aggregate picks by market + normalized outcome (team names instead of YES/NO) ---
+  // --- 3️⃣ Aggregate picks by market + normalized outcome ---
   const livePicksMap = new Map();
-  const marketCache = new Map();
-
-  for (const [_, pick] of Object.entries(walletEventMap)) {
+  for (const pick of Object.values(walletEventMap)) {
     let normalizedOutcome = pick.picked_outcome.trim().toUpperCase();
 
     let market = marketCache.get(pick.market_id);
@@ -389,7 +391,6 @@ if (!oldError && oldPicks?.length) {
       }
     }
 
-    // Only normalize if it's YES/NO
     if (normalizedOutcome === "YES" || normalizedOutcome === "NO") {
       if (market?.name?.includes(" vs. ")) {
         const [teamA, teamB] = market.name.split(" vs. ").map(s => s.trim());
@@ -406,7 +407,7 @@ if (!oldError && oldPicks?.length) {
         market_name: pick.market_name,
         event_slug: pick.event_slug,
         market_url: pick.market_name ? `https://polymarket.com/market/${pick.market_name}` : null,
-        picked_outcome: normalizedOutcome, // ✅ store normalized outcome
+        picked_outcome: normalizedOutcome,
         wallets: new Set()
       });
     }
@@ -418,13 +419,11 @@ if (!oldError && oldPicks?.length) {
   for (const pick of livePicksMap.values()) {
     const walletIds = [...pick.wallets];
     const voteCount = walletIds.length;
-    if (voteCount < MIN_WALLETS_FOR_SIGNAL) {
-      console.log(`Skipping ${pick.market_name} ${pick.picked_outcome} due to low vote count: ${voteCount}`);
-      continue;
-    }
+    if (voteCount < MIN_WALLETS_FOR_SIGNAL) continue;
 
     let confidenceNum = 1;
-    for (const [, threshold] of Object.entries(CONFIDENCE_THRESHOLDS).sort(([, a], [, b]) => b - a)) {
+    const sortedThresholds = Object.entries(CONFIDENCE_THRESHOLDS).sort(([, a], [, b]) => b - a);
+    for (const [, threshold] of sortedThresholds) {
       if (voteCount >= threshold) {
         confidenceNum = threshold;
         break;
@@ -436,7 +435,7 @@ if (!oldError && oldPicks?.length) {
       market_name: pick.market_name,
       event_slug: pick.event_slug,
       market_url: pick.market_url,
-      picked_outcome: pick.picked_outcome, // ✅ normalized outcome
+      picked_outcome: pick.picked_outcome,
       wallets: walletIds,
       vote_count: voteCount,
       confidence: confidenceNum,
@@ -445,35 +444,34 @@ if (!oldError && oldPicks?.length) {
   }
 
   // --- 5️⃣ Upsert picks & send new signals ---
-  if (!finalLivePicks.length) return;
+  if (finalLivePicks.length) {
+    const { data: existingPicks } = await supabase
+      .from("wallet_live_picks")
+      .select("market_id, picked_outcome, event_slug");
 
-  const { data: existingPicks } = await supabase
-    .from("wallet_live_picks")
-    .select("market_id, picked_outcome, event_slug");
+    const existingKeys = new Set((existingPicks || []).map(p => `${p.market_id}||${p.picked_outcome}||${p.event_slug}`));
 
-  const existingKeys = new Set((existingPicks || []).map(p => `${p.market_id}||${p.picked_outcome}||${p.event_slug}`));
+    for (const pick of finalLivePicks) {
+      const key = `${pick.market_id}||${pick.picked_outcome}||${pick.event_slug}`;
+      try {
+        await supabase
+          .from("wallet_live_picks")
+          .upsert(pick, { onConflict: ["market_id", "picked_outcome", "event_slug"] });
 
-  for (const pick of finalLivePicks) {
-    const key = `${pick.market_id}||${pick.picked_outcome}||${pick.event_slug}`;
-    try {
-      // Upsert normalized outcome
-      await supabase
-        .from("wallet_live_picks")
-        .upsert(pick, { onConflict: ["market_id", "picked_outcome", "event_slug"] });
+        console.log(`[LIVE PICK] ${pick.market_name} | ${pick.picked_outcome} | Wallets: ${pick.vote_count}`);
 
-      console.log(`[LIVE PICK] ${pick.market_name} | ${pick.picked_outcome} | Wallets: ${pick.vote_count}`);
-
-      if (!existingKeys.has(key)) {
-        const newTradeText = `⚡️ NEW TRADE SIGNAL
+        if (!existingKeys.has(key)) {
+          const newTradeText = `⚡️ NEW TRADE SIGNAL
 Market Event: [${pick.market_name || pick.event_slug}](${pick.market_url})
 Prediction: ${pick.picked_outcome}
 Confidence: ${pick.confidence || "⭐"}`;
 
-        await sendTelegram(newTradeText, false);
-        await updateNotes("midas-sports", newTradeText);
+          await sendTelegram(newTradeText, false);
+          await updateNotes("midas-sports", newTradeText);
+        }
+      } catch (err) {
+        console.error(`❌ Error processing live pick ${pick.market_id}/${pick.picked_outcome}:`, err.message);
       }
-    } catch (err) {
-      console.error(`❌ Error processing live pick ${pick.market_id}/${pick.picked_outcome}:`, err.message);
     }
   }
 
@@ -491,15 +489,17 @@ Confidence: ${pick.confidence || "⭐"}`;
 
   for (const pick of livePicksPending) {
     const { market_id, picked_outcome, event_slug } = pick;
-    let market = null;
+    let market = marketCache.get(market_id) || null;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        market = await fetchMarket(event_slug);
-        if (!market) console.log(`⚠️ Attempt ${attempt}: Market data missing for ${event_slug}`);
-        else if (!(market.umaResolutionStatus === "resolved" || market.automaticallyResolved))
+        if (!market) {
+          market = await fetchMarket(event_slug);
+          marketCache.set(market_id, market);
+        }
+        if (!market || !(market.umaResolutionStatus === "resolved" || market.automaticallyResolved)) {
           console.log(`⚠️ Attempt ${attempt}: Market ${market_id} (${event_slug}) not resolved yet`);
-        else break;
+        } else break;
       } catch (err) {
         console.error(`❌ Attempt ${attempt}: Failed fetching market ${event_slug}:`, err.message);
       }
@@ -511,28 +511,20 @@ Confidence: ${pick.confidence || "⭐"}`;
       continue;
     }
 
-    // --- ✅ Parse outcomes safely ---
-    let outcomes = market.outcomes;
-    let outcomePrices = market.outcomePrices;
+    let outcomes = Array.isArray(market.outcomes) ? market.outcomes : [];
+    let outcomePrices = Array.isArray(market.outcomePrices) ? market.outcomePrices.map(p => String(p)) : [];
 
-    if (typeof outcomes === "string") {
-      try { outcomes = JSON.parse(outcomes); } catch { outcomes = []; }
-    }
-    if (typeof outcomePrices === "string") {
-      try { outcomePrices = JSON.parse(outcomePrices); } catch { outcomePrices = []; }
-    }
-    if (Array.isArray(outcomePrices)) outcomePrices = outcomePrices.map(String);
+    let winnerIndex = outcomePrices.indexOf("1");
+    if (winnerIndex < 0) winnerIndex = outcomePrices.indexOf(1);
 
-    const winnerIndex = outcomePrices.indexOf("1");
-    const winningOutcome = winnerIndex >= 0 && outcomes[winnerIndex] ? outcomes[winnerIndex] : null;
+    let winningOutcome = (winnerIndex >= 0 ? outcomes[winnerIndex] : null) || market.automaticallyResolvedOutcome || null;
 
     if (!winningOutcome) {
-      console.log(`⚠️ Could not determine winning outcome for market ${market_id} (${event_slug})`);
       stillPending.push({ market_id, event_slug });
       continue;
     }
 
-    const result = pick.picked_outcome === winningOutcome ? "WIN" : "LOSS"; // ✅ compare normalized
+    const result = pick.picked_outcome === winningOutcome ? "WIN" : "LOSS";
     const resultEmoji = RESULT_EMOJIS[result] || "";
 
     try {
@@ -540,10 +532,16 @@ Confidence: ${pick.confidence || "⭐"}`;
         .from("wallet_live_picks")
         .update({ outcome: result, resolved_outcome: winningOutcome })
         .eq("market_id", market_id)
-        .eq("picked_outcome", pick.picked_outcome); // ✅ normalized outcome key
+        .eq("picked_outcome", pick.picked_outcome);
 
       resolvedCount += 1;
-      resolvedMarkets.push({ market_id, event_slug, picked_outcome: pick.picked_outcome, result });
+      resolvedMarkets.push({
+        market_id,
+        event_slug,
+        picked_outcome: pick.picked_outcome,
+        result,
+        wallet_count: pick.wallets?.length || 1
+      });
 
       const resolvedDate = new Date(market.resolvedAt || market.endDate).toLocaleString("en-US", { timeZone: TIMEZONE, hour12: true });
       const tradeResultText = `📈 TRADE RESULT ALERT
@@ -555,7 +553,7 @@ Event Resolved: ${resolvedDate}`;
       await sendTelegram(tradeResultText, false);
       await updateNotes("midas-sports", tradeResultText);
     } catch (err) {
-      console.error(`❌ Failed updating wallet_live_picks or sending TRADE RESULT ALERT for ${market_id}:`, err.message);
+      console.error(`❌ Failed updating wallet_live_picks for ${market_id}:`, err.message);
       stillPending.push({ market_id, event_slug });
     }
   }
@@ -565,7 +563,7 @@ Event Resolved: ${resolvedDate}`;
   console.log(`Signals Resolved Today: ${resolvedCount}`);
   if (resolvedMarkets.length) {
     console.log("✅ Resolved Markets:");
-    resolvedMarkets.forEach(m => console.log(`- Market ${m.market_id} (${m.event_slug}): ${m.result} (${m.picked_outcome})`));
+    resolvedMarkets.forEach(m => console.log(`- Market ${m.market_id} (${m.event_slug}): ${m.result} (${m.picked_outcome}) | Wallets: ${m.wallet_count}`));
   }
   if (stillPending.length) {
     console.log("⚠️ Pending Markets:");

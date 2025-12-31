@@ -412,34 +412,6 @@ async function syncWalletPickOutcomes() {
 }
 
 /* ===========================
-   Resolve Markets & Send TRADE RESULT ALERT (DEBUG)
-=========================== */
-async function resolveMarkets() {
-  const { data: pending } = await supabase
-    .from("signals")
-    .select("*")
-    .eq("outcome", "Pending")
-    .not("event_slug", "is", null);
-
-  if (!pending?.length) return;
-
-  console.log(`🔍 Resolving ${pending.length} pending signals`);
-
-  for (const sig of pending) {
-    const market = await fetchMarket(sig.event_slug);
-    if (!market) {
-      console.log(`⚠️ Market data missing for event_slug ${sig.event_slug}`);
-      continue;
-    }
-    if (!market.resolved) {
-      console.log(`⚠️ Market ${sig.market_id} (${sig.event_slug}) not resolved yet`);
-      continue;
-    }
-    console.log(`✅ Market ${sig.market_id} (${sig.event_slug}) resolved with outcome: ${market.outcome}`);
-  }
-}
-
-/* ===========================
    Process & Send Signals (FIXED)
 =========================== */
 async function processAndSendSignals() {

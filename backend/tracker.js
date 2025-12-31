@@ -124,18 +124,38 @@ async function fetchWithRetry(url, options = {}, retries = 3, delay = 1000) {
 async function fetchMarket(eventSlug) {
   if (!eventSlug) return null;
   if (marketCache.has(eventSlug)) return marketCache.get(eventSlug);
+
   try {
     const res = await fetch(`https://gamma-api.polymarket.com/markets/slug/${eventSlug}`, {
       headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
     });
     if (!res.ok) return null;
+
     const market = await res.json();
-    // Skip closed markets
-    if (market.closed) return null;
     marketCache.set(eventSlug, market);
+
+    // Extract resolved outcome if market is closed
+    if (market.closed) {
+      const event = market.events?.[0];
+      if (event?.ended || market.automaticallyResolved) {
+        // Use score or outcomes array to determine winner
+        if (market.outcomes && market.outcomes.length > 0) {
+          market.outcome = market.outcomes.includes(event.score)
+            ? event.score
+            : market.outcomes[1]; // fallback if score not in outcomes
+        } else {
+          market.outcome = null;
+        }
+      }
+    }
+
     return market;
-  } catch { return null; }
+  } catch (err) {
+    console.error(`❌ fetchMarket failed for ${eventSlug}:`, err.message);
+    return null;
+  }
 }
+
 
 function getConfidenceEmoji(count) {
   const entries = Object.entries(CONFIDENCE_THRESHOLDS).sort(([, a], [, b]) => b - a);
@@ -172,9 +192,6 @@ for (const sig of signals) {
   return majoritySignal?.outcome || null;
 }
 
-/* ===========================
-   Resolve Markets
-=========================== */
 async function resolveMarkets() {
   const { data: pending } = await supabase
     .from("signals")
@@ -186,11 +203,24 @@ async function resolveMarkets() {
 
   for (const sig of pending) {
     const market = await fetchMarket(sig.event_slug);
-    if (!market?.resolved) continue;
+    if (!market) continue;
 
-    const winningOutcome = market.outcome;
+    // Determine if market is resolved
+    const isResolved = market.closed && (market.automaticallyResolved || market.events?.[0]?.ended);
+    if (!isResolved) continue;
+
+    // Determine winning outcome
+    let winningOutcome = market.outcome;
+    if (!winningOutcome && market.events?.[0]) {
+      // fallback to event score / outcomes array
+      const event = market.events[0];
+      winningOutcome = market.outcomes?.includes(event.score) ? event.score : market.outcomes?.[1] || null;
+    }
+    if (!winningOutcome) continue;
+
     const result = sig.picked_outcome === winningOutcome ? "WIN" : "LOSS";
 
+    // Update signals table
     await supabase
       .from("signals")
       .update({
@@ -200,6 +230,7 @@ async function resolveMarkets() {
       })
       .eq("id", sig.id);
 
+    // Update wallet_live_picks
     await supabase
       .from("wallet_live_picks")
       .update({
@@ -208,6 +239,8 @@ async function resolveMarkets() {
       })
       .eq("market_id", sig.market_id)
       .eq("picked_outcome", sig.picked_outcome);
+
+    console.log(`✅ Resolved market ${sig.market_id}: ${result}`);
   }
 }
 
@@ -465,6 +498,7 @@ async function rebuildWalletLivePicks() {
       market_name,
       event_slug,
       pnl,
+      picked_outcome,
       wallets!inner (
         paused,
         win_rate
@@ -477,9 +511,8 @@ async function rebuildWalletLivePicks() {
 
   if (error || !signals?.length) return;
 
-  // Group by wallet + event
+  // Group signals by wallet + event
   const walletEventMap = new Map();
-
   for (const sig of signals) {
     const key = `${sig.wallet_id}||${sig.event_slug}`;
     if (!walletEventMap.has(key)) walletEventMap.set(key, []);
@@ -491,11 +524,22 @@ async function rebuildWalletLivePicks() {
   for (const [key, walletSignals] of walletEventMap.entries()) {
     const { wallet_id, event_slug, market_id, market_name } = walletSignals[0];
 
-    const netPick = await getWalletNetPick(wallet_id, event_slug);
+    // 1️⃣ Determine net pick
+    let netPick = await getWalletNetPick(wallet_id, event_slug);
+
+    // 2️⃣ If hedged (null), pick side with most wallets ≥ 2
+    if (!netPick) {
+      const outcomeCounts = {};
+      for (const ws of walletSignals) {
+        outcomeCounts[ws.picked_outcome] = (outcomeCounts[ws.picked_outcome] || 0) + 1;
+      }
+      const sorted = Object.entries(outcomeCounts).sort((a, b) => b[1] - a[1]);
+      if (sorted[0]?.[1] >= 2) netPick = sorted[0][0];
+    }
+
     if (!netPick) continue;
 
     const pickKey = `${market_id}||${netPick}`;
-
     if (!livePicksMap.has(pickKey)) {
       livePicksMap.set(pickKey, {
         market_id,
@@ -512,8 +556,8 @@ async function rebuildWalletLivePicks() {
     entry.vote_count++;
   }
 
+  // 3️⃣ Build final picks with confidence
   const finalLivePicks = [];
-
   for (const p of livePicksMap.values()) {
     if (p.vote_count < MIN_WALLETS_FOR_SIGNAL) continue;
 
@@ -525,7 +569,6 @@ async function rebuildWalletLivePicks() {
         break;
       }
     }
-
     if (!confidence) continue;
 
     finalLivePicks.push({
@@ -544,40 +587,6 @@ async function rebuildWalletLivePicks() {
     });
 
   console.log(`✅ Wallet live picks rebuilt (${finalLivePicks.length})`);
-}
-
-/* ===========================
-   Fetch Wallet Activity (DATA-API)
-=========================== */
-async function fetchWalletPositions(proxyWallet) {
-  if (!proxyWallet) throw new Error("Proxy wallet required");
-
-  try {
-    const url = `https://data-api.polymarket.com/activity?limit=100&sortBy=TIMESTAMP&sortDirection=DESC&user=${proxyWallet}`;
-    const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
-
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
-    }
-
-    const data = await res.json();
-    if (!Array.isArray(data)) return [];
-
-    // Map API data to tracker positions
-    return data.map(item => ({
-      asset: item.transactionHash || "",       // original tx hash
-      conditionId: item.conditionId || "",    // market id
-      eventSlug: item.eventSlug || item.slug || "", // event slug
-      title: item.title || "",
-      slug: item.slug || "",
-      timestamp: item.timestamp || Math.floor(Date.now() / 1000),
-      side: item.side || "BUY",               // default to BUY if missing
-      cashPnl: Number(item.usdcSize ?? item.size ?? 0), // can adjust later
-    }));
-  } catch (err) {
-    console.error(`❌ Activity fetch failed (fetchWalletPositions) for ${proxyWallet}`, err.message);
-    return [];
-  }
 }
 
 /* ===========================

@@ -565,12 +565,12 @@ if (sig.outcome === "LOSS") losses++;
 }
 
 /* ===========================
-   Rebuild Wallet Live Picks (Multi-Wallet Safe)
+   Rebuild Wallet Live Picks (Multi-Wallet Fixed)
 =========================== */
 async function rebuildWalletLivePicks() {
   console.log("🔄 Rebuilding wallet live picks (safe multi-wallet)...");
 
-  // 1️⃣ Fetch all pending signals (ignore wallet filters for now)
+  // 1️⃣ Fetch all pending signals with wallets info
   const { data: signals, error } = await supabase
     .from("signals")
     .select(`
@@ -650,26 +650,14 @@ async function rebuildWalletLivePicks() {
     console.log(`✅ Event ${event_slug} net pick: ${netPick} (${voteCount} wallet(s))`);
   }
 
-  // 4️⃣ Assign confidence and prepare final picks
+  // 4️⃣ Assign confidence (integer) and prepare final picks
   const finalLivePicks = [];
   for (const pick of livePicksMap.values()) {
-    let confidence = null;
-    for (const [stars, threshold] of Object.entries(CONFIDENCE_THRESHOLDS)
-      .sort((a, b) => b[1] - a[1])) {
-      if (pick.vote_count >= threshold) {
-        confidence = stars;
-        break;
-      }
-    }
-
-    if (!confidence) {
-      console.log(`⚠️ Skipping ${pick.event_slug} (${pick.picked_outcome}) — insufficient confidence.`);
-      continue;
-    }
-
+    let confidence = pick.vote_count; // store as integer
     finalLivePicks.push({
       ...pick,
       confidence,
+      wallets: `{${pick.wallets.join(",")}}`, // convert JS array to Postgres array
       fetched_at: new Date()
     });
 

@@ -37,10 +37,9 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 process.on("unhandledRejection", err => console.error("🔥 Unhandled rejection:", err));
 process.on("uncaughtException", err => console.error("🔥 Uncaught exception:", err));
 
-/**
- * Returns total $ amount picked per outcome
- * for a wallet on a specific event
- */
+/* ===========================
+   Returns total $ amount picked pere outcome for a wallet for an event
+=========================== */
 async function getWalletOutcomeTotals(walletId, eventSlug) {
   const { data, error } = await supabase
     .from("signals")
@@ -62,15 +61,9 @@ async function getWalletOutcomeTotals(walletId, eventSlug) {
   return totals;
 }
 
-/**
- * Returns the wallet's NET picked_outcome for an event
- * based on total $ amount per side
- *
- * Example:
- *  YES: 3000
- *  NO:  2900
- *  => YES
- */
+/* ===========================
+   Returns wallet's NET picked_outcome for an event based on total $ amount per side
+=========================== */
 async function getWalletNetPick(walletId, eventSlug) {
   const totals = await getWalletOutcomeTotals(walletId, eventSlug);
 
@@ -166,7 +159,6 @@ async function fetchMarket(eventSlug) {
   }
 }
 
-
 function getConfidenceEmoji(count) {
   const entries = Object.entries(CONFIDENCE_THRESHOLDS).sort(([, a], [, b]) => b - a);
   for (const [emoji, threshold] of entries) if (count >= threshold) return emoji;
@@ -211,7 +203,6 @@ async function updateNotes(slug, marketId, pickedOutcome, text) {
 function buildNotesAnchor(marketId, pickedOutcome) {
   return `<!-- MARKET:${marketId}:${pickedOutcome} -->`;
 }
-
 
 /* ===========================
    Resolve Wallet Event Outcome

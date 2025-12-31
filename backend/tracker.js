@@ -279,10 +279,10 @@ async function trackWallet(wallet) {
 }
 
 /* ===========================
-   Rebuild Wallet Live Picks (Multi-Wallet Safe)
+   Rebuild Wallet Live Picks (FIXED + MULTI-WALLET + PAUSED CHECK)
 =========================== */
 async function rebuildWalletLivePicks() {
-  // 1️⃣ Fetch all pending signals from wallets (include paused wallets for aggregation)
+  // 1️⃣ Fetch all pending signals (do NOT join wallets yet)
   const { data: signals, error } = await supabase
     .from("signals")
     .select(`
@@ -290,8 +290,7 @@ async function rebuildWalletLivePicks() {
       market_id,
       market_name,
       event_slug,
-      picked_outcome,
-      wallets!inner(paused)
+      picked_outcome
     `)
     .eq("outcome", "Pending");
 
@@ -301,15 +300,25 @@ async function rebuildWalletLivePicks() {
   }
   if (!signals?.length) return;
 
-  // 2️⃣ Aggregate per event_slug + picked_outcome
+  // 2️⃣ Fetch all wallet paused statuses
+  const { data: wallets } = await supabase
+    .from("wallets")
+    .select("id, paused");
+
+  const walletPausedMap = new Map();
+  for (const w of wallets || []) walletPausedMap.set(w.id, !!w.paused);
+
+  // 3️⃣ Aggregate per market + outcome
   const livePicksMap = new Map();
 
   for (const sig of signals) {
-    if (!sig.event_slug || !sig.picked_outcome || !sig.wallet_id) continue;
+    if (!sig.wallet_id || !sig.picked_outcome) continue;
 
-    // Normalize outcome for consistent aggregation
+    // Skip paused wallets
+    if (walletPausedMap.get(sig.wallet_id)) continue;
+
     const normalizedOutcome = sig.picked_outcome.trim().toUpperCase();
-    const key = `${sig.event_slug}||${normalizedOutcome}`;
+    const key = `${sig.market_id || sig.event_slug}||${normalizedOutcome}`;
 
     if (!livePicksMap.has(key)) {
       livePicksMap.set(key, {
@@ -327,7 +336,7 @@ async function rebuildWalletLivePicks() {
     livePicksMap.get(key).wallets.add(sig.wallet_id);
   }
 
-  // 3️⃣ Filter picks based on MIN_WALLETS_FOR_SIGNAL
+  // 4️⃣ Filter + finalize
   const finalLivePicks = [];
 
   for (const pick of livePicksMap.values()) {
@@ -335,7 +344,9 @@ async function rebuildWalletLivePicks() {
     const voteCount = walletIds.length;
 
     if (voteCount < MIN_WALLETS_FOR_SIGNAL) {
-      console.log(`Skipping ${pick.market_name} ${pick.picked_outcome} due to low vote count: ${voteCount}`);
+      console.log(
+        `Skipping ${pick.market_name} ${pick.picked_outcome} due to low vote count: ${voteCount}`
+      );
       continue;
     }
 
@@ -364,21 +375,23 @@ async function rebuildWalletLivePicks() {
 
   if (!finalLivePicks.length) return;
 
-  // 4️⃣ Upsert live picks (aggregate by event_slug + picked_outcome only)
+  // 5️⃣ Upsert picks
   for (const pick of finalLivePicks) {
     console.log(
-      `[LIVE PICK] ${pick.market_name} | ${pick.picked_outcome} | Wallets: ${pick.vote_count} | IDs: ${pick.wallets.join(", ")}`
+      `[LIVE PICK] ${pick.market_name} | ${pick.picked_outcome} | Wallets: ${pick.vote_count} | IDs: ${pick.wallets.join(
+        ", "
+      )}`
     );
 
     const { error: upsertError } = await supabase
       .from("wallet_live_picks")
       .upsert(pick, {
-        onConflict: ["event_slug", "picked_outcome"] // ignore null market_id
+        onConflict: ["market_id", "picked_outcome", "event_slug"]
       });
 
     if (upsertError) {
       console.error(
-        `❌ Failed upserting live pick ${pick.event_slug}/${pick.picked_outcome}:`,
+        `❌ Failed upserting live pick ${pick.market_id}/${pick.picked_outcome}:`,
         upsertError.message
       );
     }
@@ -386,6 +399,7 @@ async function rebuildWalletLivePicks() {
 
   console.log(`✅ Wallet live picks rebuilt (${finalLivePicks.length})`);
 }
+
 
 /* ===========================
    Sync Wallet Live Picks with Market Results (DEBUG)

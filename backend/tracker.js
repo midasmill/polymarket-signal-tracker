@@ -194,6 +194,9 @@ for (const sig of signals) {
   return majoritySignal?.outcome || null;
 }
 
+/* ===========================
+   Resolve Market
+=========================== */
 async function resolveMarkets() {
   const { data: pending } = await supabase
     .from("signals")
@@ -207,17 +210,26 @@ async function resolveMarkets() {
     const market = await fetchMarket(sig.event_slug);
     if (!market) continue;
 
-    // Determine if market is resolved
+    // Check if market is resolved
     const isResolved = market.closed && (market.automaticallyResolved || market.events?.[0]?.ended);
     if (!isResolved) continue;
 
     // Determine winning outcome
     let winningOutcome = market.outcome;
+
     if (!winningOutcome && market.events?.[0]) {
-      // fallback to event score / outcomes array
       const event = market.events[0];
-      winningOutcome = market.outcomes?.includes(event.score) ? event.score : market.outcomes?.[1] || null;
+      const outcomes = market.outcomes || [];
+
+      // Map the score to the winning outcome
+      if (event.score) {
+        const [scoreA, scoreB] = event.score.split("-").map(Number);
+        if (scoreA > scoreB) winningOutcome = outcomes[0];
+        else if (scoreB > scoreA) winningOutcome = outcomes[1];
+        else winningOutcome = null; // tie or unknown
+      }
     }
+
     if (!winningOutcome) continue;
 
     const result = sig.picked_outcome === winningOutcome ? "WIN" : "LOSS";
@@ -242,7 +254,7 @@ async function resolveMarkets() {
       .eq("market_id", sig.market_id)
       .eq("picked_outcome", sig.picked_outcome);
 
-    console.log(`✅ Resolved market ${sig.market_id}: ${result}`);
+    console.log(`✅ Resolved market ${sig.market_id}: ${sig.picked_outcome} → ${result} (${winningOutcome})`);
   }
 }
 

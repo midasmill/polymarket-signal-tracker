@@ -859,7 +859,7 @@ async function trackerLoop() {
     await resolveMarkets(); 
 
     // 4️⃣ Process and send signals
-    await processAndSendSignals();
+    await processAndSendAllNotifications();
 
     // 5️⃣ Update wallet metrics (win_rate, paused, daily losses)
     await updateWalletMetricsJS();

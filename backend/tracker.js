@@ -299,23 +299,50 @@ async function trackWallet(wallet) {
 }
 
 /* ===========================
-   Final Fix: Wallet Live Picks (Recent Only)
+   Rebuild & Resolve Wallet Live Picks (Recent Only)
 =========================== */
 async function processWalletLivePicks(maxRetries = 3, retryDelayMs = 5000) {
-  const marketCache = new Map();
-  const RECENT_DAYS = 3;
+  const RECENT_DAYS = 3; // Only consider picks from last 3 days
   const cutoffDate = new Date();
   cutoffDate.setDate(cutoffDate.getDate() - RECENT_DAYS);
 
-  // --- 0️⃣ Remove old wallet_live_picks beyond cutoff ---
-  try {
-    await supabase
-      .from("wallet_live_picks")
-      .delete()
-      .lt("fetched_at", cutoffDate.toISOString());
-    console.log("✅ Old wallet_live_picks removed");
-  } catch (err) {
-    console.error("❌ Failed deleting old wallet_live_picks:", err.message);
+  const marketCache = new Map();
+
+  // --- 0️⃣ Normalize recent old picks (YES/NO → team or OVER/UNDER) ---
+  const { data: oldPicks, error: oldError } = await supabase
+    .from("wallet_live_picks")
+    .select("*")
+    .in("picked_outcome", ["YES", "NO"])
+    .gte("fetched_at", cutoffDate.toISOString()); // enforce recent only
+
+  if (!oldError && oldPicks?.length) {
+    for (const pick of oldPicks) {
+      let normalizedOutcome = pick.picked_outcome.trim().toUpperCase();
+      let market = marketCache.get(pick.market_id);
+      if (!market) {
+        try {
+          market = await fetchMarket(pick.market_id);
+          marketCache.set(pick.market_id, market);
+        } catch {}
+      }
+
+      if (market && (normalizedOutcome === "YES" || normalizedOutcome === "NO")) {
+        if (market.name?.includes(" vs. ")) {
+          const [teamA, teamB] = market.name.split(" vs. ").map(s => s.trim());
+          normalizedOutcome = normalizedOutcome === "YES" ? teamA : teamB;
+        } else if (/Over|Under/i.test(market?.name || "")) {
+          normalizedOutcome = normalizedOutcome === "YES" ? "OVER" : "UNDER";
+        }
+
+        try {
+          await supabase
+            .from("wallet_live_picks")
+            .update({ picked_outcome: normalizedOutcome })
+            .eq("market_id", pick.market_id)
+            .eq("picked_outcome", pick.picked_outcome);
+        } catch {}
+      }
+    }
   }
 
   // --- 1️⃣ Fetch recent pending signals only ---
@@ -333,10 +360,10 @@ async function processWalletLivePicks(maxRetries = 3, retryDelayMs = 5000) {
     `)
     .eq("outcome", "Pending")
     .eq("wallets.paused", false)
-    .gte("created_at", cutoffDate.toISOString());
+    .gte("created_at", cutoffDate.toISOString()); // enforce recent
 
   if (sigError) return console.error("❌ Failed fetching signals:", sigError.message);
-  if (!signals?.length) return console.log("ℹ️ No recent pending signals found");
+  if (!signals?.length) return console.log("ℹ️ No active pending signals found.");
 
   // --- 2️⃣ Aggregate per wallet per event (highest pnl) ---
   const walletEventMap = {};
@@ -364,7 +391,9 @@ async function processWalletLivePicks(maxRetries = 3, retryDelayMs = 5000) {
       try {
         market = await fetchMarket(pick.market_id);
         marketCache.set(pick.market_id, market);
-      } catch { market = null; }
+      } catch {
+        market = null;
+      }
     }
 
     if (normalizedOutcome === "YES" || normalizedOutcome === "NO") {
@@ -390,17 +419,15 @@ async function processWalletLivePicks(maxRetries = 3, retryDelayMs = 5000) {
     livePicksMap.get(key).wallets.add(pick.wallet_id);
   }
 
-  // --- 4️⃣ Filter picks & calculate confidence ---
+  // --- 4️⃣ Filter picks by wallet count and calculate confidence ---
   const finalLivePicks = [];
   for (const pick of livePicksMap.values()) {
     const walletIds = [...pick.wallets];
-    const voteCount = walletIds.length;
-    if (voteCount < MIN_WALLETS_FOR_SIGNAL) continue;
+    if (walletIds.length < MIN_WALLETS_FOR_SIGNAL) continue;
 
     let confidenceLabel = "⭐";
-    const sortedThresholds = Object.entries(CONFIDENCE_THRESHOLDS).sort(([, a], [, b]) => b - a);
-    for (const [emoji, threshold] of sortedThresholds) {
-      if (voteCount >= threshold) {
+    for (const [emoji, threshold] of Object.entries(CONFIDENCE_THRESHOLDS).sort(([, a], [, b]) => b - a)) {
+      if (walletIds.length >= threshold) {
         confidenceLabel = emoji;
         break;
       }
@@ -413,14 +440,24 @@ async function processWalletLivePicks(maxRetries = 3, retryDelayMs = 5000) {
       market_url: pick.market_url,
       picked_outcome: pick.picked_outcome,
       wallets: walletIds,
-      vote_count: voteCount,
+      vote_count: walletIds.length,
       confidence: confidenceLabel,
       fetched_at: new Date()
     });
   }
 
-  // --- 5️⃣ Upsert final picks (skip duplicates automatically) ---
+  // --- 5️⃣ Upsert only recent picks & send new signals ---
+  const { data: existingPicks } = await supabase
+    .from("wallet_live_picks")
+    .select("market_id, picked_outcome, event_slug, fetched_at")
+    .gte("fetched_at", cutoffDate.toISOString());
+
+  const existingKeys = new Set((existingPicks || []).map(p => `${p.market_id}||${p.picked_outcome}||${p.event_slug}`));
+
   for (const pick of finalLivePicks) {
+    const key = `${pick.market_id}||${pick.picked_outcome}||${pick.event_slug}`;
+    if (existingKeys.has(key)) continue;
+
     try {
       await supabase
         .from("wallet_live_picks")
@@ -434,25 +471,28 @@ Confidence: ${pick.confidence || "⭐"}`;
       await sendTelegram(newTradeText, false);
       await updateNotes("midas-sports", newTradeText);
     } catch (err) {
-      console.error(`❌ Failed inserting live pick ${pick.market_id}:`, err.message);
+      console.error(`❌ Failed upserting pick ${pick.market_id}/${pick.picked_outcome}:`, err.message);
     }
   }
 
-  // --- 6️⃣ Resolve outcomes for pending picks ---
-  const { data: pendingPicks } = await supabase
+  // --- 6️⃣ Resolve outcomes for recent pending picks only ---
+  const { data: livePicksPending } = await supabase
     .from("wallet_live_picks")
     .select("*")
-    .eq("outcome", "Pending");
+    .eq("outcome", "Pending")
+    .gte("fetched_at", cutoffDate.toISOString()); // enforce recent only
 
-  for (const pick of pendingPicks) {
-    let market = marketCache.get(pick.market_id);
+  for (const pick of livePicksPending) {
+    const { market_id, picked_outcome, event_slug } = pick;
+    let market = marketCache.get(market_id) || null;
+
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         if (!market) {
-          market = await fetchMarket(pick.market_id);
-          marketCache.set(pick.market_id, market);
+          market = await fetchMarket(event_slug);
+          marketCache.set(market_id, market);
         }
-        if (market?.umaResolutionStatus === "resolved" || market?.automaticallyResolved) break;
+        if (market && (market.umaResolutionStatus === "resolved" || market.automaticallyResolved)) break;
       } catch {}
       if (attempt < maxRetries) await new Promise(r => setTimeout(r, retryDelayMs));
     }
@@ -460,26 +500,28 @@ Confidence: ${pick.confidence || "⭐"}`;
     if (!market || !(market.umaResolutionStatus === "resolved" || market.automaticallyResolved)) continue;
 
     const outcomes = market.outcomes || [];
-    const outcomePrices = market.outcomePrices?.map(p => String(p)) || [];
+    const outcomePrices = (market.outcomePrices || []).map(String);
+
     let winnerIndex = outcomePrices.indexOf("1");
     if (winnerIndex < 0) winnerIndex = outcomePrices.indexOf(1);
-    const winningOutcome = outcomes[winnerIndex] || market.automaticallyResolvedOutcome;
 
+    const winningOutcome = (winnerIndex >= 0 ? outcomes[winnerIndex] : null) || market.automaticallyResolvedOutcome;
     if (!winningOutcome) continue;
 
     const result = pick.picked_outcome === winningOutcome ? "WIN" : "LOSS";
+
     try {
       await supabase
         .from("wallet_live_picks")
         .update({ outcome: result, resolved_outcome: winningOutcome })
-        .eq("market_id", pick.market_id)
+        .eq("market_id", market_id)
         .eq("picked_outcome", pick.picked_outcome);
 
       const resolvedDate = new Date(market.resolvedAt || market.endDate).toLocaleString("en-US", { timeZone: TIMEZONE, hour12: true });
       const tradeResultText = `📈 TRADE RESULT ALERT
-Market Event: [${market.name || pick.event_slug}](https://polymarket.com/market/${pick.event_slug})
+Market Event: [${market.name || event_slug}](https://polymarket.com/market/${event_slug})
 Prediction: ${pick.picked_outcome}
-Result: ${result} ${RESULT_EMOJIS[result] || ""}
+Result: ${result}
 Event Resolved: ${resolvedDate}`;
 
       await sendTelegram(tradeResultText, false);
@@ -487,7 +529,7 @@ Event Resolved: ${resolvedDate}`;
     } catch {}
   }
 
-  console.log(`✅ Wallet Live Picks processed: ${finalLivePicks.length}`);
+  console.log("✅ Wallet live picks processed (recent only).");
 }
 
 /* ===========================

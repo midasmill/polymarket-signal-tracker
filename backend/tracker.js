@@ -17,6 +17,14 @@ const WIN_RATE_THRESHOLD = parseInt(process.env.WIN_RATE_THRESHOLD || "0", 10);
 const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "2", 10);
 const FORCE_SEND = process.env.FORCE_SEND === "true";
 
+const CONFIDENCE_THRESHOLDS = {
+  "⭐": 2,
+  "⭐⭐": 5,
+  "⭐⭐⭐": 10,
+  "⭐⭐⭐⭐": 20,
+  "⭐⭐⭐⭐⭐": 50
+};
+
 const RESULT_EMOJIS = { WIN: "✅", LOSS: "❌", Pending: "⚪" };
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) throw new Error("Supabase keys required");

@@ -593,7 +593,7 @@ for (const sig of signals) {
 }
 
 /* ===========================
-   Resolve Markets & Send TRADE RESULT ALERT (DEBUG + RETRY + DAILY SUMMARY)
+   Resolve Markets & Send TRADE RESULT ALERT (DEBUG + RETRY + DAILY SUMMARY + LOG)
 =========================== */
 async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
   const { data: pending, error } = await supabase
@@ -616,6 +616,7 @@ async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
   console.log(`🔍 Resolving ${totalPending} pending signals...`);
 
   let resolvedCount = 0;
+  const resolvedMarkets = [];
   const stillPending = [];
 
   // Group by market_id + picked_outcome
@@ -635,12 +636,13 @@ async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         market = await fetchMarket(event_slug);
+
         if (!market) {
           console.log(`⚠️ Attempt ${attempt}: Market data missing for ${event_slug}`);
-        } else if (!market.resolved) {
+        } else if (!(market.umaResolutionStatus === "resolved" || market.automaticallyResolved)) {
           console.log(`⚠️ Attempt ${attempt}: Market ${market_id} (${event_slug}) not resolved yet`);
         } else {
-          break; // market resolved
+          break; // market is resolved
         }
       } catch (err) {
         console.error(`❌ Attempt ${attempt}: Failed fetching market ${event_slug}:`, err.message);
@@ -649,12 +651,20 @@ async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
       if (attempt < maxRetries) await new Promise(r => setTimeout(r, retryDelayMs));
     }
 
-    if (!market || !market.resolved) {
-      stillPending.push(event_slug);
+    // If still unresolved after retries
+    if (!market || !(market.umaResolutionStatus === "resolved" || market.automaticallyResolved)) {
+      stillPending.push({ market_id, event_slug });
       continue;
     }
 
-    const winningOutcome = market.outcome;
+    // Determine winning outcome
+    const winningOutcome = market.outcome || market.outcomes?.[market.outcomePrices.indexOf("1")] || null;
+    if (!winningOutcome) {
+      console.log(`⚠️ Could not determine winning outcome for market ${market_id} (${event_slug})`);
+      stillPending.push({ market_id, event_slug });
+      continue;
+    }
+
     const result = picked_outcome === winningOutcome ? "WIN" : "LOSS";
     const resultEmoji = RESULT_EMOJIS[result] || "";
     const ids = signalsGroup.map(s => s.id);
@@ -671,7 +681,7 @@ async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
 
     if (updateSignalsError) {
       console.error(`❌ Failed updating signals for market ${market_id} (${picked_outcome}):`, updateSignalsError.message);
-      stillPending.push(event_slug);
+      stillPending.push({ market_id, event_slug });
       continue;
     }
 
@@ -688,7 +698,7 @@ async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
 
     if (updateLivePicksError) {
       console.error(`❌ Failed updating wallet_live_picks for market ${market_id} (${picked_outcome}):`, updateLivePicksError.message);
-      stillPending.push(event_slug);
+      stillPending.push({ market_id, event_slug });
       continue;
     }
 
@@ -703,9 +713,10 @@ Result: ${result} ${resultEmoji}`;
       await updateNotes("midas-sports", text);
       console.log(`✅ TRADE RESULT ALERT sent & outcomes updated for market ${market_id} (${picked_outcome})`);
       resolvedCount += signalsGroup.length;
+      resolvedMarkets.push({ market_id, event_slug, picked_outcome, result });
     } catch (err) {
       console.error(`❌ Failed sending TRADE RESULT ALERT for market ${market_id}:`, err.message);
-      stillPending.push(event_slug);
+      stillPending.push({ market_id, event_slug });
     }
   }
 
@@ -714,9 +725,19 @@ Result: ${result} ${resultEmoji}`;
   console.log(`Total Pending Signals: ${totalPending}`);
   console.log(`Signals Resolved Today: ${resolvedCount}`);
   console.log(`Signals Still Pending: ${stillPending.length}`);
-  if (stillPending.length) console.log(`Pending Events: ${stillPending.join(", ")}`);
+  if (resolvedMarkets.length) {
+    console.log("✅ Resolved Markets:");
+    resolvedMarkets.forEach(m => {
+      console.log(`- Market ${m.market_id} (${m.event_slug}): ${m.result} (${m.picked_outcome})`);
+    });
+  }
+  if (stillPending.length) {
+    console.log("⚠️ Pending Markets:");
+    stillPending.forEach(m => {
+      console.log(`- Market ${m.market_id} (${m.event_slug})`);
+    });
+  }
 }
-
 
 /* ===========================
    Count Wallet Daily Losses

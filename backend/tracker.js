@@ -279,10 +279,10 @@ async function trackWallet(wallet) {
 }
 
 /* ===========================
-   Rebuild Wallet Live Picks (FIXED + MARKET LINK + MULTI-WALLET)
+   Rebuild Wallet Live Picks (Multi-Wallet Safe)
 =========================== */
 async function rebuildWalletLivePicks() {
-  // 1️⃣ Fetch all pending signals from active wallets
+  // 1️⃣ Fetch all pending signals from wallets (include paused wallets for aggregation)
   const { data: signals, error } = await supabase
     .from("signals")
     .select(`
@@ -293,8 +293,7 @@ async function rebuildWalletLivePicks() {
       picked_outcome,
       wallets!inner(paused)
     `)
-    .eq("outcome", "Pending")
-    .eq("wallets.paused", false);
+    .eq("outcome", "Pending");
 
   if (error) {
     console.error("❌ Failed fetching signals for live picks:", error.message);
@@ -302,15 +301,15 @@ async function rebuildWalletLivePicks() {
   }
   if (!signals?.length) return;
 
-  // 2️⃣ Aggregate per market + outcome
+  // 2️⃣ Aggregate per event_slug + picked_outcome
   const livePicksMap = new Map();
 
   for (const sig of signals) {
-    if (!sig.picked_outcome || !sig.wallet_id) continue;
+    if (!sig.event_slug || !sig.picked_outcome || !sig.wallet_id) continue;
 
-    // Normalize picked outcome and use event_slug as fallback for market_id
+    // Normalize outcome for consistent aggregation
     const normalizedOutcome = sig.picked_outcome.trim().toUpperCase();
-    const key = `${sig.market_id || sig.event_slug}||${normalizedOutcome}`;
+    const key = `${sig.event_slug}||${normalizedOutcome}`;
 
     if (!livePicksMap.has(key)) {
       livePicksMap.set(key, {
@@ -328,7 +327,7 @@ async function rebuildWalletLivePicks() {
     livePicksMap.get(key).wallets.add(sig.wallet_id);
   }
 
-  // 3️⃣ Filter + finalize
+  // 3️⃣ Filter picks based on MIN_WALLETS_FOR_SIGNAL
   const finalLivePicks = [];
 
   for (const pick of livePicksMap.values()) {
@@ -340,7 +339,7 @@ async function rebuildWalletLivePicks() {
       continue;
     }
 
-    // Determine numeric confidence for DB
+    // Determine numeric confidence
     let confidenceNum = 1;
     for (const [, threshold] of Object.entries(CONFIDENCE_THRESHOLDS)
       .sort(([, a], [, b]) => b - a)) {
@@ -365,7 +364,7 @@ async function rebuildWalletLivePicks() {
 
   if (!finalLivePicks.length) return;
 
-  // 4️⃣ Upsert (include event_slug in onConflict to merge null market_id picks)
+  // 4️⃣ Upsert live picks (aggregate by event_slug + picked_outcome only)
   for (const pick of finalLivePicks) {
     console.log(
       `[LIVE PICK] ${pick.market_name} | ${pick.picked_outcome} | Wallets: ${pick.vote_count} | IDs: ${pick.wallets.join(", ")}`
@@ -374,12 +373,12 @@ async function rebuildWalletLivePicks() {
     const { error: upsertError } = await supabase
       .from("wallet_live_picks")
       .upsert(pick, {
-        onConflict: ["market_id", "picked_outcome", "event_slug"]
+        onConflict: ["event_slug", "picked_outcome"] // ignore null market_id
       });
 
     if (upsertError) {
       console.error(
-        `❌ Failed upserting live pick ${pick.market_id}/${pick.picked_outcome}:`,
+        `❌ Failed upserting live pick ${pick.event_slug}/${pick.picked_outcome}:`,
         upsertError.message
       );
     }

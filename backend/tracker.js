@@ -412,7 +412,7 @@ async function syncWalletPickOutcomes() {
 }
 
 /* ===========================
-   Process & Send Signals (FIXED)
+   Process & Send Signals (ALERTS REMOVED, LOGGING ONLY)
 =========================== */
 async function processAndSendSignals() {
   const { data: livePicks, error } = await supabase
@@ -436,69 +436,8 @@ async function processAndSendSignals() {
     const marketLabel = pick.market_name || pick.event_slug || "Market";
     const marketLink = pick.market_url || (pick.event_slug ? `https://polymarket.com/market/${pick.event_slug}` : null);
 
-    console.log(`[SEND SIGNAL] ${marketLabel} | Outcome: ${pick.picked_outcome} | Wallets: ${pick.vote_count} | Confidence: ${confidenceEmoji}`);
-
- // 1️⃣ NEW TRADE ALERT
-if (!pick.signal_sent_at && pick.vote_count >= MIN_WALLETS_FOR_SIGNAL) {
-  const { error: markError } = await supabase
-    .from("wallet_live_picks")
-    .update({ signal_sent_at: new Date() }) // <-- remove last_confidence_sent
-    .eq("market_id", pick.market_id)
-    .eq("picked_outcome", pick.picked_outcome);
-
-  if (markError) {
-    console.error("❌ Failed marking signal_sent_at:", markError.message);
-    continue;
-  }
-
-  const text = `NEW TRADE ALERT
-⚡️ Market Event: ${marketLink ? `[${marketLabel}](${marketLink})` : marketLabel}
-Prediction: ${pick.picked_outcome}
-Confidence: ${confidenceEmoji}`;
-
-  try {
-    await sendTelegram(text, false);
-    await updateNotes("midas-sports", text);
-    console.log(`✅ NEW TRADE ALERT sent → ${marketLabel}`);
-    sentCount++;
-  } catch (err) {
-    console.error("❌ Failed sending NEW TRADE ALERT:", err.message);
-  }
-
-  continue; // skip result processing for new signals
-}
-
-
-    // 2️⃣ TRADE RESULT ALERT
-    if (pick.outcome && !pick.result_sent_at) {
-      const resultEmoji = RESULT_EMOJIS[pick.outcome] || "";
-
-      const { error: markResultError } = await supabase
-        .from("wallet_live_picks")
-        .update({ result_sent_at: new Date() })
-        .eq("market_id", pick.market_id)
-        .eq("picked_outcome", pick.picked_outcome);
-
-      if (markResultError) {
-        console.error("❌ Failed marking result_sent_at:", markResultError.message);
-        continue;
-      }
-
-      const resultText = `TRADE RESULT ALERT
-⚡️ Market Event: ${marketLink ? `[${marketLabel}](${marketLink})` : marketLabel}
-Prediction: ${pick.picked_outcome}
-Result: ${pick.outcome} ${resultEmoji}
-Confidence: ${confidenceEmoji}`;
-
-      try {
-        await sendTelegram(resultText, false);
-        await updateNotes("midas-sports", resultText);
-        console.log(`✅ TRADE RESULT ALERT sent → ${marketLabel}`);
-        sentCount++;
-      } catch (err) {
-        console.error("❌ Failed sending TRADE RESULT ALERT:", err.message);
-      }
-    }
+    // Logging only — do not send alerts here
+    console.log(`[LIVE PICK] ${marketLabel} | Outcome: ${pick.picked_outcome} | Wallets: ${pick.vote_count} | Confidence: ${confidenceEmoji}`);
   }
 
   return { sent: sentCount };
@@ -593,7 +532,7 @@ for (const sig of signals) {
 }
 
 /* ===========================
-   Resolve Markets & Send TRADE RESULT ALERT (DEBUG + RETRY + DAILY SUMMARY + LOG)
+   Resolve Markets & Send TRADE RESULT ALERT (DEBUG + RETRY + DAILY SUMMARY + LOG + NEW ALERT FORMAT)
 =========================== */
 async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
   const { data: pending, error } = await supabase
@@ -629,7 +568,7 @@ async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
   }
 
   for (const [key, signalsGroup] of marketOutcomeMap.entries()) {
-    const { event_slug, market_id, picked_outcome, market_name } = signalsGroup[0];
+    const { event_slug, market_id, picked_outcome, market_name, event_start } = signalsGroup[0];
     let market = null;
 
     // Retry loop
@@ -651,7 +590,7 @@ async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
       if (attempt < maxRetries) await new Promise(r => setTimeout(r, retryDelayMs));
     }
 
-    // If still unresolved after retries
+    // Still unresolved after retries
     if (!market || !(market.umaResolutionStatus === "resolved" || market.automaticallyResolved)) {
       stillPending.push({ market_id, event_slug });
       continue;
@@ -702,15 +641,16 @@ async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
       continue;
     }
 
-    // Build TRADE RESULT ALERT
-    const text = `TRADE RESULT ALERT
-⚡️ Market Event: [${market_name || event_slug}](https://polymarket.com/market/${event_slug})
+    // --- TRADE RESULT ALERT ---
+    const tradeResultText = `📈 TRADE RESULT ALERT
+Market Event: [${market_name || event_slug}](https://polymarket.com/market/${event_slug})
 Prediction: ${picked_outcome}
-Result: ${result} ${resultEmoji}`;
+Result: ${result} ${resultEmoji}
+Event Resolved: ${new Date(market.resolvedAt || market.endDate).toLocaleString("en-US", { timeZone: TIMEZONE, hour12: true })}`;
 
     try {
-      await sendTelegram(text, false);
-      await updateNotes("midas-sports", text);
+      await sendTelegram(tradeResultText, false);
+      await updateNotes("midas-sports", tradeResultText);
       console.log(`✅ TRADE RESULT ALERT sent & outcomes updated for market ${market_id} (${picked_outcome})`);
       resolvedCount += signalsGroup.length;
       resolvedMarkets.push({ market_id, event_slug, picked_outcome, result });
@@ -718,9 +658,30 @@ Result: ${result} ${resultEmoji}`;
       console.error(`❌ Failed sending TRADE RESULT ALERT for market ${market_id}:`, err.message);
       stillPending.push({ market_id, event_slug });
     }
+
+    // --- NEW TRADE SIGNAL ALERT ---
+    for (const sig of signalsGroup) {
+      if (!sig.sent_alert) {
+        const newTradeText = `⚡️ NEW TRADE SIGNAL
+Market Event: [${market_name || event_slug}](https://polymarket.com/market/${event_slug})
+Prediction: ${sig.picked_outcome}
+Confidence: ${sig.confidence || "⭐"}
+Event Start: ${new Date(sig.event_start).toLocaleString("en-US", { timeZone: TIMEZONE, hour12: true })}`;
+
+        try {
+          await sendTelegram(newTradeText, false);
+          await updateNotes("midas-sports", newTradeText);
+          // Mark as sent
+          await supabase.from("signals").update({ sent_alert: true }).eq("id", sig.id);
+          console.log(`✅ NEW TRADE SIGNAL sent for ${sig.id}`);
+        } catch (err) {
+          console.error(`❌ Failed sending NEW TRADE SIGNAL for ${sig.id}:`, err.message);
+        }
+      }
+    }
   }
 
-  // Daily summary
+  // Daily summary + log
   console.log("📊 Daily Resolution Summary");
   console.log(`Total Pending Signals: ${totalPending}`);
   console.log(`Signals Resolved Today: ${resolvedCount}`);
@@ -738,6 +699,7 @@ Result: ${result} ${resultEmoji}`;
     });
   }
 }
+
 
 /* ===========================
    Count Wallet Daily Losses

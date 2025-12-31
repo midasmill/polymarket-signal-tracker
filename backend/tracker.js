@@ -557,6 +557,113 @@ if (sig.outcome === "LOSS") losses++;
 }
 
 /* ===========================
+   Rebuild Wallet Live Picks (Multi-Wallet Fixed)
+=========================== */
+async function rebuildWalletLivePicks() {
+  // 1️⃣ Fetch pending signals with eligible wallets
+  const { data: signals, error } = await supabase
+    .from("signals")
+    .select(`
+      wallet_id,
+      market_id,
+      market_name,
+      event_slug,
+      picked_outcome,
+      pnl,
+      wallets!inner (
+        paused,
+        win_rate
+      )
+    `)
+    .eq("outcome", "Pending")
+    .eq("wallets.paused", false)
+    .gte("wallets.win_rate", WIN_RATE_THRESHOLD)
+    .gte("pnl", 1000);
+
+  if (error || !signals?.length) return;
+
+  // 2️⃣ Group signals by event + market
+  const eventMap = new Map();
+  for (const sig of signals) {
+    const key = `${sig.market_id}||${sig.event_slug}`;
+    if (!eventMap.has(key)) eventMap.set(key, []);
+    eventMap.get(key).push(sig);
+  }
+
+  const livePicksMap = new Map();
+
+  // 3️⃣ Process each event
+  for (const [key, eventSignals] of eventMap.entries()) {
+    const { market_id, market_name, event_slug } = eventSignals[0];
+
+    // Count picks per outcome
+    const outcomeCounts = {};
+    for (const sig of eventSignals) {
+      outcomeCounts[sig.picked_outcome] = (outcomeCounts[sig.picked_outcome] || 0) + 1;
+    }
+
+    // Sort by number of wallets picking
+    const sortedOutcomes = Object.entries(outcomeCounts).sort((a, b) => b[1] - a[1]);
+    if (!sortedOutcomes.length) continue;
+
+    const [netPick, voteCount] = sortedOutcomes[0];
+
+    // Only consider outcomes picked by at least 2 wallets
+    if (!netPick || voteCount < MIN_WALLETS_FOR_SIGNAL) continue;
+
+    const pickKey = `${market_id}||${netPick}`;
+    if (!livePicksMap.has(pickKey)) {
+      livePicksMap.set(pickKey, {
+        market_id,
+        market_name,
+        event_slug,
+        picked_outcome: netPick,
+        wallets: [],
+        vote_count: 0
+      });
+    }
+
+    const entry = livePicksMap.get(pickKey);
+    for (const ws of eventSignals.filter(s => s.picked_outcome === netPick)) {
+      entry.wallets.push(ws.wallet_id);
+      entry.vote_count++;
+    }
+  }
+
+  // 4️⃣ Assign confidence and build final picks
+  const finalLivePicks = [];
+  for (const p of livePicksMap.values()) {
+    let confidence = null;
+    for (const [stars, threshold] of Object.entries(CONFIDENCE_THRESHOLDS)
+      .sort((a, b) => b[1] - a[1])) {
+      if (p.vote_count >= threshold) {
+        confidence = stars;
+        break;
+      }
+    }
+    if (!confidence) continue;
+
+    finalLivePicks.push({
+      ...p,
+      confidence,
+      fetched_at: new Date()
+    });
+  }
+
+  if (!finalLivePicks.length) return;
+
+  // 5️⃣ Upsert into wallet_live_picks
+  await supabase
+    .from("wallet_live_picks")
+    .upsert(finalLivePicks, {
+      onConflict: ["market_id", "picked_outcome"]
+    });
+
+  console.log(`✅ Wallet live picks rebuilt (${finalLivePicks.length})`);
+}
+
+
+/* ===========================
    Signal Processing + Telegram Sending (Fixed)
 =========================== */
 async function processAndSendSignals() {

@@ -210,29 +210,32 @@ async function resolveMarkets() {
     const market = await fetchMarket(sig.event_slug);
     if (!market) continue;
 
-    // Check if market is resolved
     const isResolved = market.closed && (market.automaticallyResolved || market.events?.[0]?.ended);
     if (!isResolved) continue;
 
-    // Determine winning outcome
     let winningOutcome = market.outcome;
 
+    // Fallback: determine outcome from event score / outcomes array
     if (!winningOutcome && market.events?.[0]) {
       const event = market.events[0];
       const outcomes = market.outcomes || [];
 
-      // Map the score to the winning outcome
       if (event.score) {
         const [scoreA, scoreB] = event.score.split("-").map(Number);
-        if (scoreA > scoreB) winningOutcome = outcomes[0];
-        else if (scoreB > scoreA) winningOutcome = outcomes[1];
-        else winningOutcome = null; // tie or unknown
+        if (outcomes.length >= 2) {
+          if (scoreA > scoreB) winningOutcome = outcomes[0];
+          else if (scoreB > scoreA) winningOutcome = outcomes[1];
+          else winningOutcome = null;
+        }
       }
     }
 
-    if (!winningOutcome) continue;
+    if (!winningOutcome) {
+      console.warn(`⚠️ Could not determine winning outcome for market ${sig.market_id}`);
+      continue;
+    }
 
-    const result = sig.picked_outcome === winningOutcome ? "WIN" : "LOSS";
+    const result = sig.picked_outcome.trim().toUpperCase() === winningOutcome.trim().toUpperCase() ? "WIN" : "LOSS";
 
     // Update signals table
     await supabase

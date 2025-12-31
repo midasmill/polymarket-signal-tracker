@@ -124,15 +124,20 @@ async function fetchWithRetry(url, options = {}, retries = 3, delay = 1000) {
 
 async function fetchMarket(eventSlug) {
   if (!eventSlug) return null;
+  // Check cache
   if (marketCache.has(eventSlug)) return marketCache.get(eventSlug);
+
   try {
     const res = await fetch(`https://gamma-api.polymarket.com/markets/slug/${eventSlug}`, {
       headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
     });
     if (!res.ok) return null;
+
     const market = await res.json();
-    // Cache it
+
+    // Cache it even if closed/resolved
     marketCache.set(eventSlug, market);
+
     return market;
   } catch (err) {
     console.error(`❌ Fetch error for ${eventSlug}:`, err.message);

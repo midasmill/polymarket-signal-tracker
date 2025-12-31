@@ -361,6 +361,9 @@ async function trackWallet(wallet) {
     .eq("wallet_id", wallet.id);
 
   const existingTxs = new Set(existingSignals.map(s => s.tx_hash));
+  const existingKeys = new Set(existingSignals.map(
+    s => `${s.wallet_id}||${s.event_slug}||${s.picked_outcome}`
+  ));
 
   const newSignals = [];
 
@@ -385,12 +388,8 @@ async function trackWallet(wallet) {
     }
 
     // ✅ Skip ONLY if SAME wallet already picked SAME outcome for this event
-    const alreadyPickedSameSide = existingSignals.some(
-      s =>
-        s.event_slug === eventSlug &&
-        s.picked_outcome === pickedOutcome
-    );
-    if (alreadyPickedSameSide) continue;
+    const key = `${wallet.id}||${eventSlug}||${pickedOutcome}`;
+    if (existingKeys.has(key)) continue;
 
     // 4️⃣ Generate synthetic tx hash
     const syntheticTx = [
@@ -421,21 +420,19 @@ async function trackWallet(wallet) {
       resolved_outcome: null,
       outcome_at: null,
       win_rate: wallet.win_rate,
-      created_at: new Date(
-        pos.timestamp ? pos.timestamp * 1000 : Date.now()
-      ),
-      event_start_at: market?.eventStartAt
-        ? new Date(market.eventStartAt)
-        : null
+      created_at: new Date(pos.timestamp ? pos.timestamp * 1000 : Date.now()),
+      event_start_at: market?.eventStartAt ? new Date(market.eventStartAt) : null
     });
   }
 
   if (!newSignals.length) return;
 
-  // 7️⃣ Insert signals
+  // 7️⃣ Insert/Upsert signals safely to avoid duplicates
   const { error } = await supabase
     .from("signals")
-    .upsert(newSignals);
+    .upsert(newSignals, {
+      onConflict: ["wallet_id", "event_slug", "picked_outcome"]
+    });
 
   if (error) {
     console.error(
@@ -444,45 +441,38 @@ async function trackWallet(wallet) {
     );
   } else {
     console.log(
-      `✅ Inserted ${newSignals.length} new signal(s) for wallet ${wallet.id}`
+      `✅ Inserted/updated ${newSignals.length} signal(s) for wallet ${wallet.id}`
     );
   }
 
-// 8️⃣ Update wallet event exposure (PER EVENT)
-const affectedEvents = [
-  ...new Set(newSignals.map(s => s.event_slug))
-];
+  // 8️⃣ Update wallet event exposure (PER EVENT)
+  const affectedEvents = [...new Set(newSignals.map(s => s.event_slug))];
 
-for (const eventSlug of affectedEvents) {
-  const totals = await getWalletOutcomeTotals(wallet.id, eventSlug);
-  const entries = Object.entries(totals).sort((a, b) => b[1] - a[1]);
+  for (const eventSlug of affectedEvents) {
+    const totals = await getWalletOutcomeTotals(wallet.id, eventSlug);
+    const entries = Object.entries(totals).sort((a, b) => b[1] - a[1]);
+    if (!entries.length) continue;
 
-  if (!entries.length) continue;
+    const [netOutcome, netAmount] = entries[0];
+    const secondAmount = entries[1]?.[1] ?? 0;
+    if (secondAmount > 0 && netAmount / secondAmount < 1.05) continue;
 
-  const [netOutcome, netAmount] = entries[0];
+    const marketId = newSignals.find(s => s.event_slug === eventSlug)?.market_id || null;
 
-  // Optional hedge ignore (<5% difference)
-  const secondAmount = entries[1]?.[1] ?? 0;
-  if (secondAmount > 0 && netAmount / secondAmount < 1.05) continue;
-
-  // Get market_id safely
-  const marketId =
-    newSignals.find(s => s.event_slug === eventSlug)?.market_id || null;
-
-  await supabase
-    .from("wallet_event_exposure")
-    .upsert({
-      wallet_id: wallet.id,
-      event_slug: eventSlug,
-      market_id: marketId,
-      totals,
-      net_outcome: netOutcome,
-      net_amount: netAmount,
-      updated_at: new Date()
-    });
+    await supabase
+      .from("wallet_event_exposure")
+      .upsert({
+        wallet_id: wallet.id,
+        event_slug: eventSlug,
+        market_id: marketId,
+        totals,
+        net_outcome: netOutcome,
+        net_amount: netAmount,
+        updated_at: new Date()
+      });
+  }
 }
-   
-}
+
 
 /* ===========================
    Confidence

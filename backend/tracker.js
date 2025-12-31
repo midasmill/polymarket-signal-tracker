@@ -176,28 +176,42 @@ function getConfidenceEmoji(count) {
 /* ===========================
    Notes Update Helper (with proper line breaks)
 =========================== */
-async function updateNotes(slug, text) {
-  // Normalize text and ensure each field is on a new line
-  const noteText = text.trim(); // already contains \n in your message
+async function updateNotes(slug, marketId, pickedOutcome, text) {
+  const anchor = buildNotesAnchor(marketId, pickedOutcome);
+  const block = `${anchor}\n${text.trim()}`;
 
-  // Fetch existing notes content
+  // Fetch existing notes
   const { data: notes } = await supabase
     .from("notes")
     .select("content")
     .eq("slug", slug)
     .maybeSingle();
 
-  let newContent = notes?.content || "";
+  let content = notes?.content || "";
 
-  // Add 2 newlines between alerts to separate them visually
-  newContent += newContent ? `\n\n${noteText}` : noteText;
+  const anchorRegex = new RegExp(
+    `${anchor}[\\s\\S]*?(?=<!-- MARKET:|$)`,
+    "g"
+  );
 
-  // Use explicit template literal to preserve line breaks
+  if (anchorRegex.test(content)) {
+    // 🔁 Replace existing block
+    content = content.replace(anchorRegex, `${block}\n\n`);
+  } else {
+    // 🆕 Append new block
+    content += content ? `\n\n${block}` : block;
+  }
+
   await supabase
     .from("notes")
-    .update({ content: newContent, public: true })
+    .update({ content, public: true })
     .eq("slug", slug);
 }
+
+function buildNotesAnchor(marketId, pickedOutcome) {
+  return `<!-- MARKET:${marketId}:${pickedOutcome} -->`;
+}
+
 
 /* ===========================
    Resolve Wallet Event Outcome
@@ -232,36 +246,37 @@ for (const sig of signals) {
    Resolve Market + Send Notifications (No Duplicates)
 =========================== */
 async function resolveMarkets() {
-  const { data: pending } = await supabase
+  const { data: pending, error } = await supabase
     .from("signals")
     .select("*")
     .eq("outcome", "Pending")
     .not("event_slug", "is", null);
 
-  if (!pending?.length) return;
+  if (error || !pending?.length) return;
+
+  // 1️⃣ Deduplicate by market
+  const seenMarkets = new Set();
 
   for (const sig of pending) {
+    if (seenMarkets.has(sig.market_id)) continue;
+    seenMarkets.add(sig.market_id);
+
     const market = await fetchMarket(sig.event_slug);
     if (!market) continue;
 
-    const isResolved = market.closed && (market.automaticallyResolved || market.events?.[0]?.ended);
+    const isResolved =
+      market.closed &&
+      (market.automaticallyResolved || market.events?.[0]?.ended);
+
     if (!isResolved) continue;
 
     let winningOutcome = market.outcome;
 
-    // Fallback: determine outcome from event score / outcomes array
-    if (!winningOutcome && market.events?.[0]) {
-      const event = market.events[0];
-      const outcomes = market.outcomes || [];
-
-      if (event.score) {
-        const [scoreA, scoreB] = event.score.split("-").map(Number);
-        if (outcomes.length >= 2) {
-          if (scoreA > scoreB) winningOutcome = outcomes[0];
-          else if (scoreB > scoreA) winningOutcome = outcomes[1];
-          else winningOutcome = null;
-        }
-      }
+    // 2️⃣ Fallback resolution
+    if (!winningOutcome && market.events?.[0]?.score && market.outcomes?.length >= 2) {
+      const [a, b] = market.events[0].score.split("-").map(Number);
+      if (a > b) winningOutcome = market.outcomes[0];
+      else if (b > a) winningOutcome = market.outcomes[1];
     }
 
     if (!winningOutcome) {
@@ -269,28 +284,46 @@ async function resolveMarkets() {
       continue;
     }
 
-    const result = sig.picked_outcome.trim().toUpperCase() === winningOutcome.trim().toUpperCase() ? "WIN" : "LOSS";
     const now = new Date();
 
-    // 1️⃣ Update signals table
-    await supabase
+    // 3️⃣ Update ALL related signals atomically
+    const { data: signalsToResolve } = await supabase
       .from("signals")
-      .update({
-        outcome: result,
-        resolved_outcome: winningOutcome,
-        outcome_at: now
-      })
-      .eq("id", sig.id);
+      .select("id,picked_outcome")
+      .eq("market_id", sig.market_id)
+      .eq("outcome", "Pending");
 
-    // 2️⃣ Update wallet_live_picks table
+    for (const s of signalsToResolve || []) {
+      const result =
+        s.picked_outcome.trim().toUpperCase() ===
+        winningOutcome.trim().toUpperCase()
+          ? "WIN"
+          : "LOSS";
+
+      await supabase
+        .from("signals")
+        .update({
+          outcome: result,
+          resolved_outcome: winningOutcome,
+          outcome_at: now
+        })
+        .eq("id", s.id);
+    }
+
+    // 4️⃣ Update wallet_live_picks result (no notification yet)
     const { data: livePick } = await supabase
       .from("wallet_live_picks")
-      .select("id,resolved_sent_at")
+      .select("*")
       .eq("market_id", sig.market_id)
-      .eq("picked_outcome", sig.picked_outcome)
       .single();
 
     if (!livePick) continue;
+
+    const result =
+      livePick.picked_outcome.trim().toUpperCase() ===
+      winningOutcome.trim().toUpperCase()
+        ? "WIN"
+        : "LOSS";
 
     await supabase
       .from("wallet_live_picks")
@@ -300,37 +333,51 @@ async function resolveMarkets() {
       })
       .eq("id", livePick.id);
 
-    console.log(`✅ Resolved market ${sig.market_id}: ${sig.picked_outcome} → ${result} (${winningOutcome})`);
+    console.log(`✅ Resolved market ${sig.market_id}: ${winningOutcome}`);
 
-    // 3️⃣ Send resolved notification only if not sent before
-    if (!livePick.resolved_sent_at) {
-      try {
-        const outcomeEmoji = RESULT_EMOJIS[result] || "";
-        const text = `📢 MARKET PREDICTION RESOLVED
+    // 5️⃣ Atomic notification lock
+    const { data: locked } = await supabase
+      .from("wallet_live_picks")
+      .update({ resolved_sent_at: now })
+      .eq("id", livePick.id)
+      .is("resolved_sent_at", null)
+      .select("id")
+      .single();
+
+    if (!locked) {
+      console.log(`⚪ Resolved alert already sent, skipping.`);
+      continue;
+    }
+
+    // 6️⃣ Send notification + edit Notes
+    try {
+      const outcomeEmoji = RESULT_EMOJIS[result] || "";
+      const text = `📢 MARKET PREDICTION RESOLVED
 Market Event: ${sig.market_name || sig.event_slug}
-Prediction: ${sig.picked_outcome}
+Prediction: ${livePick.picked_outcome}
 Result: ${result} ${outcomeEmoji}
-Resolved At: ${now.toLocaleString("en-US", { timeZone: "America/New_York" })} EST`;
+Resolved At: ${now.toLocaleString("en-US", {
+        timeZone: "America/New_York"
+      })} EST`;
 
-        await sendTelegram(text, false);
-        await updateNotes("midas-sports", text.trim());
+      await sendTelegram(text, false);
 
-        // Mark resolved notification as sent
-        await supabase
-          .from("wallet_live_picks")
-          .update({ resolved_sent_at: now })
-          .eq("id", livePick.id);
+      await updateNotes(
+        "midas-sports",
+        sig.market_id,
+        livePick.picked_outcome,
+        text.trim()
+      );
 
-        console.log(`✅ Sent resolved notification for market ${sig.market_id}`);
-      } catch (err) {
-        console.error(`❌ Failed resolved notification for market ${sig.market_id}:`, err.message);
-      }
-    } else {
-      console.log(`⚪ Resolved notification already sent for market ${sig.market_id}, skipping.`);
+      console.log(`✅ Sent resolved notification for market ${sig.market_id}`);
+    } catch (err) {
+      console.error(
+        `❌ Failed resolved notification for market ${sig.market_id}:`,
+        err.message
+      );
     }
   }
 }
-
 
 /* ===========================
    Count Wallet Daily Losses
@@ -568,11 +615,14 @@ async function trackWallet(wallet) {
    Wallet Metrics Update
 =========================== */
 async function updateWalletMetricsJS() {
-  const { data: wallets } = await supabase.from("wallets").select("*");
-  if (!wallets?.length) return;
+  const { data: wallets, error } = await supabase
+    .from("wallets")
+    .select("*");
+
+  if (error || !wallets?.length) return;
 
   for (const wallet of wallets) {
-    // Fetch resolved signals for this wallet
+    // 1️⃣ Fetch resolved signals for this wallet
     const { data: resolvedSignals } = await supabase
       .from("signals")
       .select("event_slug, picked_outcome, outcome")
@@ -581,41 +631,44 @@ async function updateWalletMetricsJS() {
 
     if (!resolvedSignals?.length) continue;
 
-    // Group signals by event
+    // 2️⃣ Group signals by event
     const eventsMap = new Map();
     for (const sig of resolvedSignals) {
       if (!sig.event_slug) continue;
-      if (!eventsMap.has(sig.event_slug)) eventsMap.set(sig.event_slug, []);
+      if (!eventsMap.has(sig.event_slug)) {
+        eventsMap.set(sig.event_slug, []);
+      }
       eventsMap.get(sig.event_slug).push(sig);
     }
 
-    let wins = 0, losses = 0;
+    let wins = 0;
+    let losses = 0;
 
+    // 3️⃣ Resolve net pick per event
     for (const [eventSlug, signalsForEvent] of eventsMap.entries()) {
-      // Skip wallets that have both sides for this event
       const netPick = await getWalletNetPick(wallet.id, eventSlug);
-if (!netPick) continue;
+      if (!netPick) continue;
 
-const sig = signalsForEvent.find(s => s.picked_outcome === netPick);
-if (!sig) continue;
+      const sig = signalsForEvent.find(
+        s => s.picked_outcome === netPick
+      );
+      if (!sig) continue;
 
-if (sig.outcome === "WIN") wins++;
-if (sig.outcome === "LOSS") losses++;
-
-
-      // Determine majority outcome for this wallet/event
-      const outcome = signalsForEvent[0]?.outcome || null;
-      if (outcome === "WIN") wins++;
-      if (outcome === "LOSS") losses++;
+      if (sig.outcome === "WIN") wins++;
+      if (sig.outcome === "LOSS") losses++;
     }
 
+    // 4️⃣ Compute final metrics ONCE
     const total = wins + losses;
-    const winRate = total > 0 ? Math.round((wins / total) * 100) : 0;
+    const winRate = total > 0
+      ? Math.round((wins / total) * 100)
+      : 0;
 
-    // Count daily losses safely
+    // 5️⃣ Count daily losses once
     const dailyLosses = await countWalletDailyLosses(wallet.id);
     const shouldPause = dailyLosses >= 3;
 
+    // 6️⃣ Single wallet update
     await supabase
       .from("wallets")
       .update({
@@ -628,12 +681,12 @@ if (sig.outcome === "LOSS") losses++;
 }
 
 /* ===========================
-   Rebuild Wallet Live Picks (Multi-Wallet Fixed)
+   Rebuild Wallet Live Picks + Send Signals
 =========================== */
-async function rebuildWalletLivePicks() {
-  console.log("🔄 Rebuilding wallet live picks (safe multi-wallet)...");
+async function rebuildAndSendLivePicks() {
+  console.log("🔄 Rebuilding wallet live picks and sending signals...");
 
-  // 1️⃣ Fetch all pending signals with wallets info
+  // 1️⃣ Fetch all pending signals with wallet info
   const { data: signals, error } = await supabase
     .from("signals")
     .select(`
@@ -654,7 +707,6 @@ async function rebuildWalletLivePicks() {
     console.error("❌ Failed fetching signals:", error.message);
     return;
   }
-
   if (!signals?.length) {
     console.log("⚪ No pending signals found.");
     return;
@@ -662,169 +714,104 @@ async function rebuildWalletLivePicks() {
 
   console.log(`📊 Fetched ${signals.length} pending signals.`);
 
-  // 2️⃣ Group signals by market + event
-  const eventMap = new Map();
+  // 2️⃣ Aggregate picks per market/outcome (eligible wallets only)
+  const picksMap = new Map();
   for (const sig of signals) {
-    const key = `${sig.market_id}||${sig.event_slug}`;
-    if (!eventMap.has(key)) eventMap.set(key, []);
-    eventMap.get(key).push(sig);
+    if (sig.wallets.paused || sig.wallets.win_rate < WIN_RATE_THRESHOLD || (sig.pnl ?? 0) < 1000)
+      continue;
+
+    const key = `${sig.market_id}||${sig.picked_outcome}`;
+    if (!picksMap.has(key)) picksMap.set(key, { ...sig, wallets: [], vote_count: 0 });
+    const pick = picksMap.get(key);
+
+    pick.wallets.push(sig.wallet_id);
+    pick.vote_count++;
   }
 
-  const livePicksMap = new Map();
-
-  // 3️⃣ Process each event group
-  for (const [key, eventSignals] of eventMap.entries()) {
-    const { market_id, market_name, event_slug } = eventSignals[0];
-
-    // Count picks per outcome **only for eligible wallets**
-    const outcomeCounts = {};
-    const walletList = {};
-    for (const sig of eventSignals) {
-      if (sig.wallets.paused) continue;
-      if (sig.wallets.win_rate < WIN_RATE_THRESHOLD) continue;
-      if ((sig.pnl ?? 0) < 1000) continue;
-
-      outcomeCounts[sig.picked_outcome] = (outcomeCounts[sig.picked_outcome] || 0) + 1;
-      if (!walletList[sig.picked_outcome]) walletList[sig.picked_outcome] = [];
-      walletList[sig.picked_outcome].push(sig.wallet_id);
-    }
-
-    if (!Object.keys(outcomeCounts).length) continue;
-
-    // Pick outcome with most votes
-    const sorted = Object.entries(outcomeCounts).sort((a, b) => b[1] - a[1]);
-    const [netPick, voteCount] = sorted[0];
-
-    if (voteCount < MIN_WALLETS_FOR_SIGNAL) {
-      console.log(`⚠️ Skipping ${event_slug} (${netPick}) — only ${voteCount} wallet(s) eligible.`);
+  // 3️⃣ Filter by MIN_WALLETS_FOR_SIGNAL and prepare final picks
+  const finalPicks = [];
+  for (const pick of picksMap.values()) {
+    if (pick.vote_count < MIN_WALLETS_FOR_SIGNAL) {
+      console.log(`⚠️ Skipping ${pick.event_slug} (${pick.picked_outcome}) — only ${pick.vote_count} wallet(s) eligible.`);
       continue;
     }
 
-    const pickKey = `${market_id}||${netPick}`;
-    livePicksMap.set(pickKey, {
-      market_id,
-      market_name,
-      event_slug,
-      picked_outcome: netPick,
-      wallets: walletList[netPick] || [],
-      vote_count: voteCount
-    });
-
-    console.log(`✅ Event ${event_slug} net pick: ${netPick} (${voteCount} wallet(s))`);
-  }
-
-  // 4️⃣ Assign confidence (integer) and prepare final picks
-  const finalLivePicks = [];
-  for (const pick of livePicksMap.values()) {
-    let confidence = pick.vote_count; // store as integer
-    finalLivePicks.push({
-      ...pick,
-      confidence,
-      wallets: `{${pick.wallets.join(",")}}`, // convert JS array to Postgres array
+    finalPicks.push({
+      market_id: pick.market_id,
+      market_name: pick.market_name,
+      event_slug: pick.event_slug,
+      picked_outcome: pick.picked_outcome,
+      wallets: pick.wallets,
+      vote_count: pick.vote_count,
+      confidence: pick.vote_count,
       fetched_at: new Date()
     });
 
-    console.log(`🏆 Final pick ${pick.event_slug}: ${pick.picked_outcome} (${pick.vote_count} wallets, confidence: ${confidence})`);
+    console.log(`🏆 Final pick ${pick.event_slug}: ${pick.picked_outcome} (${pick.vote_count} wallets)`);
   }
 
-  if (!finalLivePicks.length) {
+  if (!finalPicks.length) {
     console.log("⚪ No final live picks to upsert.");
     return;
   }
 
-  // 5️⃣ Upsert into wallet_live_picks
-  try {
-    await supabase
-      .from("wallet_live_picks")
-      .upsert(finalLivePicks, {
-        onConflict: ["market_id", "picked_outcome"]
-      });
-
-    console.log(`✅ Wallet live picks rebuilt (${finalLivePicks.length} final picks).`);
-  } catch (err) {
-    console.error("❌ Failed upserting wallet_live_picks:", err.message);
-  }
-}
-
-/* ===========================
-   Send Signals & Resolved Notifications (No Duplicates)
-=========================== */
-async function processAndSendAllNotifications() {
-  // 1️⃣ Fetch all wallet live picks
-  const { data: picks, error } = await supabase
+  // 4️⃣ Fetch existing live picks once
+  const { data: existingPicks } = await supabase
     .from("wallet_live_picks")
     .select("*");
 
-  if (error) {
-    console.error("❌ Failed fetching wallet_live_picks:", error.message);
-    return;
-  }
+  const existingMap = new Map(
+    (existingPicks || []).map(p => [`${p.market_id}||${p.picked_outcome}`, p])
+  );
 
-  if (!picks?.length) return;
+  // 5️⃣ Upsert picks while preserving notification flags
+  const upserts = finalPicks.map(pick => {
+    const existing = existingMap.get(`${pick.market_id}||${pick.picked_outcome}`);
+    return {
+      ...pick,
+      signal_sent_at: existing?.signal_sent_at ?? null,
+      last_confidence_sent: existing?.last_confidence_sent ?? null,
+      result_sent_at: existing?.result_sent_at ?? null,
+      resolved_sent_at: existing?.resolved_sent_at ?? null,
+      outcome: existing?.outcome ?? null,
+      resolved_outcome: existing?.resolved_outcome ?? null,
+      outcome_at: existing?.outcome_at ?? null
+    };
+  });
 
-  for (const pick of picks) {
-    // Skip if no wallets
-    if (!pick.wallets || pick.wallets.length === 0) continue;
+  await supabase
+    .from("wallet_live_picks")
+    .upsert(upserts, { onConflict: ["market_id", "picked_outcome"] });
 
-    const now = new Date();
+  console.log(`✅ Wallet live picks rebuilt (${finalPicks.length} final picks).`);
 
-    // 2️⃣ Handle NEW predictions
-    if (!pick.signal_sent_at && pick.vote_count >= MIN_WALLETS_FOR_SIGNAL) {
+  // 6️⃣ Send notifications for picks that haven't been sent
+  const now = new Date();
+  for (const pick of upserts) {
+    if ((FORCE_SEND || !pick.signal_sent_at) && pick.vote_count >= MIN_WALLETS_FOR_SIGNAL) {
+      if (FORCE_SEND) console.warn(`⚠️ FORCE_SEND ENABLED — resending signal for ${pick.event_slug}`);
       const confidenceEmoji = getConfidenceEmoji(pick.vote_count);
 
-const text = `⚡️ NEW MARKET PREDICTION
+      const text = `⚡️ NEW MARKET PREDICTION
 Market Event: ${pick.market_name || pick.event_slug}
 Prediction: ${pick.picked_outcome || "UNKNOWN"}
 Confidence: ${confidenceEmoji}
 Signal Sent: ${now.toLocaleString("en-US", { timeZone: "America/New_York" })} EST`;
 
-
       try {
         await sendTelegram(text, false);
-        await updateNotes("midas-sports", text.trim());
-
-        console.log(`✅ Sent signal for market ${pick.market_id} (${pick.picked_outcome})`);
+        await updateNotes("midas-sports", pick.market_id, pick.picked_outcome, text.trim());
 
         // Mark as sent
         await supabase
           .from("wallet_live_picks")
-          .update({
-            last_confidence_sent: now,
-            signal_sent_at: now
-          })
+          .update({ signal_sent_at: now, last_confidence_sent: now })
           .eq("market_id", pick.market_id)
           .eq("picked_outcome", pick.picked_outcome);
 
+        console.log(`✅ Sent signal for market ${pick.market_id} (${pick.picked_outcome})`);
       } catch (err) {
         console.error(`❌ Failed sending signal for market ${pick.market_id}:`, err.message);
-      }
-    }
-
-    // 3️⃣ Handle RESOLVED notifications
-    if (pick.outcome && !pick.result_sent_at) {
-      const outcomeEmoji = RESULT_EMOJIS[pick.outcome] || "";
-
-      const text = `📢 MARKET PREDICTION RESOLVED
-Market Event: ${pick.market_name || pick.event_slug}
-Prediction: ${pick.picked_outcome}
-Result: ${pick.outcome} ${outcomeEmoji}
-Resolved At: ${new Date(pick.outcome_at).toLocaleString("en-US", { timeZone: "America/New_York" })} EST`;
-
-      try {
-        await sendTelegram(text, false);
-        await updateNotes("midas-sports", text);
-
-        console.log(`✅ Sent resolved notification for market ${pick.market_id}`);
-
-        // Mark resolved notification as sent
-        await supabase
-          .from("wallet_live_picks")
-          .update({ result_sent_at: now })
-          .eq("market_id", pick.market_id)
-          .eq("picked_outcome", pick.picked_outcome);
-
-      } catch (err) {
-        console.error(`❌ Failed resolved notification for market ${pick.market_id}:`, err.message);
       }
     }
   }

@@ -403,35 +403,36 @@ async function processAndSendSignals() {
 
     console.log(`[SEND SIGNAL] ${marketLabel} | Outcome: ${pick.picked_outcome} | Wallets: ${pick.vote_count} | Confidence: ${confidenceEmoji}`);
 
-    // 1️⃣ NEW TRADE ALERT
-    if (!pick.signal_sent_at && pick.vote_count >= MIN_WALLETS_FOR_SIGNAL) {
-      const { error: markError } = await supabase
-        .from("wallet_live_picks")
-        .update({ signal_sent_at: new Date(), last_confidence_sent: confidenceEmoji })
-        .eq("market_id", pick.market_id)
-        .eq("picked_outcome", pick.picked_outcome);
+ // 1️⃣ NEW TRADE ALERT
+if (!pick.signal_sent_at && pick.vote_count >= MIN_WALLETS_FOR_SIGNAL) {
+  const { error: markError } = await supabase
+    .from("wallet_live_picks")
+    .update({ signal_sent_at: new Date() }) // <-- remove last_confidence_sent
+    .eq("market_id", pick.market_id)
+    .eq("picked_outcome", pick.picked_outcome);
 
-      if (markError) {
-        console.error("❌ Failed marking signal_sent_at:", markError.message);
-        continue;
-      }
+  if (markError) {
+    console.error("❌ Failed marking signal_sent_at:", markError.message);
+    continue;
+  }
 
-      const text = `NEW TRADE ALERT
+  const text = `NEW TRADE ALERT
 ⚡️ Market Event: ${marketLink ? `[${marketLabel}](${marketLink})` : marketLabel}
 Prediction: ${pick.picked_outcome}
 Confidence: ${confidenceEmoji}`;
 
-      try {
-        await sendTelegram(text, false);
-        await updateNotes("midas-sports", text);
-        console.log(`✅ NEW TRADE ALERT sent → ${marketLabel}`);
-        sentCount++;
-      } catch (err) {
-        console.error("❌ Failed sending NEW TRADE ALERT:", err.message);
-      }
+  try {
+    await sendTelegram(text, false);
+    await updateNotes("midas-sports", text);
+    console.log(`✅ NEW TRADE ALERT sent → ${marketLabel}`);
+    sentCount++;
+  } catch (err) {
+    console.error("❌ Failed sending NEW TRADE ALERT:", err.message);
+  }
 
-      continue; // skip result processing for new signals
-    }
+  continue; // skip result processing for new signals
+}
+
 
     // 2️⃣ TRADE RESULT ALERT
     if (pick.outcome && !pick.result_sent_at) {

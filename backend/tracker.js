@@ -533,6 +533,63 @@ Confidence: ${confidenceEmoji}`;
 }
 
 /* ===========================
+   Daily Summary: Win/Loss Report
+=========================== */
+async function sendDailySummary() {
+  const now = new Date();
+  const yesterdayStart = new Date(now);
+  yesterdayStart.setDate(now.getDate() - 1);
+  yesterdayStart.setHours(0, 0, 0, 0);
+
+  const yesterdayEnd = new Date(now);
+  yesterdayEnd.setDate(now.getDate() - 1);
+  yesterdayEnd.setHours(23, 59, 59, 999);
+
+  // 1️⃣ Fetch all sent signals
+  const { data: sentPicks, error } = await supabase
+    .from("wallet_live_picks")
+    .select("picked_outcome, outcome, signal_sent_at")
+    .not("outcome", "is", null);
+
+  if (error) return console.error("❌ Failed fetching sent picks:", error.message);
+  if (!sentPicks?.length) return console.log("ℹ️ No sent picks found for daily summary");
+
+  // 2️⃣ Filter for yesterday and compute counts
+  let yesterdayWins = 0;
+  let yesterdayLosses = 0;
+  let totalWins = 0;
+  let totalLosses = 0;
+
+  for (const pick of sentPicks) {
+    const outcome = pick.outcome?.toUpperCase();
+    if (outcome === "WIN") totalWins++;
+    if (outcome === "LOSS") totalLosses++;
+
+    if (pick.signal_sent_at) {
+      const sentAt = new Date(pick.signal_sent_at);
+      if (sentAt >= yesterdayStart && sentAt <= yesterdayEnd) {
+        if (outcome === "WIN") yesterdayWins++;
+        if (outcome === "LOSS") yesterdayLosses++;
+      }
+    }
+  }
+
+  // 3️⃣ Build summary text
+  const summaryText = `📊 Daily Summary (${yesterdayStart.toLocaleDateString()})
+Yesterday: ✅ Wins: ${yesterdayWins}, ❌ Losses: ${yesterdayLosses}
+Overall: ✅ Wins: ${totalWins}, ❌ Losses: ${totalLosses}`;
+
+  // 4️⃣ Send Telegram & update Notes
+  try {
+    await sendTelegram(summaryText, false);
+    await updateNotes("midas-sports", summaryText);
+    console.log("✅ Daily summary sent");
+  } catch (err) {
+    console.error("❌ Failed sending daily summary:", err.message);
+  }
+}
+
+/* ===========================
    Resolve Wallet Event Outcome
 =========================== */
 async function resolveWalletEventOutcome(walletId, eventSlug) {
@@ -937,6 +994,13 @@ async function main() {
         console.log("📅 Daily cron running...");
         await fetchAndInsertLeaderboardWallets();
         await trackerLoop();
+
+        // 📝 Send daily summary
+        try {
+          await sendDailySummary();
+        } catch (err) {
+          console.error("❌ Failed sending daily summary:", err.message);
+        }
       },
       { timezone: TIMEZONE }
     );

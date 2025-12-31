@@ -279,7 +279,7 @@ async function trackWallet(wallet) {
 }
 
 /* ===========================
-   Rebuild Wallet Live Picks (FIXED + MARKET LINK)
+   Rebuild Wallet Live Picks (FIXED + MARKET LINK + MULTI-WALLET)
 =========================== */
 async function rebuildWalletLivePicks() {
   // 1️⃣ Fetch all pending signals from active wallets
@@ -306,19 +306,21 @@ async function rebuildWalletLivePicks() {
   const livePicksMap = new Map();
 
   for (const sig of signals) {
-    if (!sig.market_id || !sig.picked_outcome || !sig.wallet_id) continue;
+    if (!sig.picked_outcome || !sig.wallet_id) continue;
 
-    const key = `${sig.market_id}||${sig.picked_outcome}`;
+    // Normalize picked outcome and use event_slug as fallback for market_id
+    const normalizedOutcome = sig.picked_outcome.trim().toUpperCase();
+    const key = `${sig.market_id || sig.event_slug}||${normalizedOutcome}`;
 
     if (!livePicksMap.has(key)) {
       livePicksMap.set(key, {
-        market_id: sig.market_id,
+        market_id: sig.market_id || null,
         market_name: sig.market_name || sig.event_slug || "Unknown Market",
         event_slug: sig.event_slug,
         market_url: sig.event_slug
           ? `https://polymarket.com/market/${sig.event_slug}`
           : null,
-        picked_outcome: sig.picked_outcome,
+        picked_outcome: normalizedOutcome,
         wallets: new Set()
       });
     }
@@ -333,12 +335,15 @@ async function rebuildWalletLivePicks() {
     const walletIds = [...pick.wallets];
     const voteCount = walletIds.length;
 
-    if (voteCount < MIN_WALLETS_FOR_SIGNAL) continue;
+    if (voteCount < MIN_WALLETS_FOR_SIGNAL) {
+      console.log(`Skipping ${pick.market_name} ${pick.picked_outcome} due to low vote count: ${voteCount}`);
+      continue;
+    }
 
-    // ✅ Determine numeric confidence for DB
-    let confidenceNum = 1; // default
+    // Determine numeric confidence for DB
+    let confidenceNum = 1;
     for (const [, threshold] of Object.entries(CONFIDENCE_THRESHOLDS)
-      .sort((a, b) => b[1] - a[1])) {
+      .sort(([, a], [, b]) => b - a)) {
       if (voteCount >= threshold) {
         confidenceNum = threshold;
         break;
@@ -353,14 +358,14 @@ async function rebuildWalletLivePicks() {
       picked_outcome: pick.picked_outcome,
       wallets: walletIds,
       vote_count: voteCount,
-      confidence: confidenceNum, // store numeric value
+      confidence: confidenceNum,
       fetched_at: new Date()
     });
   }
 
   if (!finalLivePicks.length) return;
 
-  // 4️⃣ Upsert (numeric confidence, avoids type errors)
+  // 4️⃣ Upsert (include event_slug in onConflict to merge null market_id picks)
   for (const pick of finalLivePicks) {
     console.log(
       `[LIVE PICK] ${pick.market_name} | ${pick.picked_outcome} | Wallets: ${pick.vote_count} | IDs: ${pick.wallets.join(", ")}`
@@ -369,7 +374,7 @@ async function rebuildWalletLivePicks() {
     const { error: upsertError } = await supabase
       .from("wallet_live_picks")
       .upsert(pick, {
-        onConflict: ["market_id", "picked_outcome"]
+        onConflict: ["market_id", "picked_outcome", "event_slug"]
       });
 
     if (upsertError) {

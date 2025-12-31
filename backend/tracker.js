@@ -903,7 +903,7 @@ async function trackerLoop() {
     await Promise.allSettled(wallets.map(wallet => trackWallet(wallet)));
 
     // 3️⃣ Rebuild live picks
-    await rebuildWalletLivePicks();
+    await processWalletLivePicks();
 
     // Optional debug count
     const { data: livePicks } = await supabase

@@ -229,7 +229,7 @@ for (const sig of signals) {
 }
 
 /* ===========================
-   Resolve Market
+   Resolve Market + Send Notifications (No Duplicates)
 =========================== */
 async function resolveMarkets() {
   const { data: pending } = await supabase
@@ -270,30 +270,67 @@ async function resolveMarkets() {
     }
 
     const result = sig.picked_outcome.trim().toUpperCase() === winningOutcome.trim().toUpperCase() ? "WIN" : "LOSS";
+    const now = new Date();
 
-    // Update signals table
+    // 1️⃣ Update signals table
     await supabase
       .from("signals")
       .update({
         outcome: result,
         resolved_outcome: winningOutcome,
-        outcome_at: new Date()
+        outcome_at: now
       })
       .eq("id", sig.id);
 
-    // Update wallet_live_picks
+    // 2️⃣ Update wallet_live_picks table
+    const { data: livePick } = await supabase
+      .from("wallet_live_picks")
+      .select("id,resolved_sent_at")
+      .eq("market_id", sig.market_id)
+      .eq("picked_outcome", sig.picked_outcome)
+      .single();
+
+    if (!livePick) continue;
+
     await supabase
       .from("wallet_live_picks")
       .update({
         outcome: result,
         resolved_outcome: winningOutcome
       })
-      .eq("market_id", sig.market_id)
-      .eq("picked_outcome", sig.picked_outcome);
+      .eq("id", livePick.id);
 
     console.log(`✅ Resolved market ${sig.market_id}: ${sig.picked_outcome} → ${result} (${winningOutcome})`);
+
+    // 3️⃣ Send resolved notification only if not sent before
+    if (!livePick.resolved_sent_at) {
+      try {
+        const outcomeEmoji = RESULT_EMOJIS[result] || "";
+        const text = `📢 MARKET PREDICTION RESOLVED
+Market Event: ${sig.market_name || sig.event_slug}
+Prediction: ${sig.picked_outcome}
+Result: ${result} ${outcomeEmoji}
+Resolved At: ${now.toLocaleString("en-US", { timeZone: "America/New_York" })} EST`;
+
+        await sendTelegram(text, false);
+        await updateNotes("midas-sports", text);
+
+        // Mark resolved notification as sent
+        await supabase
+          .from("wallet_live_picks")
+          .update({ resolved_sent_at: now })
+          .eq("id", livePick.id);
+
+        console.log(`✅ Sent resolved notification for market ${sig.market_id}`);
+      } catch (err) {
+        console.error(`❌ Failed resolved notification for market ${sig.market_id}:`, err.message);
+      }
+    } else {
+      console.log(`⚪ Resolved notification already sent for market ${sig.market_id}, skipping.`);
+    }
   }
 }
+
 
 /* ===========================
    Count Wallet Daily Losses
@@ -710,11 +747,11 @@ async function rebuildWalletLivePicks() {
 }
 
 /* ===========================
-   Signal Processing + Telegram Sending (Fixed)
+   Send Signals & Resolved Notifications (No Duplicates)
 =========================== */
-async function processAndSendSignals() {
-  // 1️⃣ Fetch all live picks
-  const { data: livePicks, error } = await supabase
+async function processAndSendAllNotifications() {
+  // 1️⃣ Fetch all wallet live picks
+  const { data: picks, error } = await supabase
     .from("wallet_live_picks")
     .select("*");
 
@@ -723,48 +760,71 @@ async function processAndSendSignals() {
     return;
   }
 
-  if (!livePicks?.length) return;
+  if (!picks?.length) return;
 
-  for (const pick of livePicks) {
-    // ✅ Must have wallets
+  for (const pick of picks) {
+    // Skip if no wallets
     if (!pick.wallets || pick.wallets.length === 0) continue;
 
-    // ✅ Enforce minimum wallets
-    if (pick.vote_count < MIN_WALLETS_FOR_SIGNAL) continue;
+    const now = new Date();
 
-    // ✅ Prevent duplicate alerts unless forced
-    if (pick.last_confidence_sent && !FORCE_SEND) continue;
+    // 2️⃣ Handle NEW predictions
+    if (!pick.signal_sent_at && pick.vote_count >= MIN_WALLETS_FOR_SIGNAL) {
+      const confidenceEmoji = getConfidenceEmoji(pick.vote_count);
 
-    const confidenceEmoji = getConfidenceEmoji(pick.vote_count);
-
-    const text = `⚡️ Market Event: ${pick.market_name || pick.event_slug}
+      const text = `⚡️ NEW MARKET PREDICTION
+Market Event: ${pick.market_name || pick.event_slug}
 Prediction: ${pick.picked_outcome || "UNKNOWN"}
 Confidence: ${confidenceEmoji}
-Signal Sent: ${new Date().toLocaleString("en-US", { timeZone: TIMEZONE })}`;
+Signal Sent: ${now.toLocaleString("en-US", { timeZone: "America/New_York" })} EST`;
 
-    try {
-      await sendTelegram(text, false);
-      await updateNotes("midas-sports", text);
+      try {
+        await sendTelegram(text, false);
+        await updateNotes("midas-sports", text);
 
-      console.log(
-        `✅ Sent signal for market ${pick.market_id} (${pick.picked_outcome})`
-      );
+        console.log(`✅ Sent signal for market ${pick.market_id} (${pick.picked_outcome})`);
 
-      // ✅ Mark as sent (atomic per pick)
-      await supabase
-        .from("wallet_live_picks")
-        .update({
-          last_confidence_sent: new Date(),
-          signal_sent_at: new Date()
-        })
-        .eq("market_id", pick.market_id)
-        .eq("picked_outcome", pick.picked_outcome);
+        // Mark as sent
+        await supabase
+          .from("wallet_live_picks")
+          .update({
+            last_confidence_sent: now,
+            signal_sent_at: now
+          })
+          .eq("market_id", pick.market_id)
+          .eq("picked_outcome", pick.picked_outcome);
 
-    } catch (err) {
-      console.error(
-        `❌ Failed sending signal for market ${pick.market_id}:`,
-        err.message
-      );
+      } catch (err) {
+        console.error(`❌ Failed sending signal for market ${pick.market_id}:`, err.message);
+      }
+    }
+
+    // 3️⃣ Handle RESOLVED notifications
+    if (pick.outcome && !pick.result_sent_at) {
+      const outcomeEmoji = RESULT_EMOJIS[pick.outcome] || "";
+
+      const text = `📢 MARKET PREDICTION RESOLVED
+Market Event: ${pick.market_name || pick.event_slug}
+Prediction: ${pick.picked_outcome}
+Result: ${pick.outcome} ${outcomeEmoji}
+Resolved At: ${new Date(pick.outcome_at).toLocaleString("en-US", { timeZone: "America/New_York" })} EST`;
+
+      try {
+        await sendTelegram(text, false);
+        await updateNotes("midas-sports", text);
+
+        console.log(`✅ Sent resolved notification for market ${pick.market_id}`);
+
+        // Mark resolved notification as sent
+        await supabase
+          .from("wallet_live_picks")
+          .update({ result_sent_at: now })
+          .eq("market_id", pick.market_id)
+          .eq("picked_outcome", pick.picked_outcome);
+
+      } catch (err) {
+        console.error(`❌ Failed resolved notification for market ${pick.market_id}:`, err.message);
+      }
     }
   }
 }

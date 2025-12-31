@@ -301,7 +301,7 @@ async function trackWallet(wallet) {
 /* ===========================
    Optimized Rebuild & Resolve Wallet Live Picks
 =========================== */
-async function processWalletLivePicksOptimized(maxRetries = 3, retryDelayMs = 5000) {
+async function processWalletLivePicks(maxRetries = 3, retryDelayMs = 5000) {
   const marketCache = new Map(); // Cache markets by market_id or event_slug
 
   // --- 0️⃣ Normalize old wallet_live_picks (YES/NO → team or OVER/UNDER) ---

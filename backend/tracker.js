@@ -177,8 +177,8 @@ function getConfidenceEmoji(count) {
    Notes Update Helper (with proper line breaks)
 =========================== */
 async function updateNotes(slug, text) {
-  // Normalize internal line breaks
-  const noteText = text.split("\n").join("\n");
+  // Normalize text and ensure each field is on a new line
+  const noteText = text.trim(); // already contains \n in your message
 
   // Fetch existing notes content
   const { data: notes } = await supabase
@@ -192,7 +192,7 @@ async function updateNotes(slug, text) {
   // Add 2 newlines between alerts to separate them visually
   newContent += newContent ? `\n\n${noteText}` : noteText;
 
-  // Update back to Supabase
+  // Use explicit template literal to preserve line breaks
   await supabase
     .from("notes")
     .update({ content: newContent, public: true })

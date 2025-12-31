@@ -593,16 +593,26 @@ for (const sig of signals) {
 }
 
 /* ===========================
-   Resolve Markets & Send TRADE RESULT ALERT
+   Resolve Markets & Send TRADE RESULT ALERT (DEBUG + LIVE)
 =========================== */
 async function resolveMarkets() {
-  const { data: pending } = await supabase
+  const { data: pending, error } = await supabase
     .from("signals")
     .select("*")
     .eq("outcome", "Pending")
     .not("event_slug", "is", null);
 
-  if (!pending?.length) return;
+  if (error) {
+    console.error("❌ Failed fetching pending signals:", error.message);
+    return;
+  }
+
+  if (!pending?.length) {
+    console.log("ℹ️ No pending signals to resolve.");
+    return;
+  }
+
+  console.log(`🔍 Resolving ${pending.length} pending signals...`);
 
   // Group by market_id + picked_outcome
   const marketOutcomeMap = new Map();
@@ -615,8 +625,24 @@ async function resolveMarkets() {
 
   for (const [key, signalsGroup] of marketOutcomeMap.entries()) {
     const { event_slug, market_id, picked_outcome, market_name } = signalsGroup[0];
-    const market = await fetchMarket(event_slug);
-    if (!market?.resolved) continue;
+
+    let market;
+    try {
+      market = await fetchMarket(event_slug);
+    } catch (err) {
+      console.error(`❌ Failed fetching market for ${event_slug}:`, err.message);
+      continue;
+    }
+
+    if (!market) {
+      console.log(`⚠️ Market data missing for event_slug ${event_slug}`);
+      continue;
+    }
+
+    if (!market.resolved) {
+      console.log(`⚠️ Market ${market_id} (${event_slug}) not resolved yet`);
+      continue;
+    }
 
     const winningOutcome = market.outcome;
     const result = picked_outcome === winningOutcome ? "WIN" : "LOSS";
@@ -625,17 +651,35 @@ async function resolveMarkets() {
     const ids = signalsGroup.map(s => s.id);
 
     // Update all signals
-    await supabase
+    const { error: updateSignalsError } = await supabase
       .from("signals")
-      .update({ outcome: result, resolved_outcome: winningOutcome, outcome_at: new Date() })
+      .update({
+        outcome: result,
+        resolved_outcome: winningOutcome,
+        outcome_at: new Date()
+      })
       .in("id", ids);
 
+    if (updateSignalsError) {
+      console.error(`❌ Failed updating signals for market ${market_id} (${picked_outcome}):`, updateSignalsError.message);
+      continue;
+    }
+
     // Update wallet_live_picks
-    await supabase
+    const { error: updateLivePicksError } = await supabase
       .from("wallet_live_picks")
-      .update({ outcome: result, resolved_outcome: winningOutcome, vote_count: signalsGroup.length })
+      .update({
+        outcome: result,
+        resolved_outcome: winningOutcome,
+        vote_count: signalsGroup.length
+      })
       .eq("market_id", market_id)
       .eq("picked_outcome", picked_outcome);
+
+    if (updateLivePicksError) {
+      console.error(`❌ Failed updating wallet_live_picks for market ${market_id} (${picked_outcome}):`, updateLivePicksError.message);
+      continue;
+    }
 
     // Build TRADE RESULT ALERT
     const text = `TRADE RESULT ALERT
@@ -646,7 +690,7 @@ Result: ${result} ${resultEmoji}`;
     try {
       await sendTelegram(text, false);
       await updateNotes("midas-sports", text);
-      console.log(`✅ TRADE RESULT ALERT sent for market ${market_id} (${picked_outcome})`);
+      console.log(`✅ TRADE RESULT ALERT sent & outcomes updated for market ${market_id} (${picked_outcome})`);
     } catch (err) {
       console.error(`❌ Failed sending TRADE RESULT ALERT for market ${market_id}:`, err.message);
     }

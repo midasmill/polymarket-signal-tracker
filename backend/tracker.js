@@ -466,14 +466,20 @@ Confidence: ${pick.confidence || "⭐"}`;
       continue;
     }
 
+    // --- ✅ Parse outcomes safely ---
     let outcomes = market.outcomes;
     let outcomePrices = market.outcomePrices;
-    if (typeof outcomes === "string") { try { outcomes = JSON.parse(outcomes); } catch { outcomes = []; } }
-    if (typeof outcomePrices === "string") { try { outcomePrices = JSON.parse(outcomePrices); } catch { outcomePrices = []; } }
+
+    if (typeof outcomes === "string") {
+      try { outcomes = JSON.parse(outcomes); } catch { outcomes = []; }
+    }
+    if (typeof outcomePrices === "string") {
+      try { outcomePrices = JSON.parse(outcomePrices); } catch { outcomePrices = []; }
+    }
     if (Array.isArray(outcomePrices)) outcomePrices = outcomePrices.map(String);
 
-    const winnerIndex = outcomePrices?.indexOf("1");
-    const winningOutcome = market.outcome || (winnerIndex >= 0 ? outcomes[winnerIndex] : null);
+    const winnerIndex = outcomePrices.indexOf("1");
+    const winningOutcome = winnerIndex >= 0 && outcomes[winnerIndex] ? outcomes[winnerIndex] : null;
 
     if (!winningOutcome) {
       console.log(`⚠️ Could not determine winning outcome for market ${market_id} (${event_slug})`);

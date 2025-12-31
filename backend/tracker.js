@@ -557,9 +557,11 @@ if (sig.outcome === "LOSS") losses++;
 }
 
 /* ===========================
-   Rebuild Wallet Live Picks (Multi-Wallet Fixed)
+   Rebuild Wallet Live Picks (Multi-Wallet Debug)
 =========================== */
 async function rebuildWalletLivePicks() {
+  console.log("🔄 Rebuilding wallet live picks...");
+
   // 1️⃣ Fetch pending signals with eligible wallets
   const { data: signals, error } = await supabase
     .from("signals")
@@ -580,7 +582,17 @@ async function rebuildWalletLivePicks() {
     .gte("wallets.win_rate", WIN_RATE_THRESHOLD)
     .gte("pnl", 1000);
 
-  if (error || !signals?.length) return;
+  if (error) {
+    console.error("❌ Failed fetching signals:", error.message);
+    return;
+  }
+
+  if (!signals?.length) {
+    console.log("⚪ No pending signals found.");
+    return;
+  }
+
+  console.log(`📊 Fetched ${signals.length} pending signals.`);
 
   // 2️⃣ Group signals by event + market
   const eventMap = new Map();
@@ -602,14 +614,22 @@ async function rebuildWalletLivePicks() {
       outcomeCounts[sig.picked_outcome] = (outcomeCounts[sig.picked_outcome] || 0) + 1;
     }
 
+    console.log(`[DEBUG] Event ${event_slug} outcome counts:`, outcomeCounts);
+
     // Sort by number of wallets picking
     const sortedOutcomes = Object.entries(outcomeCounts).sort((a, b) => b[1] - a[1]);
-    if (!sortedOutcomes.length) continue;
+    if (!sortedOutcomes.length) {
+      console.log(`⚠️ Event ${event_slug} has no outcomes after sorting.`);
+      continue;
+    }
 
     const [netPick, voteCount] = sortedOutcomes[0];
 
-    // Only consider outcomes picked by at least 2 wallets
-    if (!netPick || voteCount < MIN_WALLETS_FOR_SIGNAL) continue;
+    // Only consider outcomes picked by at least MIN_WALLETS_FOR_SIGNAL wallets
+    if (!netPick || voteCount < MIN_WALLETS_FOR_SIGNAL) {
+      console.log(`⚠️ Skipping ${event_slug} (${netPick}) — only ${voteCount} wallet(s) picked it.`);
+      continue;
+    }
 
     const pickKey = `${market_id}||${netPick}`;
     if (!livePicksMap.has(pickKey)) {
@@ -628,6 +648,8 @@ async function rebuildWalletLivePicks() {
       entry.wallets.push(ws.wallet_id);
       entry.vote_count++;
     }
+
+    console.log(`✅ Event ${event_slug} net pick: ${netPick} (${entry.vote_count} wallet(s))`);
   }
 
   // 4️⃣ Assign confidence and build final picks
@@ -641,27 +663,38 @@ async function rebuildWalletLivePicks() {
         break;
       }
     }
-    if (!confidence) continue;
+    if (!confidence) {
+      console.log(`⚠️ Skipping ${p.event_slug} (${p.picked_outcome}) — insufficient confidence.`);
+      continue;
+    }
 
     finalLivePicks.push({
       ...p,
       confidence,
       fetched_at: new Date()
     });
+
+    console.log(`🏆 Final pick ${p.event_slug}: ${p.picked_outcome} (${p.vote_count} wallets, confidence: ${confidence})`);
   }
 
-  if (!finalLivePicks.length) return;
+  if (!finalLivePicks.length) {
+    console.log("⚪ No final live picks to upsert.");
+    return;
+  }
 
   // 5️⃣ Upsert into wallet_live_picks
-  await supabase
-    .from("wallet_live_picks")
-    .upsert(finalLivePicks, {
-      onConflict: ["market_id", "picked_outcome"]
-    });
+  try {
+    await supabase
+      .from("wallet_live_picks")
+      .upsert(finalLivePicks, {
+        onConflict: ["market_id", "picked_outcome"]
+      });
 
-  console.log(`✅ Wallet live picks rebuilt (${finalLivePicks.length})`);
+    console.log(`✅ Wallet live picks rebuilt (${finalLivePicks.length} final picks).`);
+  } catch (err) {
+    console.error("❌ Failed upserting wallet_live_picks:", err.message);
+  }
 }
-
 
 /* ===========================
    Signal Processing + Telegram Sending (Fixed)

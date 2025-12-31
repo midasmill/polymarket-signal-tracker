@@ -1,4 +1,3 @@
-import { createClient } from "@supabase/supabase-js";
 import fetch from "node-fetch";
 import cron from "node-cron";
 import http from "http";
@@ -374,6 +373,47 @@ async function rebuildWalletLivePicks() {
   }
 
   console.log(`✅ Wallet live picks rebuilt (${finalLivePicks.length})`);
+}
+
+/* ===========================
+   Sync Wallet Live Picks with Market Results
+=========================== */
+async function syncWalletPickOutcomes() {
+  // 1️⃣ Fetch all live picks that are still pending
+  const { data: picks, error } = await supabase
+    .from("wallet_live_picks")
+    .select("market_id, picked_outcome, outcome, resolved_outcome")
+    .eq("outcome", "Pending");
+
+  if (error) {
+    console.error("❌ Failed fetching pending wallet picks:", error.message);
+    return;
+  }
+  if (!picks?.length) return;
+
+  // 2️⃣ Update outcome based on resolved_outcome
+  for (const pick of picks) {
+    if (!pick.resolved_outcome) continue; // skip if market not resolved yet
+
+    const newOutcome = pick.picked_outcome === pick.resolved_outcome ? "Win" : "Lose";
+
+    const { error: updateError } = await supabase
+      .from("wallet_live_picks")
+      .update({ outcome: newOutcome })
+      .eq("market_id", pick.market_id)
+      .eq("picked_outcome", pick.picked_outcome);
+
+    if (updateError) {
+      console.error(
+        `❌ Failed updating outcome for market ${pick.market_id} / ${pick.picked_outcome}:`,
+        updateError.message
+      );
+    } else {
+      console.log(
+        `✅ Outcome updated for market ${pick.market_id} / ${pick.picked_outcome}: ${newOutcome}`
+      );
+    }
+  }
 }
 
 /* ===========================
@@ -827,6 +867,8 @@ async function trackerLoop() {
 
     const rebuiltCount = livePicks?.length || 0;
 
+    await syncWalletPickOutcomes();
+     
     // 4️⃣ Send alerts (NO RETURN EXPECTED)
     await processAndSendSignals();
 

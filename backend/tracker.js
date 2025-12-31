@@ -419,34 +419,36 @@ async function processWalletLivePicks(maxRetries = 3, retryDelayMs = 5000) {
     livePicksMap.get(key).wallets.add(pick.wallet_id);
   }
 
-  // --- 4️⃣ Filter picks and calculate confidence ---
-  const finalLivePicks = [];
-  for (const pick of livePicksMap.values()) {
-    const walletIds = [...pick.wallets];
-    const voteCount = walletIds.length;
-    if (voteCount < MIN_WALLETS_FOR_SIGNAL) continue;
+// --- 4️⃣ Filter picks and calculate confidence ---
+const finalLivePicks = [];
+for (const pick of livePicksMap.values()) {
+  const walletIds = [...pick.wallets];
+  const voteCount = walletIds.length;
 
-    let confidenceNum = 1;
-    const sortedThresholds = Object.entries(CONFIDENCE_THRESHOLDS).sort(([, a], [, b]) => b - a);
-    for (const [, threshold] of sortedThresholds) {
-      if (voteCount >= threshold) {
-        confidenceNum = threshold;
-        break;
-      }
+  if (voteCount < MIN_WALLETS_FOR_SIGNAL) continue;
+
+  // Get confidence label (⭐,⭐⭐, etc.) based on vote count
+  let confidenceLabel = "⭐"; // default
+  const sortedThresholds = Object.entries(CONFIDENCE_THRESHOLDS).sort(([, a], [, b]) => b - a);
+  for (const [emoji, threshold] of sortedThresholds) {
+    if (voteCount >= threshold) {
+      confidenceLabel = emoji;
+      break;
     }
-
-    finalLivePicks.push({
-      market_id: pick.market_id,
-      market_name: pick.market_name,
-      event_slug: pick.event_slug,
-      market_url: pick.market_url,
-      picked_outcome: pick.picked_outcome,
-      wallets: walletIds,
-      vote_count: voteCount,
-      confidence: confidenceNum,
-      fetched_at: new Date()
-    });
   }
+
+  finalLivePicks.push({
+    market_id: pick.market_id,
+    market_name: pick.market_name,
+    event_slug: pick.event_slug,
+    market_url: pick.market_url,
+    picked_outcome: pick.picked_outcome,
+    wallets: walletIds,
+    vote_count: voteCount,
+    confidence: confidenceLabel,
+    fetched_at: new Date()
+  });
+}
 
   // --- 5️⃣ Upsert picks & send new signals ---
   if (finalLivePicks.length) {

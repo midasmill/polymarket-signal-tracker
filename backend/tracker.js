@@ -313,7 +313,7 @@ Result: ${result} ${outcomeEmoji}
 Resolved At: ${now.toLocaleString("en-US", { timeZone: "America/New_York" })} EST`;
 
         await sendTelegram(text, false);
-        await updateNotes("midas-sports", text);
+        await updateNotes("midas-sports", text.trim());
 
         // Mark resolved notification as sent
         await supabase
@@ -772,15 +772,16 @@ async function processAndSendAllNotifications() {
     if (!pick.signal_sent_at && pick.vote_count >= MIN_WALLETS_FOR_SIGNAL) {
       const confidenceEmoji = getConfidenceEmoji(pick.vote_count);
 
-      const text = `⚡️ NEW MARKET PREDICTION
+const text = `⚡️ NEW MARKET PREDICTION
 Market Event: ${pick.market_name || pick.event_slug}
 Prediction: ${pick.picked_outcome || "UNKNOWN"}
 Confidence: ${confidenceEmoji}
 Signal Sent: ${now.toLocaleString("en-US", { timeZone: "America/New_York" })} EST`;
 
+
       try {
         await sendTelegram(text, false);
-        await updateNotes("midas-sports", text);
+        await updateNotes("midas-sports", text.trim());
 
         console.log(`✅ Sent signal for market ${pick.market_id} (${pick.picked_outcome})`);
 

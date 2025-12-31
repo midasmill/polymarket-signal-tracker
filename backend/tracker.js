@@ -402,8 +402,9 @@ async function countWalletDailyLosses(walletId) {
    Fetch Leaderboard Wallets (with PnL & volume filters)
 =========================== */
 async function fetchAndInsertLeaderboardWallets() {
-  const categories = ["OVERALL","SPORTS"];
-  const periods = ["DAY","WEEK"];
+  const categories = ["OVERALL", "SPORTS"];
+  const periods = ["DAY", "WEEK"];
+
   for (const cat of categories) {
     for (const period of periods) {
       try {
@@ -415,6 +416,7 @@ async function fetchAndInsertLeaderboardWallets() {
           const proxyWallet = entry.proxyWallet;
           if (!proxyWallet || entry.pnl < 1000000 || entry.vol >= 2 * entry.pnl) continue;
 
+          // Check if wallet already exists
           const { data: existing } = await supabase
             .from("wallets")
             .select("id")
@@ -422,6 +424,7 @@ async function fetchAndInsertLeaderboardWallets() {
             .maybeSingle();
           if (existing) continue;
 
+          // Insert new wallet
           const { data: insertedWallet } = await supabase
             .from("wallets")
             .insert({
@@ -436,8 +439,11 @@ async function fetchAndInsertLeaderboardWallets() {
             .select("*")
             .single();
 
-          // Track wallet immediately
-          await trackWallet(insertedWallet);
+          console.log(`🆕 New wallet added: ${proxyWallet} (${entry.userName || "unknown"})`);
+
+          // Track wallet immediately and log signals count
+          const signalsCount = await trackWallet(insertedWallet);
+          console.log(`📊 Signals fetched from new wallet ${proxyWallet}: ${signalsCount}`);
         }
 
       } catch (err) {
@@ -489,7 +495,7 @@ async function trackWallet(wallet) {
   const proxyWallet = wallet.polymarket_proxy_wallet;
   if (!proxyWallet) {
     console.warn(`[TRACK] Wallet ${wallet.id} has no proxy, skipping`);
-    return;
+    return 0; // return 0 signals
   }
 
   // Auto-unpause if win_rate >= 80%
@@ -504,7 +510,7 @@ async function trackWallet(wallet) {
   // 1️⃣ Fetch positions from Polymarket
   const positions = await fetchWalletPositions(proxyWallet);
   console.log(`[TRACK] Wallet ${wallet.id} fetched ${positions.length} activities`);
-  if (!positions?.length) return;
+  if (!positions?.length) return 0;
 
   // 2️⃣ Fetch existing signals ONCE
   const { data: existingSignals = [] } = await supabase
@@ -580,7 +586,7 @@ async function trackWallet(wallet) {
 
   if (!newSignals.length) {
     console.log(`[TRACK] Wallet ${wallet.id} has no new signals to insert`);
-    return;
+    return 0;
   }
 
   // 7️⃣ Upsert signals safely with unique constraint
@@ -595,10 +601,12 @@ async function trackWallet(wallet) {
       `❌ Failed inserting/upserting signals for wallet ${wallet.id}:`,
       error.message
     );
+    return 0;
   } else {
     console.log(
       `✅ Wallet ${wallet.id} inserted/updated ${data.length} signal(s)`
     );
+    return data.length; // return number of signals inserted
   }
 }
 
@@ -809,7 +817,7 @@ Signal Sent: ${now.toLocaleString("en-US", { timeZone: "America/New_York" })} ES
 }
 
 /* ===========================
-   Tracker Loop (Refactored)
+   Tracker Loop (Enhanced with Signal Count)
 =========================== */
 let isTrackerRunning = false;
 async function trackerLoop() {
@@ -817,6 +825,8 @@ async function trackerLoop() {
   isTrackerRunning = true;
 
   try {
+    console.log("🔄 Tracker loop started...");
+
     // 1️⃣ Fetch all active wallets
     const { data: wallets, error: walletsError } = await supabase
       .from("wallets")
@@ -826,10 +836,19 @@ async function trackerLoop() {
       console.error("❌ Failed fetching wallets:", walletsError.message);
       return;
     }
-    if (!wallets?.length) return;
+    if (!wallets?.length) {
+      console.log("⚪ No wallets to track.");
+      return;
+    }
 
-    // 2️⃣ Track wallets concurrently
-    await Promise.allSettled(wallets.map(trackWallet));
+    // 2️⃣ Track wallets concurrently and log signals fetched
+    await Promise.all(
+      wallets.map(async (wallet) => {
+        const count = await trackWallet(wallet);
+        console.log(`[TRACK] Wallet ${wallet.id} fetched ${count} new signal(s)`);
+        return count;
+      })
+    );
 
     // 3️⃣ Rebuild wallet live picks AND send signals in one step
     await rebuildAndSendLivePicks();
@@ -840,6 +859,8 @@ async function trackerLoop() {
     // 5️⃣ Update wallet metrics (win_rate, paused, daily losses)
     await updateWalletMetricsJS();
 
+    console.log("✅ Tracker loop completed.");
+
   } catch (err) {
     console.error("❌ Tracker loop failed:", err.message);
   } finally {
@@ -848,13 +869,12 @@ async function trackerLoop() {
 }
 
 /* ===========================
-   Main Entry (Refactored)
+   Main Entry (Fixed)
 =========================== */
 async function main() {
   console.log("🚀 POLYMARKET TRACKER LIVE 🚀");
 
-  // 1️⃣ Initial leaderboard fetch and tracker run
-  await fetchAndInsertLeaderboardWallets().catch(err => console.error(err));
+  // 1️⃣ Initial tracker run (includes leaderboard fetch)
   await trackerLoop();
 
   // 2️⃣ Continuous polling
@@ -863,7 +883,6 @@ async function main() {
   // 3️⃣ Daily cron for leaderboard refresh
   cron.schedule("0 7 * * *", async () => {
     console.log("📅 Daily cron running...");
-    await fetchAndInsertLeaderboardWallets();
     await trackerLoop();
   }, { timezone: TIMEZONE });
 

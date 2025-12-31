@@ -706,19 +706,30 @@ async function fetchWalletPositions(proxyWallet) {
 }
 
 /* ===========================
-   Notes Update Helper (new lines)
+   Notes Update Helper (with proper line breaks)
 =========================== */
 async function updateNotes(slug, text) {
-  const noteText = text.split("\n").join("\n"); // preserve line breaks
-  const { data: notes } = await supabase.from("notes").select("content").eq("slug", slug).maybeSingle();
+  // Normalize internal line breaks
+  const noteText = text.split("\n").join("\n");
+
+  // Fetch existing notes content
+  const { data: notes } = await supabase
+    .from("notes")
+    .select("content")
+    .eq("slug", slug)
+    .maybeSingle();
+
   let newContent = notes?.content || "";
 
+  // Add 2 newlines between alerts to separate them visually
   newContent += newContent ? `\n\n${noteText}` : noteText;
 
-  await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", slug);
+  // Update back to Supabase
+  await supabase
+    .from("notes")
+    .update({ content: newContent, public: true })
+    .eq("slug", slug);
 }
-
-
 
 /* ===========================
    Wallet Metrics Update

@@ -533,60 +533,62 @@ Confidence: ${confidenceEmoji}`;
 }
 
 /* ===========================
-   Daily Summary: Win/Loss Report
+   Send Daily Summary
 =========================== */
 async function sendDailySummary() {
-  const now = new Date();
-  const yesterdayStart = new Date(now);
-  yesterdayStart.setDate(now.getDate() - 1);
+  const yesterdayStart = new Date();
+  yesterdayStart.setDate(yesterdayStart.getDate() - 1);
   yesterdayStart.setHours(0, 0, 0, 0);
 
-  const yesterdayEnd = new Date(now);
-  yesterdayEnd.setDate(now.getDate() - 1);
+  const yesterdayEnd = new Date();
+  yesterdayEnd.setDate(yesterdayEnd.getDate() - 1);
   yesterdayEnd.setHours(23, 59, 59, 999);
 
-  // 1️⃣ Fetch all sent signals
-  const { data: sentPicks, error } = await supabase
+  // Fetch all resolved signals sent yesterday
+  const { data: signals } = await supabase
     .from("wallet_live_picks")
-    .select("picked_outcome, outcome, signal_sent_at")
-    .not("outcome", "is", null);
+    .select("market_name, picked_outcome, outcome, vote_count, confidence, signal_sent_at")
+    .gte("signal_sent_at", yesterdayStart.toISOString())
+    .lte("signal_sent_at", yesterdayEnd.toISOString());
 
-  if (error) return console.error("❌ Failed fetching sent picks:", error.message);
-  if (!sentPicks?.length) return console.log("ℹ️ No sent picks found for daily summary");
-
-  // 2️⃣ Filter for yesterday and compute counts
-  let yesterdayWins = 0;
-  let yesterdayLosses = 0;
-  let totalWins = 0;
-  let totalLosses = 0;
-
-  for (const pick of sentPicks) {
-    const outcome = pick.outcome?.toUpperCase();
-    if (outcome === "WIN") totalWins++;
-    if (outcome === "LOSS") totalLosses++;
-
-    if (pick.signal_sent_at) {
-      const sentAt = new Date(pick.signal_sent_at);
-      if (sentAt >= yesterdayStart && sentAt <= yesterdayEnd) {
-        if (outcome === "WIN") yesterdayWins++;
-        if (outcome === "LOSS") yesterdayLosses++;
-      }
-    }
+  if (!signals?.length) {
+    console.log("📊 Daily Summary: No signals sent yesterday.");
+    return;
   }
 
-  // 3️⃣ Build summary text
-  const summaryText = `📊 Daily Summary (${yesterdayStart.toLocaleDateString()})
-Yesterday: ✅ Wins: ${yesterdayWins}, ❌ Losses: ${yesterdayLosses}
-Overall: ✅ Wins: ${totalWins}, ❌ Losses: ${totalLosses}`;
+  let wins = 0, losses = 0;
 
-  // 4️⃣ Send Telegram & update Notes
+  for (const sig of signals) {
+    if (sig.outcome === "WIN") wins++;
+    else if (sig.outcome === "LOSS") losses++;
+  }
+
+  const total = wins + losses;
+  const winRate = total > 0 ? ((wins / total) * 100).toFixed(1) : 0;
+
+  const summaryText = `📊 Daily Summary
+🗓 Date: ${yesterdayStart.toLocaleDateString()}
+Signals Sent: ${signals.length}
+Wins: ${wins}
+Losses: ${losses}
+Win Rate: ${winRate}%`;
+
+  // 1️⃣ Send to Telegram
   try {
     await sendTelegram(summaryText, false);
-    await updateNotes("midas-sports", summaryText);
-    console.log("✅ Daily summary sent");
   } catch (err) {
-    console.error("❌ Failed sending daily summary:", err.message);
+    console.error("❌ Failed sending daily summary to Telegram:", err.message);
   }
+
+  // 2️⃣ Update Notes
+  try {
+    await updateNotes("midas-sports", summaryText);
+  } catch (err) {
+    console.error("❌ Failed updating Notes with daily summary:", err.message);
+  }
+
+  // 3️⃣ Log to console
+  console.log(summaryText);
 }
 
 /* ===========================

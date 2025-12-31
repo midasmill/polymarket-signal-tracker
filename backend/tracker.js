@@ -894,7 +894,7 @@ async function main() {
   // 3️⃣ Continuous polling
   setInterval(trackerLoop, POLL_INTERVAL);
 
-  // 4️⃣ Daily cron for leaderboard refresh
+  // 4️⃣ Daily cron for leaderboard refresh 
   cron.schedule("0 7 * * *", async () => {
     console.log("📅 Daily cron running...");
     const dailyNewWallets = await fetchAndInsertLeaderboardWallets();

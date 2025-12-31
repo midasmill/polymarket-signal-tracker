@@ -519,7 +519,11 @@ async function rebuildWalletLivePicks() {
     .eq("outcome", "Pending")
     .eq("wallets.paused", false); // only active wallets
 
-  if (error || !signals?.length) return;
+  if (error) {
+    console.error("❌ Failed fetching signals for live picks:", error.message);
+    return;
+  }
+  if (!signals?.length) return;
 
   // 2️⃣ Aggregate per market + picked outcome
   const livePicksMap = new Map();
@@ -546,10 +550,9 @@ async function rebuildWalletLivePicks() {
     }
   }
 
-  // 3️⃣ Prepare final picks
+  // 3️⃣ Prepare final picks (enforce MIN_WALLETS_FOR_SIGNAL)
   const finalLivePicks = [];
   for (const pick of livePicksMap.values()) {
-    // ✅ Only enforce MIN_WALLETS_FOR_SIGNAL
     if (pick.vote_count < MIN_WALLETS_FOR_SIGNAL) continue;
 
     // Confidence purely for display
@@ -567,23 +570,28 @@ async function rebuildWalletLivePicks() {
 
   if (!finalLivePicks.length) return;
 
-  // 4️⃣ Upsert all picks, merge wallets if pick already exists
+  // 4️⃣ Upsert picks, merging wallets if pick already exists
   for (const pick of finalLivePicks) {
-    const { data: existing } = await supabase
+    // ✅ fetch existing pick safely
+    const { data: existing, error: existingError } = await supabase
       .from("wallet_live_picks")
       .select("wallets, vote_count")
       .eq("market_id", pick.market_id)
       .eq("picked_outcome", pick.picked_outcome)
-      .single()
-      .catch(() => null);
+      .single();
+
+    if (existingError && !existingError.code === "PGRST116") { // 116 = no rows
+      console.error(`❌ Failed fetching existing live pick for ${pick.market_id} / ${pick.picked_outcome}:`, existingError.message);
+    }
 
     const mergedWallets = existing
       ? Array.from(new Set([...(existing.wallets || []), ...pick.wallets]))
       : pick.wallets;
 
-    // Debug log: see why picks are counted
+    // Debug log
     console.log(`[LIVE PICK] Market: ${pick.market_id} | Outcome: ${pick.picked_outcome} | Wallets: ${mergedWallets.length} | Wallet IDs: ${mergedWallets.join(", ")}`);
 
+    // ✅ Upsert final pick
     await supabase
       .from("wallet_live_picks")
       .upsert({
@@ -595,7 +603,6 @@ async function rebuildWalletLivePicks() {
 
   console.log(`✅ Wallet live picks rebuilt (${finalLivePicks.length})`);
 }
-
 
 /* ===========================
    Fetch Wallet Activity (DATA-API)

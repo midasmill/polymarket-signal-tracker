@@ -596,8 +596,18 @@ async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
       continue;
     }
 
+    // --- Parse outcomes/outcomePrices in case they are strings ---
+    if (market.outcomes && typeof market.outcomes === "string") {
+      try { market.outcomes = JSON.parse(market.outcomes); } catch { market.outcomes = []; }
+    }
+    if (market.outcomePrices && typeof market.outcomePrices === "string") {
+      try { market.outcomePrices = JSON.parse(market.outcomePrices); } catch { market.outcomePrices = []; }
+    }
+
     // Determine winning outcome
-    const winningOutcome = market.outcome || market.outcomes?.[market.outcomePrices.indexOf("1")] || null;
+    const winnerIndex = market.outcomePrices?.indexOf("1");
+    const winningOutcome = market.outcome || (winnerIndex >= 0 ? market.outcomes[winnerIndex] : null);
+
     if (!winningOutcome) {
       console.log(`⚠️ Could not determine winning outcome for market ${market_id} (${event_slug})`);
       stillPending.push({ market_id, event_slug });
@@ -700,6 +710,7 @@ ${startDate ? `Event Start: ${startDate.toLocaleString("en-US", { timeZone: TIME
     });
   }
 }
+
 
 /* ===========================
    Count Wallet Daily Losses

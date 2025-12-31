@@ -272,105 +272,103 @@ async function trackWallet(wallet) {
 }
 
 /* ===========================
-   Rebuild Wallet Live Picks (Multi-Wallet Friendly + Debug)
+   Rebuild Wallet Live Picks (FIXED + MARKET LINK)
 =========================== */
 async function rebuildWalletLivePicks() {
-  // 1️⃣ Fetch all pending signals, only non-paused wallets
-  let signals = [];
-  try {
-    const res = await supabase
-      .from("signals")
-      .select(`
-        wallet_id,
-        market_id,
-        market_name,
-        event_slug,
-        picked_outcome,
-        wallets!inner(paused)
-      `)
-      .eq("outcome", "Pending")
-      .eq("wallets.paused", false); // only active wallets
-    signals = res.data || [];
-  } catch (err) {
-    console.error("❌ Failed fetching signals for live picks:", err.message);
+  // 1️⃣ Fetch all pending signals from active wallets
+  const { data: signals, error } = await supabase
+    .from("signals")
+    .select(`
+      wallet_id,
+      market_id,
+      market_name,
+      event_slug,
+      picked_outcome,
+      wallets!inner(paused)
+    `)
+    .eq("outcome", "Pending")
+    .eq("wallets.paused", false);
+
+  if (error) {
+    console.error("❌ Failed fetching signals for live picks:", error.message);
     return;
   }
-  if (!signals.length) return;
+  if (!signals?.length) return;
 
-  // 2️⃣ Aggregate per market + picked outcome
+  // 2️⃣ Aggregate per market + outcome
   const livePicksMap = new Map();
 
   for (const sig of signals) {
-    if (!sig.picked_outcome || !sig.wallet_id) continue;
+    if (!sig.market_id || !sig.picked_outcome || !sig.wallet_id) continue;
+
     const key = `${sig.market_id}||${sig.picked_outcome}`;
 
     if (!livePicksMap.has(key)) {
       livePicksMap.set(key, {
         market_id: sig.market_id,
-        market_name: sig.market_name,
+        market_name: sig.market_name || sig.event_slug || "Unknown Market",
         event_slug: sig.event_slug,
+        market_url: sig.event_slug
+          ? `https://polymarket.com/market/${sig.event_slug}`
+          : null,
         picked_outcome: sig.picked_outcome,
-        wallets: [],
-        vote_count: 0
+        wallets: new Set()
       });
     }
 
-    const entry = livePicksMap.get(key);
-    if (!entry.wallets.includes(sig.wallet_id)) {
-      entry.wallets.push(sig.wallet_id);
-      entry.vote_count++;
-    }
+    livePicksMap.get(key).wallets.add(sig.wallet_id);
   }
 
-  // 3️⃣ Prepare final picks (enforce MIN_WALLETS_FOR_SIGNAL)
+  // 3️⃣ Filter + finalize
   const finalLivePicks = [];
-  for (const pick of livePicksMap.values()) {
-    if (pick.vote_count < MIN_WALLETS_FOR_SIGNAL) continue;
 
-    // Confidence purely for display
+  for (const pick of livePicksMap.values()) {
+    const walletIds = [...pick.wallets];
+    const voteCount = walletIds.length;
+
+    if (voteCount < MIN_WALLETS_FOR_SIGNAL) continue;
+
     let confidence = null;
     for (const [stars, threshold] of Object.entries(CONFIDENCE_THRESHOLDS)
       .sort((a, b) => b[1] - a[1])) {
-      if (pick.vote_count >= threshold) {
+      if (voteCount >= threshold) {
         confidence = stars;
         break;
       }
     }
 
-    finalLivePicks.push({ ...pick, confidence, fetched_at: new Date() });
+    finalLivePicks.push({
+      market_id: pick.market_id,
+      market_name: pick.market_name,
+      event_slug: pick.event_slug,
+      market_url: pick.market_url,
+      picked_outcome: pick.picked_outcome,
+      wallets: walletIds,
+      vote_count: voteCount,
+      confidence,
+      fetched_at: new Date()
+    });
   }
 
   if (!finalLivePicks.length) return;
 
-  // 4️⃣ Upsert picks, merging wallets if pick already exists
+  // 4️⃣ Upsert (NO .single, NO silent failure)
   for (const pick of finalLivePicks) {
-    let existing = null;
-    try {
-      const res = await supabase
-        .from("wallet_live_picks")
-        .select("wallets, vote_count")
-        .eq("market_id", pick.market_id)
-        .eq("picked_outcome", pick.picked_outcome)
-        .single();
-      existing = res.data || null;
-    } catch {} // ignore if not found
+    console.log(
+      `[LIVE PICK] ${pick.market_name} | ${pick.picked_outcome} | Wallets: ${pick.vote_count} | IDs: ${pick.wallets.join(", ")}`
+    );
 
-    const mergedWallets = existing
-      ? Array.from(new Set([...(existing.wallets || []), ...pick.wallets]))
-      : pick.wallets;
+    const { error: upsertError } = await supabase
+      .from("wallet_live_picks")
+      .upsert(pick, {
+        onConflict: ["market_id", "picked_outcome"]
+      });
 
-    console.log(`[LIVE PICK] Market: ${pick.market_id} | Outcome: ${pick.picked_outcome} | Wallets: ${mergedWallets.length} | Wallet IDs: ${mergedWallets.join(", ")}`);
-
-    try {
-      await supabase
-        .from("wallet_live_picks")
-        .upsert({
-          ...pick,
-          wallets: mergedWallets,
-          vote_count: mergedWallets.length
-        }, { onConflict: ["market_id", "picked_outcome"] });
-    } catch (err) {
-      console.error(`❌ Failed upserting live pick ${pick.market_id}/${pick.picked_outcome}:`, err.message);
+    if (upsertError) {
+      console.error(
+        `❌ Failed upserting live pick ${pick.market_id}/${pick.picked_outcome}:`,
+        upsertError.message
+      );
     }
   }
 
@@ -378,71 +376,99 @@ async function rebuildWalletLivePicks() {
 }
 
 /* ===========================
-   Process & Send Signals (NEW TRADE + RESULT ALERTS)
+   Process & Send Signals (FIXED)
 =========================== */
 async function processAndSendSignals() {
-  let livePicks = [];
-  try {
-    const res = await supabase
-      .from("wallet_live_picks")
-      .select("*");
-    livePicks = res.data || [];
-  } catch (err) {
-    console.error("❌ Failed fetching wallet_live_picks:", err.message);
-    return;
+  const { data: livePicks, error } = await supabase
+    .from("wallet_live_picks")
+    .select("*");
+
+  if (error) {
+    console.error("❌ Failed fetching wallet_live_picks:", error.message);
+    return { sent: 0 };
   }
-  if (!livePicks.length) return;
+  if (!livePicks?.length) return { sent: 0 };
+
+  let sentCount = 0;
 
   for (const pick of livePicks) {
     const confidenceEmoji = pick.confidence || getConfidenceEmoji(pick.vote_count);
+    const marketLabel = pick.market_name || pick.event_slug || "Market";
+    const marketLink =
+      pick.event_slug
+        ? `https://polymarket.com/market/${pick.event_slug}`
+        : pick.market_url;
 
-    // 1️⃣ NEW TRADE ALERT
-    if (!pick.signal_sent_at && pick.vote_count >= MIN_WALLETS_FOR_SIGNAL) {
-      const newTradeText = `NEW TRADE ALERT
-🎖️ Market Event: [${pick.market_name || pick.event_slug}](https://polymarket.com/market/${pick.event_slug})
+    /* ===========================
+       1️⃣ NEW TRADE ALERT
+    =========================== */
+    if (!pick.signal_sent_at) {
+      // Mark FIRST (idempotent)
+      const { error: markError } = await supabase
+        .from("wallet_live_picks")
+        .update({
+          signal_sent_at: new Date(),
+          last_confidence_sent: confidenceEmoji
+        })
+        .eq("market_id", pick.market_id)
+        .eq("picked_outcome", pick.picked_outcome);
+
+      if (markError) {
+        console.error("❌ Failed marking signal_sent_at:", markError.message);
+        continue;
+      }
+
+      const text = `NEW TRADE ALERT
+🎖️ Market Event: ${marketLink ? `[${marketLabel}](${marketLink})` : marketLabel}
 Prediction: ${pick.picked_outcome}
 Confidence: ${confidenceEmoji}`;
 
       try {
-        await sendTelegram(newTradeText, false);
-        await updateNotes("midas-sports", newTradeText);
-
-        console.log(`✅ NEW TRADE ALERT sent for market ${pick.market_id} (${pick.picked_outcome})`);
-
-        await supabase
-          .from("wallet_live_picks")
-          .update({ signal_sent_at: new Date(), last_confidence_sent: confidenceEmoji })
-          .eq("market_id", pick.market_id)
-          .eq("picked_outcome", pick.picked_outcome);
+        await sendTelegram(text, false);
+        await updateNotes("midas-sports", text);
+        console.log(`✅ NEW TRADE ALERT sent → ${marketLabel}`);
+        sentCount++;
       } catch (err) {
-        console.error(`❌ Failed sending NEW TRADE ALERT for market ${pick.market_id}:`, err.message);
+        console.error("❌ Failed sending NEW TRADE ALERT:", err.message);
       }
+
+      continue; // 🚨 do NOT allow result on same loop
     }
 
-    // 2️⃣ TRADE RESULT ALERT
+    /* ===========================
+       2️⃣ TRADE RESULT ALERT
+    =========================== */
     if (pick.outcome && !pick.result_sent_at) {
       const resultEmoji = RESULT_EMOJIS[pick.outcome] || "";
+
+      const { error: markResultError } = await supabase
+        .from("wallet_live_picks")
+        .update({ result_sent_at: new Date() })
+        .eq("market_id", pick.market_id)
+        .eq("picked_outcome", pick.picked_outcome);
+
+      if (markResultError) {
+        console.error("❌ Failed marking result_sent_at:", markResultError.message);
+        continue;
+      }
+
       const resultText = `TRADE RESULT ALERT
-🎖️ Market Event: [${pick.market_name || pick.event_slug}](https://polymarket.com/market/${pick.event_slug})
+🎖️ Market Event: ${marketLink ? `[${marketLabel}](${marketLink})` : marketLabel}
 Prediction: ${pick.picked_outcome}
 Result: ${pick.outcome} ${resultEmoji}`;
 
       try {
         await sendTelegram(resultText, false);
         await updateNotes("midas-sports", resultText);
-
-        console.log(`✅ TRADE RESULT ALERT sent for market ${pick.market_id} (${pick.picked_outcome})`);
-
-        await supabase
-          .from("wallet_live_picks")
-          .update({ result_sent_at: new Date() })
-          .eq("market_id", pick.market_id)
-          .eq("picked_outcome", pick.picked_outcome);
+        console.log(`✅ TRADE RESULT ALERT sent → ${marketLabel}`);
+        sentCount++;
       } catch (err) {
-        console.error(`❌ Failed sending TRADE RESULT ALERT for market ${pick.market_id}:`, err.message);
+        console.error("❌ Failed sending TRADE RESULT ALERT:", err.message);
       }
     }
   }
+
+  return { sent: sentCount };
 }
 
 /* ===========================

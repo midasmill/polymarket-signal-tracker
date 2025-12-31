@@ -399,61 +399,6 @@ async function countWalletDailyLosses(walletId) {
 }
 
 /* ===========================
-   Fetch Leaderboard Wallets (with PnL & volume filters)
-=========================== */
-async function fetchAndInsertLeaderboardWallets() {
-  const categories = ["OVERALL", "SPORTS"];
-  const periods = ["DAY", "WEEK"];
-
-  for (const cat of categories) {
-    for (const period of periods) {
-      try {
-        const url = `https://data-api.polymarket.com/v1/leaderboard?category=${cat}&timePeriod=${period}&orderBy=PNL&limit=50`;
-        const data = await fetchWithRetry(url, { headers: { "User-Agent": "Mozilla/5.0" } });
-        if (!Array.isArray(data)) continue;
-
-        for (const entry of data) {
-          const proxyWallet = entry.proxyWallet;
-          if (!proxyWallet || entry.pnl < 1000000 || entry.vol >= 2 * entry.pnl) continue;
-
-          // Check if wallet already exists
-          const { data: existing } = await supabase
-            .from("wallets")
-            .select("id")
-            .eq("polymarket_proxy_wallet", proxyWallet)
-            .maybeSingle();
-          if (existing) continue;
-
-          // Insert new wallet
-          const { data: insertedWallet } = await supabase
-            .from("wallets")
-            .insert({
-              polymarket_proxy_wallet: proxyWallet,
-              polymarket_username: entry.userName || null,
-              last_checked: new Date(),
-              paused: false,
-              losing_streak: 0,
-              win_rate: 0,
-              force_fetch: true,
-            })
-            .select("*")
-            .single();
-
-          console.log(`🆕 New wallet added: ${proxyWallet} (${entry.userName || "unknown"})`);
-
-          // Track wallet immediately and log signals count
-          const signalsCount = await trackWallet(insertedWallet);
-          console.log(`📊 Signals fetched from new wallet ${proxyWallet}: ${signalsCount}`);
-        }
-
-      } catch (err) {
-        console.error(`Leaderboard fetch failed (${cat}/${period}):`, err.message);
-      }
-    }
-  }
-}
-
-/* ===========================
    Fetch Wallet Activity (DATA-API)
 =========================== */
 async function fetchWalletActivity(proxyWallet, retries = 3) {
@@ -817,7 +762,65 @@ Signal Sent: ${now.toLocaleString("en-US", { timeZone: "America/New_York" })} ES
 }
 
 /* ===========================
-   Tracker Loop (Enhanced with Signal Count)
+   Fetch Leaderboard Wallets (with PnL & volume filters)
+   Returns array of inserted wallets
+=========================== */
+async function fetchAndInsertLeaderboardWallets() {
+  const categories = ["OVERALL", "SPORTS"];
+  const periods = ["DAY", "WEEK"];
+  const insertedWallets = [];
+
+  for (const cat of categories) {
+    for (const period of periods) {
+      try {
+        const url = `https://data-api.polymarket.com/v1/leaderboard?category=${cat}&timePeriod=${period}&orderBy=PNL&limit=50`;
+        const data = await fetchWithRetry(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+        if (!Array.isArray(data)) continue;
+
+        for (const entry of data) {
+          const proxyWallet = entry.proxyWallet;
+          if (!proxyWallet || entry.pnl < 1000000 || entry.vol >= 2 * entry.pnl) continue;
+
+          // Check if wallet already exists
+          const { data: existing } = await supabase
+            .from("wallets")
+            .select("id")
+            .eq("polymarket_proxy_wallet", proxyWallet)
+            .maybeSingle();
+          if (existing) continue;
+
+          // Insert new wallet
+          const { data: insertedWallet } = await supabase
+            .from("wallets")
+            .insert({
+              polymarket_proxy_wallet: proxyWallet,
+              polymarket_username: entry.userName || null,
+              last_checked: new Date(),
+              paused: false,
+              losing_streak: 0,
+              win_rate: 0,
+              force_fetch: true,
+            })
+            .select("*")
+            .single();
+
+          console.log(`🆕 New wallet added: ${proxyWallet} (${entry.userName || "unknown"})`);
+
+          // Add to array for main tracking
+          insertedWallets.push(insertedWallet);
+        }
+
+      } catch (err) {
+        console.error(`Leaderboard fetch failed (${cat}/${period}):`, err.message);
+      }
+    }
+  }
+
+  return insertedWallets;
+}
+
+/* ===========================
+   Tracker Loop (Enhanced with Signal Count + Total)
 =========================== */
 let isTrackerRunning = false;
 async function trackerLoop() {
@@ -842,11 +845,12 @@ async function trackerLoop() {
     }
 
     // 2️⃣ Track wallets concurrently and log signals fetched
+    let totalSignals = 0;
     await Promise.all(
       wallets.map(async (wallet) => {
         const count = await trackWallet(wallet);
-        console.log(`[TRACK] Wallet ${wallet.id} fetched ${count} new signal(s)`);
-        return count;
+        console.log(`[TRACK] Wallet ${wallet.id} (${wallet.polymarket_proxy_wallet}) fetched ${count} new signal(s)`);
+        totalSignals += count;
       })
     );
 
@@ -859,7 +863,7 @@ async function trackerLoop() {
     // 5️⃣ Update wallet metrics (win_rate, paused, daily losses)
     await updateWalletMetricsJS();
 
-    console.log("✅ Tracker loop completed.");
+    console.log(`✅ Tracker loop completed. Total new signals fetched: ${totalSignals}`);
 
   } catch (err) {
     console.error("❌ Tracker loop failed:", err.message);
@@ -874,20 +878,17 @@ async function trackerLoop() {
 async function main() {
   console.log("🚀 POLYMARKET TRACKER LIVE 🚀");
 
-  // 1️⃣ Initial leaderboard fetch and insert new wallets
+  // 1️⃣ Initial leaderboard fetch
   console.log("📥 Fetching leaderboard wallets...");
   const newWallets = await fetchAndInsertLeaderboardWallets();
 
   if (newWallets?.length) {
-    for (const wallet of newWallets) {
-      const count = await trackWallet(wallet);
-      console.log(`📊 New leaderboard wallet ${wallet.polymarket_proxy_wallet} inserted with ${count} new signal(s)`);
-    }
+    console.log(`📊 Total new leaderboard wallets inserted: ${newWallets.length}`);
   } else {
     console.log("⚪ No new leaderboard wallets inserted.");
   }
 
-  // 2️⃣ Track all existing wallets immediately
+  // 2️⃣ Track all wallets immediately
   await trackerLoop();
 
   // 3️⃣ Continuous polling
@@ -898,10 +899,7 @@ async function main() {
     console.log("📅 Daily cron running...");
     const dailyNewWallets = await fetchAndInsertLeaderboardWallets();
     if (dailyNewWallets?.length) {
-      for (const wallet of dailyNewWallets) {
-        const count = await trackWallet(wallet);
-        console.log(`📊 Daily new wallet ${wallet.polymarket_proxy_wallet} inserted with ${count} new signal(s)`);
-      }
+      console.log(`📊 Daily new wallets inserted: ${dailyNewWallets.length}`);
     }
     await trackerLoop();
   }, { timezone: TIMEZONE });

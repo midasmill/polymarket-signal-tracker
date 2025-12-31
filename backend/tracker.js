@@ -299,10 +299,13 @@ async function trackWallet(wallet) {
 }
 
 /* ===========================
-   Optimized Rebuild & Resolve Wallet Live Picks
+   Optimized Rebuild & Resolve Wallet Live Picks (Recent Only)
 =========================== */
 async function processWalletLivePicks(maxRetries = 3, retryDelayMs = 5000) {
   const marketCache = new Map(); // Cache markets by market_id or event_slug
+  const RECENT_DAYS = 3; // Only consider signals from the last 3 days
+  const cutoffDate = new Date();
+  cutoffDate.setDate(cutoffDate.getDate() - RECENT_DAYS);
 
   // --- 0️⃣ Normalize old wallet_live_picks (YES/NO → team or OVER/UNDER) ---
   const { data: oldPicks, error: oldError } = await supabase
@@ -343,7 +346,7 @@ async function processWalletLivePicks(maxRetries = 3, retryDelayMs = 5000) {
     }
   }
 
-  // --- 1️⃣ Fetch pending signals ---
+  // --- 1️⃣ Fetch pending signals (recent only) ---
   const { data: signals, error: sigError } = await supabase
     .from("signals")
     .select(`
@@ -353,16 +356,18 @@ async function processWalletLivePicks(maxRetries = 3, retryDelayMs = 5000) {
       event_slug,
       picked_outcome,
       pnl,
+      created_at,
       wallets!inner(paused)
     `)
     .eq("outcome", "Pending")
-    .eq("wallets.paused", false);
+    .eq("wallets.paused", false)
+    .gte("created_at", cutoffDate.toISOString()); // Only recent signals
 
   if (sigError) return console.error("❌ Failed fetching signals:", sigError.message);
   if (!signals?.length) return console.log("ℹ️ No active pending signals found.");
 
   // --- 2️⃣ Aggregate per wallet per event (highest pnl) ---
-  const walletEventMap = {}; // { walletId||eventSlug : {pickedOutcome, pnl, market_id, market_name} }
+  const walletEventMap = {};
   for (const sig of signals) {
     if (!sig.wallet_id || !sig.event_slug) continue;
     const key = `${sig.wallet_id}||${sig.event_slug}`;
@@ -447,12 +452,15 @@ async function processWalletLivePicks(maxRetries = 3, retryDelayMs = 5000) {
   if (finalLivePicks.length) {
     const { data: existingPicks } = await supabase
       .from("wallet_live_picks")
-      .select("market_id, picked_outcome, event_slug");
+      .select("market_id, picked_outcome, event_slug, fetched_at")
+      .gte("fetched_at", cutoffDate.toISOString()); // Only consider recent picks
 
     const existingKeys = new Set((existingPicks || []).map(p => `${p.market_id}||${p.picked_outcome}||${p.event_slug}`));
 
     for (const pick of finalLivePicks) {
       const key = `${pick.market_id}||${pick.picked_outcome}||${pick.event_slug}`;
+      if (existingKeys.has(key)) continue; // Skip already inserted recent picks
+
       try {
         await supabase
           .from("wallet_live_picks")
@@ -460,15 +468,13 @@ async function processWalletLivePicks(maxRetries = 3, retryDelayMs = 5000) {
 
         console.log(`[LIVE PICK] ${pick.market_name} | ${pick.picked_outcome} | Wallets: ${pick.vote_count}`);
 
-        if (!existingKeys.has(key)) {
-          const newTradeText = `⚡️ NEW TRADE SIGNAL
+        const newTradeText = `⚡️ NEW TRADE SIGNAL
 Market Event: [${pick.market_name || pick.event_slug}](${pick.market_url})
 Prediction: ${pick.picked_outcome}
 Confidence: ${pick.confidence || "⭐"}`;
 
-          await sendTelegram(newTradeText, false);
-          await updateNotes("midas-sports", newTradeText);
-        }
+        await sendTelegram(newTradeText, false);
+        await updateNotes("midas-sports", newTradeText);
       } catch (err) {
         console.error(`❌ Error processing live pick ${pick.market_id}/${pick.picked_outcome}:`, err.message);
       }

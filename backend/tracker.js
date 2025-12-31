@@ -532,7 +532,7 @@ for (const sig of signals) {
 }
 
 /* ===========================
-   Resolve Markets & Send TRADE RESULT ALERT (RETRY + DAILY SUMMARY + LOG + NEW ALERT FORMAT)
+   Resolve Markets & Send TRADE RESULT ALERT (RETRY + DAILY SUMMARY + LOG + NEW ALERT FORMAT + DEBUG)
 =========================== */
 async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
   const { data: pending, error } = await supabase
@@ -590,6 +590,7 @@ async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
       if (attempt < maxRetries) await new Promise(r => setTimeout(r, retryDelayMs));
     }
 
+    // Still unresolved after retries
     if (!market || !(market.umaResolutionStatus === "resolved" || market.automaticallyResolved)) {
       stillPending.push({ market_id, event_slug });
       continue;
@@ -605,16 +606,16 @@ async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
     if (typeof outcomePrices === "string") {
       try { outcomePrices = JSON.parse(outcomePrices); } catch { outcomePrices = []; }
     }
-    if (Array.isArray(outcomePrices)) outcomePrices = outcomePrices.map(Number);
+    if (Array.isArray(outcomePrices)) outcomePrices = outcomePrices.map(String);
 
     // --- Determine winning outcome ---
-    let winningOutcome = market.outcome; // already set sometimes
+    let winningOutcome = market.outcome; // use market.outcome if present
     if (!winningOutcome) {
-      const winnerIndex = outcomePrices?.findIndex(p => p === 1);
+      const winnerIndex = outcomePrices?.indexOf("1");
       if (winnerIndex >= 0 && outcomes[winnerIndex]) winningOutcome = outcomes[winnerIndex];
     }
 
-    // Fallback: use score from events if automaticallyResolved but outcome missing
+    // Fallback: use events.score if automaticallyResolved but outcome missing
     if (!winningOutcome && market.events?.length) {
       const ev = market.events[0];
       if (ev?.ended && ev?.score) {
@@ -626,6 +627,9 @@ async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
       }
     }
 
+    // --- DEBUG LOG: resolved outcome ---
+    console.log(`🟢 Market ${market_id} (${event_slug}) resolved winner:`, winningOutcome);
+
     if (!winningOutcome) {
       console.log(`⚠️ Could not determine winning outcome for market ${market_id} (${event_slug})`);
       stillPending.push({ market_id, event_slug });
@@ -636,7 +640,7 @@ async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
     const resultEmoji = RESULT_EMOJIS[result] || "";
     const ids = signalsGroup.map(s => s.id);
 
-    // --- Update signals ---
+    // Update all signals
     const { error: updateSignalsError } = await supabase
       .from("signals")
       .update({
@@ -652,7 +656,7 @@ async function resolveMarkets(maxRetries = 3, retryDelayMs = 5000) {
       continue;
     }
 
-    // --- Update wallet_live_picks ---
+    // Update wallet_live_picks
     const { error: updateLivePicksError } = await supabase
       .from("wallet_live_picks")
       .update({
@@ -728,8 +732,6 @@ ${startDate ? `Event Start: ${startDate.toLocaleString("en-US", { timeZone: TIME
     });
   }
 }
-
-
 
 /* ===========================
    Count Wallet Daily Losses

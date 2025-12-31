@@ -557,12 +557,12 @@ if (sig.outcome === "LOSS") losses++;
 }
 
 /* ===========================
-   Rebuild Wallet Live Picks (Multi-Wallet Debug)
+   Rebuild Wallet Live Picks (Multi-Wallet Safe)
 =========================== */
 async function rebuildWalletLivePicks() {
-  console.log("🔄 Rebuilding wallet live picks...");
+  console.log("🔄 Rebuilding wallet live picks (safe multi-wallet)...");
 
-  // 1️⃣ Fetch pending signals with eligible wallets
+  // 1️⃣ Fetch all pending signals (ignore wallet filters for now)
   const { data: signals, error } = await supabase
     .from("signals")
     .select(`
@@ -577,10 +577,7 @@ async function rebuildWalletLivePicks() {
         win_rate
       )
     `)
-    .eq("outcome", "Pending")
-    .eq("wallets.paused", false)
-    .gte("wallets.win_rate", WIN_RATE_THRESHOLD)
-    .gte("pnl", 1000);
+    .eq("outcome", "Pending");
 
   if (error) {
     console.error("❌ Failed fetching signals:", error.message);
@@ -594,7 +591,7 @@ async function rebuildWalletLivePicks() {
 
   console.log(`📊 Fetched ${signals.length} pending signals.`);
 
-  // 2️⃣ Group signals by event + market
+  // 2️⃣ Group signals by market + event
   const eventMap = new Map();
   for (const sig of signals) {
     const key = `${sig.market_id}||${sig.event_slug}`;
@@ -604,77 +601,71 @@ async function rebuildWalletLivePicks() {
 
   const livePicksMap = new Map();
 
-  // 3️⃣ Process each event
+  // 3️⃣ Process each event group
   for (const [key, eventSignals] of eventMap.entries()) {
     const { market_id, market_name, event_slug } = eventSignals[0];
 
-    // Count picks per outcome
+    // Count picks per outcome **only for eligible wallets**
     const outcomeCounts = {};
+    const walletList = {};
     for (const sig of eventSignals) {
+      if (sig.wallets.paused) continue;
+      if (sig.wallets.win_rate < WIN_RATE_THRESHOLD) continue;
+      if ((sig.pnl ?? 0) < 1000) continue;
+
       outcomeCounts[sig.picked_outcome] = (outcomeCounts[sig.picked_outcome] || 0) + 1;
+      if (!walletList[sig.picked_outcome]) walletList[sig.picked_outcome] = [];
+      walletList[sig.picked_outcome].push(sig.wallet_id);
     }
 
-    console.log(`[DEBUG] Event ${event_slug} outcome counts:`, outcomeCounts);
+    if (!Object.keys(outcomeCounts).length) continue;
 
-    // Sort by number of wallets picking
-    const sortedOutcomes = Object.entries(outcomeCounts).sort((a, b) => b[1] - a[1]);
-    if (!sortedOutcomes.length) {
-      console.log(`⚠️ Event ${event_slug} has no outcomes after sorting.`);
-      continue;
-    }
+    // Pick outcome with most votes
+    const sorted = Object.entries(outcomeCounts).sort((a, b) => b[1] - a[1]);
+    const [netPick, voteCount] = sorted[0];
 
-    const [netPick, voteCount] = sortedOutcomes[0];
-
-    // Only consider outcomes picked by at least MIN_WALLETS_FOR_SIGNAL wallets
-    if (!netPick || voteCount < MIN_WALLETS_FOR_SIGNAL) {
-      console.log(`⚠️ Skipping ${event_slug} (${netPick}) — only ${voteCount} wallet(s) picked it.`);
+    if (voteCount < MIN_WALLETS_FOR_SIGNAL) {
+      console.log(`⚠️ Skipping ${event_slug} (${netPick}) — only ${voteCount} wallet(s) eligible.`);
       continue;
     }
 
     const pickKey = `${market_id}||${netPick}`;
-    if (!livePicksMap.has(pickKey)) {
-      livePicksMap.set(pickKey, {
-        market_id,
-        market_name,
-        event_slug,
-        picked_outcome: netPick,
-        wallets: [],
-        vote_count: 0
-      });
-    }
+    livePicksMap.set(pickKey, {
+      market_id,
+      market_name,
+      event_slug,
+      picked_outcome: netPick,
+      wallets: walletList[netPick] || [],
+      vote_count: voteCount
+    });
 
-    const entry = livePicksMap.get(pickKey);
-    for (const ws of eventSignals.filter(s => s.picked_outcome === netPick)) {
-      entry.wallets.push(ws.wallet_id);
-      entry.vote_count++;
-    }
-
-    console.log(`✅ Event ${event_slug} net pick: ${netPick} (${entry.vote_count} wallet(s))`);
+    console.log(`✅ Event ${event_slug} net pick: ${netPick} (${voteCount} wallet(s))`);
   }
 
-  // 4️⃣ Assign confidence and build final picks
+  // 4️⃣ Assign confidence and prepare final picks
   const finalLivePicks = [];
-  for (const p of livePicksMap.values()) {
+  for (const pick of livePicksMap.values()) {
     let confidence = null;
     for (const [stars, threshold] of Object.entries(CONFIDENCE_THRESHOLDS)
       .sort((a, b) => b[1] - a[1])) {
-      if (p.vote_count >= threshold) {
+      if (pick.vote_count >= threshold) {
         confidence = stars;
         break;
       }
     }
+
     if (!confidence) {
-      console.log(`⚠️ Skipping ${p.event_slug} (${p.picked_outcome}) — insufficient confidence.`);
+      console.log(`⚠️ Skipping ${pick.event_slug} (${pick.picked_outcome}) — insufficient confidence.`);
       continue;
     }
 
     finalLivePicks.push({
-      ...p,
+      ...pick,
       confidence,
       fetched_at: new Date()
     });
 
-    console.log(`🏆 Final pick ${p.event_slug}: ${p.picked_outcome} (${p.vote_count} wallets, confidence: ${confidence})`);
+    console.log(`🏆 Final pick ${pick.event_slug}: ${pick.picked_outcome} (${pick.vote_count} wallets, confidence: ${confidence})`);
   }
 
   if (!finalLivePicks.length) {

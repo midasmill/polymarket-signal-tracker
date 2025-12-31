@@ -377,24 +377,23 @@ async function rebuildWalletLivePicks() {
 }
 
 /* ===========================
-   Sync Wallet Live Picks with Market Results
+   Sync Wallet Live Picks with Market Results (DEBUG)
 =========================== */
 async function syncWalletPickOutcomes() {
-  // 1️⃣ Fetch all live picks that are still pending
   const { data: picks, error } = await supabase
     .from("wallet_live_picks")
-    .select("market_id, picked_outcome, outcome, resolved_outcome")
-    .eq("outcome", "Pending");
+    .select("market_id, picked_outcome, outcome, resolved_outcome");
 
-  if (error) {
-    console.error("❌ Failed fetching pending wallet picks:", error.message);
-    return;
-  }
+  if (error) return console.error("❌ Failed fetching wallet picks:", error.message);
   if (!picks?.length) return;
 
-  // 2️⃣ Update outcome based on resolved_outcome
+  console.log(`🔍 Checking ${picks.length} live picks for outcome update`);
+
   for (const pick of picks) {
-    if (!pick.resolved_outcome) continue; // skip if market not resolved yet
+    if (!pick.resolved_outcome) {
+      console.log(`⚠️ Market ${pick.market_id} / ${pick.picked_outcome} has no resolved outcome yet`);
+      continue;
+    }
 
     const newOutcome = pick.picked_outcome === pick.resolved_outcome ? "Win" : "Lose";
 
@@ -405,15 +404,38 @@ async function syncWalletPickOutcomes() {
       .eq("picked_outcome", pick.picked_outcome);
 
     if (updateError) {
-      console.error(
-        `❌ Failed updating outcome for market ${pick.market_id} / ${pick.picked_outcome}:`,
-        updateError.message
-      );
+      console.error(`❌ Failed updating outcome for market ${pick.market_id} / ${pick.picked_outcome}:`, updateError.message);
     } else {
-      console.log(
-        `✅ Outcome updated for market ${pick.market_id} / ${pick.picked_outcome}: ${newOutcome}`
-      );
+      console.log(`✅ Outcome updated for market ${pick.market_id} / ${pick.picked_outcome}: ${newOutcome}`);
     }
+  }
+}
+
+/* ===========================
+   Resolve Markets & Send TRADE RESULT ALERT (DEBUG)
+=========================== */
+async function resolveMarkets() {
+  const { data: pending } = await supabase
+    .from("signals")
+    .select("*")
+    .eq("outcome", "Pending")
+    .not("event_slug", "is", null);
+
+  if (!pending?.length) return;
+
+  console.log(`🔍 Resolving ${pending.length} pending signals`);
+
+  for (const sig of pending) {
+    const market = await fetchMarket(sig.event_slug);
+    if (!market) {
+      console.log(`⚠️ Market data missing for event_slug ${sig.event_slug}`);
+      continue;
+    }
+    if (!market.resolved) {
+      console.log(`⚠️ Market ${sig.market_id} (${sig.event_slug}) not resolved yet`);
+      continue;
+    }
+    console.log(`✅ Market ${sig.market_id} (${sig.event_slug}) resolved with outcome: ${market.outcome}`);
   }
 }
 

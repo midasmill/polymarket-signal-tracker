@@ -963,6 +963,17 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 
   if (!finalLivePicks.length) return;
 
+// 8.5️⃣ Log how many picks are resolved vs pending (vote threshold met)
+let resolvedCount = 0;
+let pendingCount = 0;
+
+for (const pick of finalLivePicks) {
+  if (pick.resolved_outcome) resolvedCount++;
+  else pendingCount++;
+}
+
+console.log(`📊 Picks summary (vote threshold >= ${MIN_WALLETS_FOR_SIGNAL}): Resolved = ${resolvedCount}, Pending = ${pendingCount}`);
+ 
   // 9️⃣ Remove old picks below threshold
   await supabase
     .from("wallet_live_picks")
@@ -977,8 +988,6 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 
   console.log(`✅ Wallet live picks rebuilt, merged & synced with outcomes (${finalLivePicks.length})`);
 }
-
-
 
 /* ===========================
    Fetch Wallet Activity (DATA-API)

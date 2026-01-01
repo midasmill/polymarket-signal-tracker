@@ -1043,17 +1043,20 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
           event_slug: pick.event_slug,
           picked_outcome: pick.picked_outcome,
           pnl: pick.pnl || 0,
-          resolved_outcome: null
+          resolved_outcome: null,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
         });
       }
     }
 
     // Upsert back into signals table
     for (let i = 0; i < signals.length; i += BATCH_SIZE) {
-      await supabase.from("signals").upsert(
+      const { error } = await supabase.from("signals").upsert(
         signals.slice(i, i + BATCH_SIZE),
         { onConflict: ["wallet_id", "market_id"] }
       );
+      if (error) console.error("❌ Failed upserting signals:", error.message);
     }
 
     console.log(`✅ Re-populated ${signals.length} signals from wallet picks`);
@@ -1185,7 +1188,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       vote_count: data.walletIds.size,
       pnl: data.totalPnl,
       resolved_outcome: resolved,
-      fetched_at: new Date()
+      fetched_at: new Date().toISOString()
     });
 
     if (resolved) {
@@ -1199,7 +1202,9 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
           outcome: resolved,
           resolved_outcome: resolved,
           signal: dominantOutcome,
-          side: determineSide(dominantOutcome, entry.market_name, entry.event_slug)
+          side: determineSide(dominantOutcome, entry.market_name, entry.event_slug),
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
         });
       }
     }
@@ -1226,8 +1231,6 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 
   console.log(`✅ Wallet live picks rebuilt (${finalLivePicks.length})`);
 }
-
-
 
 /* ===========================
    Fetch Wallet Activity (DATA-API)

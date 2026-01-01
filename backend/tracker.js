@@ -889,7 +889,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "2", 10);
   const CONFIDENCE_THRESHOLD = parseInt(process.env.CONFIDENCE_THRESHOLD || "0", 10);
 
-  // 1️⃣ Fetch wallets & signals
+  // 1️⃣ Fetch all signals
   const { data: signals } = await supabase
     .from("signals")
     .select("*")
@@ -949,7 +949,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     if (!outcomeData.resolved_outcome && pick.resolved_outcome) outcomeData.resolved_outcome = pick.resolved_outcome;
   }
 
-  // 5️⃣ Fetch existing picks
+  // 5️⃣ Fetch existing wallet_live_picks
   const marketIds = Array.from(marketNetPickMap.keys());
   const { data: existingPicks } = await supabase.from("wallet_live_picks").select("*").in("market_id", marketIds);
 
@@ -957,32 +957,36 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   const marketResolvedMap = {};
   await Promise.all(walletFinalPicks.map(async pick => {
     const marketId = pick.market_id;
-    if (marketResolvedMap[marketId]) return;
-
     let slug = pick.event_slug;
     try {
+      // Try fetch by slug first
       let market = await fetchMarket(slug);
 
-      // fallback to numeric id
-      if (!market && pick.market_id) {
-        const resp = await fetch(`https://gamma-api.polymarket.com/markets/${pick.market_id}`);
+      // Fallback to numeric id
+      if (!market && marketId) {
+        const resp = await fetch(`https://gamma-api.polymarket.com/markets/${marketId}`);
         if (resp.ok) market = await resp.json();
       }
 
-      if (!market) throw new Error("404 Not Found");
+      if (!market) throw new Error("Market not found");
 
       slug = market.slug;
       const polymarketId = market.id;
+      const resolved = getResolvedOutcomeFromMarket(market) || null;
 
+      // ✅ Update signals with canonical slug and Polymarket ID
       await supabase
         .from("signals")
-        .update({ event_slug: slug, polymarket_id: polymarketId })
-        .eq("market_id", marketId)
-        .catch(() => null);
+        .update({
+          event_slug: slug,
+          polymarket_id: polymarketId,
+          resolved_outcome: resolved
+        })
+        .or(`market_id.eq.${marketId},event_slug.eq.${pick.event_slug}`)
+        .catch(err => console.error("❌ Failed updating signals:", err.message));
 
-      const resolved = getResolvedOutcomeFromMarket(market);
-      if (!resolved) throw new Error("Could not determine winner");
-      marketResolvedMap[marketId] = resolved;
+      // Cache for later
+      if (marketId) marketResolvedMap[marketId] = resolved;
 
     } catch (err) {
       invalidMarketSlugs.set(slug, err.message);
@@ -996,28 +1000,24 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   // 7️⃣ Build final live picks & signals
   const finalLivePicks = [];
   const signalsToUpsert = [];
+
   for (const [market_id, entry] of marketNetPickMap.entries()) {
     const sortedOutcomes = Object.entries(entry.outcomes).sort((a, b) => b[1].totalPnl - a[1].totalPnl);
     if (!sortedOutcomes.length) continue;
 
     const [dominantOutcome, data] = sortedOutcomes[0];
 
-    // Determine confidence
-    const confidence = data.totalPnl; // example: PnL as confidence proxy
+    const confidence = data.totalPnl; // PnL as proxy
     const voteCount = data.walletIds.size;
-
     const isHighConfidence = voteCount >= MIN_WALLETS_FOR_SIGNAL || confidence >= CONFIDENCE_THRESHOLD;
 
-    // Push only high confidence picks into wallet_live_picks
+    // ✅ Push all picks that meet threshold/min wallets into wallet_live_picks
     if (isHighConfidence) {
       const existing = existingPicks?.find(e => e.market_id === market_id && e.picked_outcome === dominantOutcome);
       if (existing) {
         (existing.wallets || []).forEach(w => data.walletIds.add(w));
         data.totalPnl += Number(existing.pnl || 0);
-        if (!data.resolved_outcome && existing.resolved_outcome) data.resolved_outcome = existing.resolved_outcome;
       }
-
-      const resolved = data.resolved_outcome || marketResolvedMap[market_id] || null;
 
       finalLivePicks.push({
         market_id,
@@ -1025,50 +1025,28 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
         wallets: Array.from(data.walletIds),
         vote_count: voteCount,
         pnl: data.totalPnl,
-        resolved_outcome: resolved,
+        resolved_outcome: data.resolved_outcome || null,
         fetched_at: new Date()
       });
-
-      if (resolved) {
-        data.walletIds.forEach(wallet_id => {
-          if (wallet_id && market_id) {
-            const side = determineSide(dominantOutcome, entry.market_name, entry.event_slug);
-            signalsToUpsert.push({
-              wallet_id,
-              market_id,
-              market_name: entry.market_name,
-              event_slug: entry.event_slug,
-              picked_outcome: dominantOutcome,
-              pnl: data.totalPnl,
-              resolved_outcome: resolved,
-              outcome: resolved,
-              signal: dominantOutcome,
-              side,
-              tx_hash: null,
-              win_rate: null
-            });
-          }
-        });
-      }
-    } else {
-      // Low confidence: push only to signals
-      data.walletIds.forEach(wallet_id => {
-        signalsToUpsert.push({
-          wallet_id,
-          market_id,
-          market_name: entry.market_name,
-          event_slug: entry.event_slug,
-          picked_outcome: dominantOutcome,
-          pnl: data.totalPnl,
-          resolved_outcome: data.resolved_outcome || null,
-          outcome: "Pending",
-          signal: dominantOutcome,
-          side: determineSide(dominantOutcome, entry.market_name, entry.event_slug),
-          tx_hash: null,
-          win_rate: null
-        });
-      });
     }
+
+    // ✅ Always push signals, resolved or pending
+    data.walletIds.forEach(wallet_id => {
+      signalsToUpsert.push({
+        wallet_id,
+        market_id,
+        market_name: entry.market_name,
+        event_slug: entry.event_slug,
+        picked_outcome: dominantOutcome,
+        pnl: data.totalPnl,
+        resolved_outcome: data.resolved_outcome || null,
+        outcome: data.resolved_outcome || "Pending",
+        signal: dominantOutcome,
+        side: determineSide(dominantOutcome, entry.market_name, entry.event_slug),
+        tx_hash: null,
+        win_rate: null
+      });
+    });
   }
 
   // 8️⃣ Remove old picks below threshold
@@ -1103,6 +1081,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   if (invalidMarketSlugs.size) console.warn("⚠️ Skipped markets:", Array.from(invalidMarketSlugs.entries()));
   console.log(`✅ Wallet live picks rebuilt & batch synced (${finalLivePicks.length})`);
 }
+
 
 /* ===========================
    Fetch Wallet Activity (DATA-API)

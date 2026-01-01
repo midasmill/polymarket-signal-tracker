@@ -488,13 +488,13 @@ async function resolveMarkets() {
 }
 
 /* ===========================
-   Force Resolve Pending Markets (Safe + Concurrent)
+   Force Resolve Pending Markets (Safe + Concurrent + Polymarket ID Fallback)
 =========================== */
 async function forceResolvePendingMarkets() {
   // 1️⃣ Fetch all pending signals
   const { data: pendingSignals = [], error } = await supabase
     .from("signals")
-    .select("id, wallet_id, market_id, event_slug, picked_outcome")
+    .select("id, wallet_id, market_id, polymarket_id, event_slug, picked_outcome")
     .eq("outcome", "Pending");
 
   if (error) {
@@ -503,15 +503,22 @@ async function forceResolvePendingMarkets() {
   }
   if (!pendingSignals.length) return console.log("⚠️ No pending signals found");
 
-  // 2️⃣ Get unique event slugs
-  const eventSlugs = [...new Set(pendingSignals.map(s => s.event_slug).filter(Boolean))];
+  // 2️⃣ Group signals by market_id
+  const marketGroups = {};
+  for (const sig of pendingSignals) {
+    if (!marketGroups[sig.market_id]) marketGroups[sig.market_id] = [];
+    marketGroups[sig.market_id].push(sig);
+  }
 
   // 3️⃣ Process each market concurrently
-  await Promise.all(eventSlugs.map(async slug => {
+  await Promise.all(Object.entries(marketGroups).map(async ([market_id, signals]) => {
+    const eventSlug = signals[0].event_slug;
+    const polymarketId = signals[0].polymarket_id;
+
     try {
-      // Fetch fresh market data (ignore cache)
-      const market = await fetchMarket(slug, null, true);
-      if (!market?.outcome) return;
+      // Fetch fresh market data (slug → polymarket_id fallback)
+      const market = await fetchMarket(eventSlug, polymarketId, true);
+      if (!market?.outcome) throw new Error("Market has no resolved outcome");
 
       const winningOutcome = market.outcome;
 
@@ -519,28 +526,51 @@ async function forceResolvePendingMarkets() {
       // ✅ Wins
       await supabase
         .from("signals")
-        .update({ outcome: "WIN", resolved_outcome: winningOutcome, outcome_at: new Date() })
-        .eq("event_slug", slug)
+        .update({
+          outcome: "WIN",
+          resolved_outcome: winningOutcome,
+          outcome_at: new Date(),
+          polymarket_id: market.id,
+          event_slug: market.slug
+        })
+        .eq("market_id", market_id)
         .eq("picked_outcome", winningOutcome);
 
       // ✅ Losses
       await supabase
         .from("signals")
-        .update({ outcome: "LOSS", resolved_outcome: winningOutcome, outcome_at: new Date() })
-        .eq("event_slug", slug)
+        .update({
+          outcome: "LOSS",
+          resolved_outcome: winningOutcome,
+          outcome_at: new Date(),
+          polymarket_id: market.id,
+          event_slug: market.slug
+        })
+        .eq("market_id", market_id)
         .neq("picked_outcome", winningOutcome);
 
       // 5️⃣ Rebuild wallet_live_picks only for this market
       await rebuildWalletLivePicks(true);
 
-      console.log(`✅ Market force-resolved: ${slug}`);
+      console.log(`✅ Market force-resolved: ${eventSlug} (polymarket_id=${market.id})`);
     } catch (err) {
-      console.error(`❌ Failed to force-resolve market ${slug}:`, err.message);
+      console.error(`❌ Failed to force-resolve market ${eventSlug}:`, err.message);
+
+      invalidMarketSlugs.set(eventSlug, err.message);
+
+      const { error } = await supabase.from("skipped_markets").insert({
+        slug: eventSlug,
+        reason: err.message,
+        fetched_at: new Date()
+      });
+
+      if (error) console.warn("⚠️ skipped_markets insert failed:", error.message);
     }
   }));
 
-  console.log(`✅ Force-resolved ${eventSlugs.length} pending market(s)`);
+  console.log(`✅ Force-resolved ${Object.keys(marketGroups).length} pending market(s)`);
 }
+
 
 
 /* ===========================
@@ -951,7 +981,7 @@ async function trackWallet(wallet, forceRebuild = false) {
 
 /* ===========================
    Rebuild Wallet Live Picks
-   (Batched + Concurrent + Skip Invalid Slugs + Canonical Slug Fix + Signal Fix)
+   (Batched + Concurrent + Skip Invalid Slugs + Canonical Slug + Polymarket ID)
 =========================== */
 
 const invalidMarketSlugs = new Map(); // slug => reason
@@ -959,7 +989,9 @@ const invalidMarketSlugs = new Map(); // slug => reason
 function getResolvedOutcomeFromMarket(market) {
   if (!market || !market.closed || !market.outcomes || !market.outcomePrices) return null;
   try {
-    const outcomes = JSON.parse(market.outcomes);
+    const outcomes = Array.isArray(market.outcomes)
+      ? market.outcomes
+      : JSON.parse(market.outcomes);
     const prices = Array.isArray(market.outcomePrices)
       ? market.outcomePrices
       : JSON.parse(market.outcomePrices);
@@ -992,7 +1024,16 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   /* 2️⃣ Fetch signals */
   const { data: signals, error: sigErr } = await supabase
     .from("signals")
-    .select("wallet_id, market_id, market_name, event_slug, picked_outcome, pnl, resolved_outcome");
+    .select(`
+      wallet_id,
+      market_id,
+      polymarket_id,
+      market_name,
+      event_slug,
+      picked_outcome,
+      pnl,
+      resolved_outcome
+    `);
 
   if (sigErr || !signals?.length) {
     console.error("❌ Failed fetching signals:", sigErr?.message);
@@ -1010,6 +1051,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       walletNetPickMap.set(key, {
         picks: {},
         market_id: sig.market_id,
+        polymarket_id: sig.polymarket_id,
         market_name: sig.market_name,
         event_slug: sig.event_slug,
         resolved_outcome: sig.resolved_outcome || null
@@ -1032,6 +1074,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     walletFinalPicks.push({
       wallet_id: Number(key.split("||")[0]),
       market_id: data.market_id,
+      polymarket_id: data.polymarket_id,
       picked_outcome: sorted[0][0],
       pnl: sorted[0][1],
       resolved_outcome: data.resolved_outcome,
@@ -1049,7 +1092,8 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       marketNetPickMap.set(pick.market_id, {
         outcomes: {},
         event_slug: pick.event_slug,
-        market_name: pick.market_name
+        market_name: pick.market_name,
+        polymarket_id: pick.polymarket_id
       });
     }
 
@@ -1082,17 +1126,22 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     if (marketResolvedMap[pick.market_id]) return;
 
     try {
-      const market = await fetchMarket(pick.event_slug, pick.market_id);
+      // Use numeric Polymarket ID as fallback
+      const market = await fetchMarket(pick.event_slug, pick.polymarket_id);
       if (!market) throw new Error("Market not found");
 
       marketResolvedMap[pick.market_id] = getResolvedOutcomeFromMarket(market);
 
+      // Update canonical slug + polymarket_id
       const { error } = await supabase
         .from("signals")
-        .update({ event_slug: market.slug })
+        .update({
+          event_slug: market.slug,
+          polymarket_id: market.id
+        })
         .eq("market_id", pick.market_id);
 
-      if (error) console.warn("⚠️ Slug update failed:", error.message);
+      if (error) console.warn("⚠️ Slug/polymarket_id update failed:", error.message);
 
     } catch (err) {
       invalidMarketSlugs.set(pick.event_slug, err.message);
@@ -1122,6 +1171,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 
     finalLivePicks.push({
       market_id,
+      polymarket_id: entry.polymarket_id,
       picked_outcome: dominantOutcome,
       wallets: [...data.walletIds],
       vote_count: data.walletIds.size,
@@ -1135,6 +1185,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
         signalsToUpsert.push({
           wallet_id,
           market_id,
+          polymarket_id: entry.polymarket_id,
           market_name: entry.market_name,
           event_slug: entry.event_slug,
           picked_outcome: dominantOutcome,

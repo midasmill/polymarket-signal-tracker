@@ -243,19 +243,16 @@ async function autoResolvePendingSignals() {
 }
 
 /* ===========================
-   Fetch Market (Includes Closed + Resolved) with TTL Cache
+   Fetch Market (Includes Closed + Resolved)
 =========================== */
-const MARKET_CACHE_TTL = 5 * 60 * 1000; // 5 minutes TTL
+const marketCache = new Map();
 
 async function fetchMarket(eventSlug, bypassCache = false) {
   if (!eventSlug) return null;
 
-  // Check cache with TTL
+  // 1️⃣ Return cached market if available
   if (!bypassCache && marketCache.has(eventSlug)) {
-    const cached = marketCache.get(eventSlug);
-    if (Date.now() - cached.fetchedAt < MARKET_CACHE_TTL) {
-      return cached.market;
-    }
+    return marketCache.get(eventSlug);
   }
 
   try {
@@ -269,6 +266,11 @@ async function fetchMarket(eventSlug, bypassCache = false) {
       }
     );
 
+    if (res.status === 404) {
+      console.warn(`⚠️ Market not found: ${eventSlug}`);
+      return null;
+    }
+
     if (!res.ok) {
       console.error(`❌ Failed to fetch market ${eventSlug}: HTTP ${res.status}`);
       return null;
@@ -276,36 +278,32 @@ async function fetchMarket(eventSlug, bypassCache = false) {
 
     const market = await res.json();
 
-    // Derive outcome for closed auto-resolved markets
-    if (!market.outcome && market.closed && market.outcomePrices && market.outcomes) {
-      let prices = [];
-      let outcomes = [];
-
+    // 2️⃣ Auto-resolve outcome for closed markets
+    if (
+      !market.outcome &&
+      market.closed &&
+      market.outcomePrices &&
+      market.outcomes
+    ) {
       try {
-        prices = JSON.parse(market.outcomePrices || '[]');
-        outcomes = JSON.parse(market.outcomes || '[]');
+        const prices = JSON.parse(market.outcomePrices);
+        const outcomes = JSON.parse(market.outcomes);
+
+        const winnerIndex = prices.findIndex(p => Number(p) === 1);
+        if (winnerIndex !== -1) {
+          market.outcome = outcomes[winnerIndex];
+        } else {
+          console.warn(`⚠️ Could not determine winner for ${eventSlug}`);
+        }
       } catch (err) {
-        console.error(`❌ Failed to parse outcomePrices/outcomes for ${eventSlug}:`, err.message);
-      }
-
-      // First try: price === 1
-      let winnerIndex = prices.findIndex(p => Number(p) === 1);
-
-      // Fallback: pick outcome with highest price
-      if (winnerIndex === -1 && prices.length && outcomes.length) {
-        const maxPrice = Math.max(...prices.map(p => Number(p)));
-        winnerIndex = prices.findIndex(p => Number(p) === maxPrice);
-      }
-
-      if (winnerIndex !== -1) {
-        market.outcome = outcomes[winnerIndex];
+        console.error(`❌ Failed to parse outcomes for ${eventSlug}:`, err.message);
       }
     }
 
-    // Cache with timestamp
-    marketCache.set(eventSlug, { market, fetchedAt: Date.now() });
-
+    // 3️⃣ Cache and return market
+    marketCache.set(eventSlug, market);
     return market;
+
   } catch (err) {
     console.error(`❌ Failed to fetch market ${eventSlug}:`, err.message);
     return null;

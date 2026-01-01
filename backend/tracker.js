@@ -340,7 +340,7 @@ async function fetchAndInsertLeaderboardWallets() {
 /* ===========================
    Fetch Wallet Activity (DATA-API)
 =========================== */
-async function fetchWalletActivities(proxyWallet, retries = 3) {
+async function fetchWalletPositions(proxyWallet, retries = 3) {
   if (!proxyWallet) return [];
 
   const url = `https://data-api.polymarket.com/activity?limit=100&sortBy=TIMESTAMP&sortDirection=DESC&user=${proxyWallet}`;
@@ -391,7 +391,7 @@ async function trackWallet(wallet) {
   }
 
   // 1️⃣ Fetch positions
-  const positions = async function fetchWalletActivities(proxyWallet);
+  const positions = async function fetchWalletPositions(proxyWallet);
   console.log(`[TRACK] Wallet ${wallet.id} fetched ${positions.length} activities`);
   if (!positions?.length) return;
 

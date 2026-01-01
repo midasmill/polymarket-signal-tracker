@@ -860,29 +860,18 @@ function getResolvedOutcomeFromMarket(market) {
   if (!market || !market.closed || !market.outcomes || !market.outcomePrices) return null;
 
   try {
-    // Normalize outcomes
     const outcomes = Array.isArray(market.outcomes)
       ? market.outcomes
       : JSON.parse(market.outcomes || "[]");
 
     let outcomePrices = market.outcomePrices;
-
-    // Parse outcomePrices if string
-    if (typeof outcomePrices === "string") {
-      outcomePrices = JSON.parse(outcomePrices);
-    }
-
-    // If object, take values
+    if (typeof outcomePrices === "string") outcomePrices = JSON.parse(outcomePrices);
     if (outcomePrices && typeof outcomePrices === "object" && !Array.isArray(outcomePrices)) {
       outcomePrices = Object.values(outcomePrices);
     }
 
-    if (!Array.isArray(outcomePrices) || outcomePrices.length === 0) {
-      console.warn(`⚠️ outcomePrices invalid for market ${market.slug || market.id}`);
-      return null;
-    }
+    if (!Array.isArray(outcomePrices) || outcomePrices.length === 0) return null;
 
-    // Find winning outcome (price ≈ 1)
     const idx = outcomePrices.findIndex(p => Math.abs(Number(p) - 1) < 1e-6);
     if (idx === -1 || !outcomes[idx]) return null;
 
@@ -902,9 +891,10 @@ function determineSide(pickedOutcome, marketName, eventSlug) {
   return "BUY";
 }
 
-// Unified safe Supabase helper
+// Safe Supabase helpers
 async function safeUpsert(table, rows, options = {}) {
   try {
+    if (!rows.length) return [];
     const { data, error } = await supabase.from(table).upsert(rows, options);
     if (error) console.error(`❌ Upsert failed into ${table}:`, error.message);
     return data;
@@ -916,11 +906,9 @@ async function safeUpsert(table, rows, options = {}) {
 
 async function safeInsert(table, rows) {
   try {
+    if (!rows.length) return [];
     const { data, error } = await supabase.from(table).insert(rows);
-    if (error) {
-      console.error(`❌ Insert failed into ${table}:`, error.message);
-      return null;
-    }
+    if (error) console.error(`❌ Insert failed into ${table}:`, error.message);
     return data;
   } catch (err) {
     console.error(`❌ Unexpected error inserting into ${table}:`, err);
@@ -1028,17 +1016,16 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       if (!market) throw new Error("404 Not Found");
       slug = market.slug || slug;
 
-      await safeUpsert("signals", { event_slug: slug }, { onConflict: ["market_id"] });
+      // ✅ Update canonical slug safely
+      await supabase.from("signals").update({ event_slug: slug }).eq("market_id", marketId);
+
       const resolved = getResolvedOutcomeFromMarket(market);
       if (!resolved) throw new Error("Could not determine winner");
       marketResolvedMap[marketId] = resolved;
     } catch (err) {
       invalidMarketSlugs.set(slug, err.message);
-      if (slug) {
-        await safeInsert("skipped_markets", { slug, reason: err.message, fetched_at: new Date() });
-      } else {
-        console.warn("⚠️ Skipped inserting to skipped_markets: slug missing", err.message);
-      }
+      if (slug) await safeInsert("skipped_markets", { slug, reason: err.message, fetched_at: new Date() });
+      else console.warn("⚠️ Skipped inserting to skipped_markets: slug missing", err.message);
     }
   }));
 
@@ -1051,8 +1038,6 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     if (!sortedOutcomes.length) continue;
 
     const [dominantOutcome, data] = sortedOutcomes[0];
-
-    // ✅ Only process picks meeting vote/wallet threshold
     if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL) continue;
 
     const existing = existingPicks?.find(e => e.market_id === market_id && e.picked_outcome === dominantOutcome);
@@ -1076,42 +1061,37 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 
     if (resolved) {
       data.walletIds.forEach(wallet_id => {
-        const side = determineSide(dominantOutcome, entry.market_name, entry.event_slug);
-        signalsToUpsert.push({
-          wallet_id,
-          market_id,
-          market_name: entry.market_name,
-          event_slug: entry.event_slug,
-          picked_outcome: dominantOutcome,
-          pnl: data.totalPnl,
-          resolved_outcome: resolved,
-          outcome: resolved,
-          signal: dominantOutcome,
-          side,
-          tx_hash: null,
-          win_rate: null
-        });
+        if (wallet_id && market_id) {
+          const side = determineSide(dominantOutcome, entry.market_name, entry.event_slug);
+          signalsToUpsert.push({
+            wallet_id,
+            market_id,
+            market_name: entry.market_name,
+            event_slug: entry.event_slug,
+            picked_outcome: dominantOutcome,
+            pnl: data.totalPnl,
+            resolved_outcome: resolved,
+            outcome: resolved,
+            signal: dominantOutcome,
+            side,
+            tx_hash: null,
+            win_rate: null
+          });
+        }
       });
     }
   }
 
-  // 9️⃣ Batch upsert wallet_live_picks & signals
+  // 9️⃣ Batch upsert wallet_live_picks
   for (let i = 0; i < finalLivePicks.length; i += BATCH_SIZE) {
     const batch = finalLivePicks.slice(i, i + BATCH_SIZE);
     await safeUpsert("wallet_live_picks", batch, { onConflict: ["market_id", "picked_outcome"] });
   }
 
-  const uniqueSignals = [];
-  const seen = new Set();
-  for (const s of signalsToUpsert) {
-    const key = `${s.wallet_id}||${s.market_id}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      uniqueSignals.push(s);
-    }
-  }
-  for (let i = 0; i < uniqueSignals.length; i += BATCH_SIZE) {
-    const batch = uniqueSignals.slice(i, i + BATCH_SIZE);
+  // 🔟 Batch upsert signals safely
+  const validSignals = signalsToUpsert.filter(s => s.wallet_id != null && s.market_id != null);
+  for (let i = 0; i < validSignals.length; i += BATCH_SIZE) {
+    const batch = validSignals.slice(i, i + BATCH_SIZE);
     await safeUpsert("signals", batch, { onConflict: ["wallet_id", "market_id"] });
   }
 

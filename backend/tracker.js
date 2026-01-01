@@ -1006,17 +1006,17 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     if (!sortedOutcomes.length) continue;
 
     const [dominantOutcome, data] = sortedOutcomes[0];
-
-    const confidence = data.totalPnl; // PnL as proxy
+    const confidence = data.totalPnl;
     const voteCount = data.walletIds.size;
     const isHighConfidence = voteCount >= MIN_WALLETS_FOR_SIGNAL || confidence >= CONFIDENCE_THRESHOLD;
 
-    // ✅ Push all picks that meet threshold/min wallets into wallet_live_picks
+    // ✅ Push all picks that meet threshold/min wallets
     if (isHighConfidence) {
       const existing = existingPicks?.find(e => e.market_id === market_id && e.picked_outcome === dominantOutcome);
       if (existing) {
         (existing.wallets || []).forEach(w => data.walletIds.add(w));
         data.totalPnl += Number(existing.pnl || 0);
+        if (!data.resolved_outcome && existing.resolved_outcome) data.resolved_outcome = existing.resolved_outcome;
       }
 
       finalLivePicks.push({
@@ -1025,7 +1025,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
         wallets: Array.from(data.walletIds),
         vote_count: voteCount,
         pnl: data.totalPnl,
-        resolved_outcome: data.resolved_outcome || null,
+        resolved_outcome: data.resolved_outcome || marketResolvedMap[market_id] || null,
         fetched_at: new Date()
       });
     }
@@ -1039,8 +1039,8 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
         event_slug: entry.event_slug,
         picked_outcome: dominantOutcome,
         pnl: data.totalPnl,
-        resolved_outcome: data.resolved_outcome || null,
-        outcome: data.resolved_outcome || "Pending",
+        resolved_outcome: data.resolved_outcome || marketResolvedMap[market_id] || null,
+        outcome: data.resolved_outcome || marketResolvedMap[market_id] || "Pending",
         signal: dominantOutcome,
         side: determineSide(dominantOutcome, entry.market_name, entry.event_slug),
         tx_hash: null,
@@ -1081,7 +1081,6 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   if (invalidMarketSlugs.size) console.warn("⚠️ Skipped markets:", Array.from(invalidMarketSlugs.entries()));
   console.log(`✅ Wallet live picks rebuilt & batch synced (${finalLivePicks.length})`);
 }
-
 
 /* ===========================
    Fetch Wallet Activity (DATA-API)

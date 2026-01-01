@@ -14,11 +14,11 @@ const TIMEZONE = process.env.TIMEZONE || "America/New_York";
 
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || "30000", 10);
 const WIN_RATE_THRESHOLD = parseInt(process.env.WIN_RATE_THRESHOLD || "0", 10);
-const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "5", 10);
+const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "3", 10);
 const FORCE_SEND = process.env.FORCE_SEND === "true";
 
 const CONFIDENCE_THRESHOLDS = {
-  "⭐": 5,
+  "⭐": 3,
   "⭐⭐": 10,
   "⭐⭐⭐": 15,
   "⭐⭐⭐⭐": 20,

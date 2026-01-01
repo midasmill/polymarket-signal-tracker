@@ -888,17 +888,6 @@ async function safeUpsert(table, rows, options = {}) {
   }
 }
 
-async function safeInsert(table, rows) {
-  try {
-    const { data, error } = await supabase.from(table).insert(rows);
-    if (error) console.error(`❌ Insert failed into ${table}:`, error.message);
-    return data;
-  } catch (err) {
-    console.error(`❌ Unexpected error inserting into ${table}:`, err);
-    return null;
-  }
-}
-
 async function rebuildWalletLivePicks(forceRebuild = false) {
   const MIN_WALLETS_FOR_SIGNAL = 2;
   const BATCH_SIZE = 50;

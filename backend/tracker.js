@@ -1067,7 +1067,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   await safeInsert("signals", signalsToUpsert);
 
   invalidMarketSlugs.clear();
-  console.log(`✅ Wallet live picks, pending, and signals rebuilt without constraints or batching`);
+  console.log(`✅ Wallet live picks, pending, and signals rebuilt without PnL threshold or batching`);
 }
 
 /* ===========================

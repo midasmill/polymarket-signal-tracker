@@ -74,39 +74,6 @@ async function getWalletOutcomeTotals(walletId, eventSlug) {
 }
 
 /* ===========================
-   One-time backfill
-=========================== */
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
-
-const { data: rows } = await supabase
-  .from("signals")
-  .select("id, event_slug")
-  .is("polymarket_id", null);
-
-for (const row of rows) {
-  if (!row.event_slug) continue;
-
-  const res = await fetch(
-    `https://gamma-api.polymarket.com/markets/slug/${row.event_slug}`
-  );
-
-  if (!res.ok) continue;
-
-  const market = await res.json();
-
-  await supabase
-    .from("signals")
-    .update({
-      polymarket_id: Number(market.id),
-      market_id: market.id // overwrite conditionId
-    })
-    .eq("id", row.id);
-
-  console.log(`✅ Backfilled ${row.event_slug} → ${market.id}`);
-}
-
-
-/* ===========================
    Helpers
 =========================== */
 function toBlockquote(text) {

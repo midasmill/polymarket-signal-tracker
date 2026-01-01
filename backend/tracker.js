@@ -636,26 +636,48 @@ async function trackWallet(wallet, forceRebuild = false) {
   const proxyWallet = wallet.polymarket_proxy_wallet;
   if (!proxyWallet) return;
 
-  // Auto-unpause if win_rate >= 80
-  if (wallet.paused && wallet.win_rate >= 80) {
+  // --- Auto-pause / unpause based on rolling 7-day win rate ---
+  const SEVEN_DAYS_AGO = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+  const { data: last7DaysSignals = [] } = await supabase
+    .from("signals")
+    .select("outcome")
+    .eq("wallet_id", wallet.id)
+    .gte("created_at", SEVEN_DAYS_AGO)
+    .in("outcome", ["WIN", "LOSS"]);
+
+  const totalSignals = last7DaysSignals.length;
+  const wins = last7DaysSignals.filter(s => s.outcome === "WIN").length;
+  const rollingWinRate = totalSignals > 0 ? (wins / totalSignals) * 100 : 100;
+
+  if (rollingWinRate < 70 && !wallet.paused) {
+    await supabase
+      .from("wallets")
+      .update({ paused: true })
+      .eq("id", wallet.id);
+    console.log(`⚠️ Wallet ${wallet.id} paused (7-day win rate ${rollingWinRate.toFixed(2)}%)`);
+  }
+
+  if (rollingWinRate >= 70 && wallet.paused) {
     await supabase
       .from("wallets")
       .update({ paused: false })
       .eq("id", wallet.id);
+    console.log(`✅ Wallet ${wallet.id} unpaused (7-day win rate ${rollingWinRate.toFixed(2)}%)`);
   }
 
-  // 1️⃣ Fetch wallet positions
+  // --- 1️⃣ Fetch wallet positions ---
   const positions = await fetchWalletPositions(proxyWallet);
   if (!positions?.length) return;
 
-  // 2️⃣ Fetch existing signals to avoid duplicates
+  // --- 2️⃣ Fetch existing signals to avoid duplicates ---
   const { data: existingSignals = [] } = await supabase
     .from("signals")
     .select("*")
     .eq("wallet_id", wallet.id);
   const existingTxs = new Set(existingSignals.map(s => s.tx_hash));
 
-  // 3️⃣ Aggregate PnL per wallet/event/outcome
+  // --- 3️⃣ Aggregate PnL per wallet/event/outcome ---
   const walletEventMap = new Map();
   for (const pos of positions) {
     const eventSlug = pos.eventSlug || pos.slug;
@@ -705,7 +727,7 @@ async function trackWallet(wallet, forceRebuild = false) {
     if (pos.resolvedOutcome) entry.resolved_outcome = pos.resolvedOutcome;
   }
 
-  // 4️⃣ Compute net pick per wallet/event
+  // --- 4️⃣ Compute net pick per wallet/event ---
   const netSignals = [];
   for (const [key, data] of walletEventMap.entries()) {
     const sorted = Object.entries(data.picks).sort((a, b) => b[1] - a[1]);
@@ -715,7 +737,6 @@ async function trackWallet(wallet, forceRebuild = false) {
     const picked_outcome = sorted[0][0];
     const pnl = sorted[0][1];
 
-    // Determine side safely
     let side;
     if (/YES|NO|OVER|UNDER/i.test(picked_outcome)) {
       side = picked_outcome.toUpperCase();
@@ -732,7 +753,6 @@ async function trackWallet(wallet, forceRebuild = false) {
       ? existing.outcome
       : data.resolved_outcome ?? "Pending";
 
-    // ✅ Push net signal with required NOT NULL columns
     netSignals.push({
       wallet_id,
       market_id: data.market_id,
@@ -740,21 +760,21 @@ async function trackWallet(wallet, forceRebuild = false) {
       event_slug: data.event_slug,
       picked_outcome,
       pnl,
-      side: side || "BUY",                  // NOT NULL
-      signal: picked_outcome || "UNKNOWN",  // NOT NULL
+      side: side || "BUY",
+      signal: picked_outcome || "UNKNOWN",
       outcome,
       resolved_outcome: data.resolved_outcome ?? null,
       outcome_at: data.outcome_at ?? null,
       win_rate: wallet.win_rate,
       created_at: new Date(),
       event_start_at: null,
-      tx_hash: Array.from(data.tx_hashes)[0] || "UNKNOWN" // NOT NULL
+      tx_hash: Array.from(data.tx_hashes)[0] || "UNKNOWN"
     });
   }
 
   if (!netSignals.length) return;
 
-  // 5️⃣ Delete old signals that are not net pick
+  // --- 5️⃣ Delete old signals that are not net pick ---
   for (const sig of netSignals) {
     await supabase
       .from("signals")
@@ -764,7 +784,7 @@ async function trackWallet(wallet, forceRebuild = false) {
       .neq("picked_outcome", sig.picked_outcome);
   }
 
-  // 6️⃣ Upsert net signals safely
+  // --- 6️⃣ Upsert net signals safely ---
   try {
     const { error } = await supabase
       .from("signals")
@@ -778,7 +798,7 @@ async function trackWallet(wallet, forceRebuild = false) {
     console.error(`❌ Unexpected upsert error for wallet ${wallet.id}:`, err.message);
   }
 
-  // 7️⃣ Check for warning based on recent PnL or consecutive losses
+  // --- 7️⃣ Check for warning based on recent PnL or consecutive losses ---
   const TWO_DAYS_AGO = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
 
   const { data: recentSignals = [] } = await supabase
@@ -811,14 +831,13 @@ async function trackWallet(wallet, forceRebuild = false) {
 
     console.log(`⚠️ Wallet ${wallet.id} warning: ${warningMessage}`);
   } else if (wallet.warning) {
-    // Clear warning if conditions no longer apply
     await supabase
       .from("wallets")
       .update({ warning: null, warning_logged_at: null })
       .eq("id", wallet.id);
   }
 
-  // 8️⃣ Update wallet event exposure
+  // --- 8️⃣ Update wallet event exposure ---
   const affectedEvents = [...new Set(netSignals.map(s => s.event_slug))];
   for (const eventSlug of affectedEvents) {
     const totals = await getWalletOutcomeTotals(wallet.id, eventSlug);
@@ -844,7 +863,7 @@ async function trackWallet(wallet, forceRebuild = false) {
       });
   }
 
-  // 9️⃣ Auto-resolve pending signals
+  // --- 9️⃣ Auto-resolve pending signals ---
   await autoResolvePendingSignals();
 }
 
@@ -1145,22 +1164,36 @@ Outcome: ${pick.outcome} ${outcomeEmoji}`;
 
 /* ===========================
    Wallet Metrics Update
+   (Rolling 7-Day Win Rate + Auto Pause/Unpause)
 =========================== */
 async function updateWalletMetricsJS() {
   const { data: wallets } = await supabase.from("wallets").select("*");
   if (!wallets?.length) return;
 
+  const SEVEN_DAYS_AGO = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
   for (const wallet of wallets) {
-    // Fetch resolved signals for this wallet
-    const { data: resolvedSignals } = await supabase
+    // 1️⃣ Fetch resolved signals (last 7 days only)
+    const { data: resolvedSignals = [] } = await supabase
       .from("signals")
-      .select("event_slug, picked_outcome, outcome")
+      .select("event_slug, picked_outcome, outcome, created_at")
       .eq("wallet_id", wallet.id)
+      .gte("created_at", SEVEN_DAYS_AGO)
       .in("outcome", ["WIN", "LOSS"]);
 
-    if (!resolvedSignals?.length) continue;
+    if (!resolvedSignals.length) {
+      // No data → don't punish wallet
+      await supabase
+        .from("wallets")
+        .update({
+          win_rate: 100,
+          last_checked: new Date()
+        })
+        .eq("id", wallet.id);
+      continue;
+    }
 
-    // Group signals by event
+    // 2️⃣ Group by event (avoid double-counting)
     const eventsMap = new Map();
     for (const sig of resolvedSignals) {
       if (!sig.event_slug) continue;
@@ -1168,43 +1201,50 @@ async function updateWalletMetricsJS() {
       eventsMap.get(sig.event_slug).push(sig);
     }
 
-    let wins = 0, losses = 0;
+    let wins = 0;
+    let losses = 0;
 
+    // 3️⃣ Resolve ONE outcome per wallet per event
     for (const [eventSlug, signalsForEvent] of eventsMap.entries()) {
-      // Skip wallets that have both sides for this event
       const netPick = await getWalletNetPick(wallet.id, eventSlug);
-if (!netPick) continue;
+      if (!netPick) continue;
 
-const sig = signalsForEvent.find(s => s.picked_outcome === netPick);
-if (!sig) continue;
+      const sig = signalsForEvent.find(s => s.picked_outcome === netPick);
+      if (!sig) continue;
 
-if (sig.outcome === "WIN") wins++;
-if (sig.outcome === "LOSS") losses++;
-
-
-      // Determine majority outcome for this wallet/event
-      const outcome = signalsForEvent[0]?.outcome || null;
-      if (outcome === "WIN") wins++;
-      if (outcome === "LOSS") losses++;
+      if (sig.outcome === "WIN") wins++;
+      if (sig.outcome === "LOSS") losses++;
     }
 
     const total = wins + losses;
-    const winRate = total > 0 ? Math.round((wins / total) * 100) : 0;
+    const rollingWinRate = total > 0 ? Math.round((wins / total) * 100) : 100;
 
-    // Count daily losses safely
+    // 4️⃣ Daily loss protection (kept)
     const dailyLosses = await countWalletDailyLosses(wallet.id);
-    const shouldPause = dailyLosses >= 3;
+    const dailyPause = dailyLosses >= 3;
 
+    // 5️⃣ Auto pause / unpause (ROLLING 7 DAYS)
+    let paused = wallet.paused;
+
+    if (rollingWinRate < 70) paused = true;
+    if (rollingWinRate >= 70 && !dailyPause) paused = false;
+
+    // 6️⃣ Update wallet
     await supabase
       .from("wallets")
       .update({
-        win_rate: winRate,
-        paused: shouldPause ? true : wallet.paused,
+        win_rate: rollingWinRate,
+        paused,
         last_checked: new Date()
       })
       .eq("id", wallet.id);
+
+    console.log(
+      `📊 Wallet ${wallet.id} → 7D WinRate: ${rollingWinRate}% | Wins: ${wins} | Losses: ${losses} | Paused: ${paused}`
+    );
   }
 }
+
 
 /* ===========================
    Signal Processing + Telegram Sending (Fixed)

@@ -1266,7 +1266,7 @@ Outcome: ${outcome} ${outcomeEmoji}`;
 }
 
 /* ===========================
-   Tracker Loop (Enhanced, Safe)
+   Tracker Loop (Enhanced, Auto Rebuild)
 =========================== */
 let isTrackerRunning = false;
 
@@ -1275,6 +1275,15 @@ async function trackerLoop() {
   isTrackerRunning = true;
 
   try {
+    // 0️⃣ Check if signals table is empty → determine if we need full rebuild
+    const { data: allSignals, error: sigError } = await supabase
+      .from("signals")
+      .select("id")
+      .limit(1);
+
+    if (sigError) console.error("❌ Failed fetching signals:", sigError.message);
+    const forceRebuildSignals = !allSignals?.length;
+
     // 1️⃣ Fetch all active wallets
     const { data: wallets, error: walletsError } = await supabase
       .from("wallets")
@@ -1287,10 +1296,10 @@ async function trackerLoop() {
     if (!wallets?.length) return;
 
     // 2️⃣ Track wallets concurrently
-    await Promise.allSettled(wallets.map(trackWallet));
+    await Promise.allSettled(wallets.map(wallet => trackWallet(wallet, forceRebuildSignals)));
 
-    // 3️⃣ Rebuild live picks from updated signals
-    await rebuildWalletLivePicks(true);
+    // 3️⃣ Rebuild live picks from updated signals if needed
+    await rebuildWalletLivePicks(forceRebuildSignals);
 
     // 4️⃣ Force resolve pending markets safely
     try {
@@ -1345,7 +1354,7 @@ async function main() {
   await fetchAndInsertLeaderboardWallets().catch(err => console.error(err));
   await trackerLoop();
 
-  // 2️⃣ Set continuous polling
+  // 2️⃣ Continuous polling
   setInterval(trackerLoop, POLL_INTERVAL);
 
   // 3️⃣ Daily cron for leaderboard refresh
@@ -1367,3 +1376,4 @@ async function main() {
 }
 
 main();
+

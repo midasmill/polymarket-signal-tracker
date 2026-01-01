@@ -145,6 +145,45 @@ function getConfidenceEmoji(count) {
 }
 
 /* ===========================
+   Force Resolve Pending Markets
+=========================== */
+async function forceResolvePendingMarkets() {
+  // 1️⃣ Fetch all Pending signals
+  const { data: pendingSignals } = await supabase
+    .from("signals")
+    .select("*")
+    .eq("outcome", "Pending");
+
+  if (!pendingSignals?.length) return;
+
+  const eventSlugs = [...new Set(pendingSignals.map(s => s.event_slug).filter(Boolean))];
+
+  for (const slug of eventSlugs) {
+    // Fetch fresh market data, ignore cache
+    const market = await fetchMarket(slug, true);
+    if (!market || !market.outcome) continue;
+
+    const winningOutcome = market.outcome;
+
+    // Update all signals for this event
+    await supabase
+      .from("signals")
+      .update({
+        outcome: supabase.raw("CASE WHEN picked_outcome = ? THEN 'WIN' ELSE 'LOSS' END", [winningOutcome]),
+        resolved_outcome: winningOutcome,
+        outcome_at: new Date()
+      })
+      .eq("event_slug", slug);
+
+    // Rebuild wallet_live_picks for this market
+    await rebuildWalletLivePicks(true);
+  }
+
+  console.log(`✅ Force-resolved ${eventSlugs.length} pending markets`);
+}
+
+
+/* ===========================
    Resolve Wallet Event Outcome
 =========================== */
 async function resolveWalletEventOutcome(walletId, eventSlug) {
@@ -936,6 +975,8 @@ async function trackerLoop() {
     // 3️⃣ Rebuild live picks from updated signals
     await rebuildWalletLivePicks();
 
+    await forceResolvePendingMarkets();
+    
     await resolveMarkets(); 
 
     // 4️⃣ Process and send signals

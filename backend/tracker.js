@@ -913,7 +913,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   const { data: wallets } = await supabase.from("wallets").select("id");
   if (!wallets?.length) return;
 
-  /* 2️⃣ Fetch raw signals (NO filtering here) */
+  /* 2️⃣ Fetch raw signals (no filtering yet) */
   const { data: signals, error: sigError } = await supabase
     .from("signals")
     .select("wallet_id, market_id, market_name, event_slug, picked_outcome, pnl, resolved_outcome");
@@ -943,7 +943,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     if (sig.resolved_outcome) entry.resolved_outcome = sig.resolved_outcome;
   }
 
-  /* 4️⃣ Determine wallet final pick (PnL threshold enforced HERE) */
+  /* 4️⃣ Determine wallet final pick (enforce PnL threshold here) */
   const walletFinalPicks = [];
 
   for (const data of walletNetPickMap.values()) {
@@ -957,7 +957,8 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       market_name: data.market_name,
       picked_outcome: sorted[0][0],
       pnl: sorted[0][1],
-      resolved_outcome: data.resolved_outcome
+      resolved_outcome: data.resolved_outcome,
+      walletIds: new Set([parseInt(data.wallet_id)]), // ensure walletIds exists
     });
   }
 
@@ -986,7 +987,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 
     const outcomeData = entry.outcomes[pick.picked_outcome];
     outcomeData.totalPnl += pick.pnl;
-    outcomeData.walletIds.add(pick.wallet_id);
+    pick.walletIds?.forEach(w => outcomeData.walletIds.add(w));
     if (!outcomeData.resolved_outcome && pick.resolved_outcome)
       outcomeData.resolved_outcome = pick.resolved_outcome;
   }
@@ -1037,17 +1038,18 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     finalLivePicks.push({
       market_id,
       picked_outcome: dominantOutcome,
-      wallets: Array.from(data.walletIds),
-      vote_count: data.walletIds.size,
-      pnl: data.totalPnl,
+      wallets: Array.from(data.walletIds).filter(w => w != null),
+      vote_count: Array.from(data.walletIds).filter(w => w != null).length,
+      pnl: data.totalPnl || MIN_TOTAL_PNL,
       resolved_outcome: resolved,
       fetched_at: new Date()
     });
   }
 
-  /* 8️⃣ Deduplicate + batch upsert wallet_live_picks */
+  /* 8️⃣ Deduplicate + batch upsert wallet_live_picks (skip invalid rows) */
   const seen = new Set();
   const deduped = finalLivePicks.filter(p => {
+    if (!p.picked_outcome || !p.wallets.length || p.pnl < MIN_TOTAL_PNL) return false;
     const k = `${p.market_id}||${p.picked_outcome}`;
     if (seen.has(k)) return false;
     seen.add(k);
@@ -1065,6 +1067,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   invalidMarketSlugs.clear();
   console.log(`✅ Wallet live picks rebuilt safely (${deduped.length})`);
 }
+
 
 /* ===========================
    Fetch Wallet Activity (DATA-API, Robust)

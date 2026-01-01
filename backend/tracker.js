@@ -1226,23 +1226,26 @@ Outcome: ${pick.outcome} ${outcomeEmoji}`;
 }
 
 /* ===========================
-   Wallet Metrics Update
+   Wallet Metrics Update (Safe Loss Counting)
 =========================== */
 async function updateWalletMetricsJS() {
-  const { data: wallets } = await supabase.from("wallets").select("*");
+  const DAILY_LOSS_LIMIT = 3; // auto-pause threshold
+
+  // 1️⃣ Fetch all wallets
+  const { data: wallets } = await supabase.from("wallets").select("id, paused");
   if (!wallets?.length) return;
 
   for (const wallet of wallets) {
-    // Fetch resolved signals for this wallet
+    // 2️⃣ Fetch all resolved signals (WIN/LOSS)
     const { data: resolvedSignals } = await supabase
       .from("signals")
-      .select("event_slug, picked_outcome, outcome")
+      .select("event_slug, picked_outcome, outcome, created_at")
       .eq("wallet_id", wallet.id)
       .in("outcome", ["WIN", "LOSS"]);
 
     if (!resolvedSignals?.length) continue;
 
-    // Group signals by event
+    // 3️⃣ Group signals by event_slug
     const eventsMap = new Map();
     for (const sig of resolvedSignals) {
       if (!sig.event_slug) continue;
@@ -1250,32 +1253,33 @@ async function updateWalletMetricsJS() {
       eventsMap.get(sig.event_slug).push(sig);
     }
 
-    let wins = 0, losses = 0;
+    let wins = 0, losses = 0, todayLosses = 0;
+    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
 
     for (const [eventSlug, signalsForEvent] of eventsMap.entries()) {
-      // Skip wallets that have both sides for this event
+      // 4️⃣ Determine wallet net pick for this event
       const netPick = await getWalletNetPick(wallet.id, eventSlug);
-if (!netPick) continue;
+      if (!netPick) continue;
 
-const sig = signalsForEvent.find(s => s.picked_outcome === netPick);
-if (!sig) continue;
+      // 5️⃣ Find the signal corresponding to the net pick
+      const sig = signalsForEvent.find(s => s.picked_outcome === netPick);
+      if (!sig) continue;
 
-if (sig.outcome === "WIN") wins++;
-if (sig.outcome === "LOSS") losses++;
+      if (sig.outcome === "WIN") wins++;
+      if (sig.outcome === "LOSS") {
+        losses++;
 
-
-      // Determine majority outcome for this wallet/event
-      const outcome = signalsForEvent[0]?.outcome || null;
-      if (outcome === "WIN") wins++;
-      if (outcome === "LOSS") losses++;
+        // Check if loss happened today
+        const signalDate = sig.created_at?.toISOString().slice(0, 10);
+        if (signalDate === today) todayLosses++;
+      }
     }
 
-    const total = wins + losses;
-    const winRate = total > 0 ? Math.round((wins / total) * 100) : 0;
+    const totalEvents = wins + losses;
+    const winRate = totalEvents > 0 ? Math.round((wins / totalEvents) * 100) : 0;
 
-    // Count daily losses safely
-    const dailyLosses = await countWalletDailyLosses(wallet.id);
-    const shouldPause = dailyLosses >= 3;
+    // 6️⃣ Determine if wallet should be auto-paused
+    const shouldPause = todayLosses >= DAILY_LOSS_LIMIT;
 
     await supabase
       .from("wallets")
@@ -1285,6 +1289,10 @@ if (sig.outcome === "LOSS") losses++;
         last_checked: new Date()
       })
       .eq("id", wallet.id);
+
+    console.log(
+      `Wallet ${wallet.id} -> Wins: ${wins}, Losses: ${losses}, TodayLosses: ${todayLosses}, Paused: ${shouldPause}`
+    );
   }
 }
 

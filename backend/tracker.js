@@ -1,4 +1,3 @@
-tracker.js
 import { createClient } from "@supabase/supabase-js";
 import fetch from "node-fetch";
 import cron from "node-cron";
@@ -1368,6 +1367,3 @@ async function main() {
 }
 
 main();
-
-
-picks with lower than threshold/vote count and have outcome is showing in wallet_live_picks. only picks that meet vote count / threshold go into wallet_live_picks 

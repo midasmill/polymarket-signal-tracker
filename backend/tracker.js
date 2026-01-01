@@ -544,7 +544,8 @@ async function trackWallet(wallet) {
 }
 
 /* ===========================
-   Rebuild Wallet Live Picks (Dominant Net Pick Per Market – Merge Existing & Min Wallets + Resolved Sync)
+   Rebuild Wallet Live Picks
+   (Dominant Net Pick Per Market – Min Wallets + Merge Existing + Resolved Sync)
 =========================== */
 async function rebuildWalletLivePicks() {
   const { data: signals, error } = await supabase
@@ -569,10 +570,9 @@ async function rebuildWalletLivePicks() {
 
   if (error || !signals?.length) return;
 
-  // 1️⃣ Compute net pick per wallet per event (ignoring resolved for net pick calculation)
+  // 1️⃣ Compute net pick per wallet per event (only Pending signals)
   const walletNetPickMap = new Map();
   for (const sig of signals) {
-    // Only include pending for aggregation
     if (sig.outcome !== "Pending") continue;
 
     const key = `${sig.wallet_id}||${sig.event_slug}`;
@@ -604,6 +604,8 @@ async function rebuildWalletLivePicks() {
     });
   }
 
+  if (!walletFinalPicks.length) return;
+
   // 3️⃣ Aggregate across wallets per market
   const marketNetPickMap = new Map();
   for (const pick of walletFinalPicks) {
@@ -626,37 +628,18 @@ async function rebuildWalletLivePicks() {
     entry.outcomes[pick.picked_outcome].walletIds.add(pick.wallet_id);
   }
 
-  // 4️⃣ Merge with existing wallet_live_picks and apply minimum wallet filter
+  // 4️⃣ Build final live picks applying MIN_WALLETS_FOR_SIGNAL
   const finalLivePicks = [];
+
   for (const entry of marketNetPickMap.values()) {
-    // Fetch existing live picks for this market
-    const { data: existing } = await supabase
-      .from("wallet_live_picks")
-      .select("*")
-      .eq("market_id", entry.market_id);
-
-    // Merge wallets & PNL if same outcome exists
-    const mergedOutcomes = { ...entry.outcomes };
-    if (existing?.length) {
-      for (const ex of existing) {
-        const outcome = ex.picked_outcome;
-        if (!mergedOutcomes[outcome]) {
-          mergedOutcomes[outcome] = { totalPnl: 0, walletIds: new Set() };
-        }
-        ex.wallets?.forEach(w => mergedOutcomes[outcome].walletIds.add(w));
-        mergedOutcomes[outcome].totalPnl += Number(ex.pnl || 0);
-      }
-    }
-
-    // Choose dominant outcome (largest total PNL)
-    const sortedOutcomes = Object.entries(mergedOutcomes)
+    const sortedOutcomes = Object.entries(entry.outcomes)
       .sort((a, b) => b[1].totalPnl - a[1].totalPnl);
     if (!sortedOutcomes.length) continue;
 
     const [dominantOutcome, data] = sortedOutcomes[0];
     const voteCount = data.walletIds.size;
 
-    // 🔹 Skip if fewer wallets than minimum required
+    // 🔹 Skip picks that don't meet the minimum wallet threshold
     if (voteCount < MIN_WALLETS_FOR_SIGNAL) continue;
 
     // Compute confidence
@@ -669,13 +652,29 @@ async function rebuildWalletLivePicks() {
       }
     }
 
-    // 4️⃣a Update live pick with resolved outcome if all wallets have outcomes
+    // 4️⃣a Merge with existing wallet_live_picks for display/PNL continuity
+    const { data: existing } = await supabase
+      .from("wallet_live_picks")
+      .select("*")
+      .eq("market_id", entry.market_id);
+
+    if (existing?.length) {
+      const exPick = existing.find(e => e.picked_outcome === dominantOutcome);
+      if (exPick) {
+        exPick.wallets?.forEach(w => data.walletIds.add(w));
+        data.totalPnl += Number(exPick.pnl || 0);
+      }
+    }
+
+    // 4️⃣b Update resolved outcome if all contributing wallets have outcomes
     const resolvedOutcomes = signals.filter(
-      s => s.market_id === entry.market_id && s.picked_outcome === dominantOutcome && s.outcome !== "Pending"
+      s => s.market_id === entry.market_id &&
+           s.picked_outcome === dominantOutcome &&
+           s.outcome !== "Pending"
     );
 
     const resolved = resolvedOutcomes.length === voteCount
-      ? resolvedOutcomes[0].resolved_outcome // all wallets resolved
+      ? resolvedOutcomes[0].resolved_outcome
       : null;
 
     finalLivePicks.push({
@@ -692,7 +691,7 @@ async function rebuildWalletLivePicks() {
     });
   }
 
-  // 5️⃣ Upsert merged live picks
+  // 5️⃣ Upsert final live picks
   for (const pick of finalLivePicks) {
     await supabase
       .from("wallet_live_picks")

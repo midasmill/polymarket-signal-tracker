@@ -173,50 +173,90 @@ for (const sig of signals) {
 }
 
 /* ===========================
-   Resolve Markets
+   Resolve Markets (Fixed)
 =========================== */
 async function resolveMarkets() {
-  const { data: pending } = await supabase
+  // 1️⃣ Fetch all signals linked to events with a resolved outcome
+  const { data: signals } = await supabase
     .from("signals")
     .select("*")
-    .eq("outcome", "Pending")
     .not("event_slug", "is", null);
 
-  if (!pending?.length) return;
+  if (!signals?.length) return;
 
-  for (const sig of pending) {
-    const market = await fetchMarket(sig.event_slug);
-    if (!market) continue;
+  // 2️⃣ Group signals by event_slug
+  const signalsByEvent = signals.reduce((acc, sig) => {
+    if (!acc[sig.event_slug]) acc[sig.event_slug] = [];
+    acc[sig.event_slug].push(sig);
+    return acc;
+  }, {});
 
-    // Skip if no outcome yet
-    if (!market.outcome) continue;
-
+  for (const [eventSlug, sigs] of Object.entries(signalsByEvent)) {
+    const market = await fetchMarket(eventSlug);
+    if (!market || !market.outcome) continue; // skip if no outcome yet
     const winningOutcome = market.outcome;
-    const result = sig.picked_outcome === winningOutcome ? "WIN" : "LOSS";
 
-    // Update signals table
-    await supabase
-      .from("signals")
-      .update({
-        outcome: result,
-        resolved_outcome: winningOutcome,
-        outcome_at: new Date()
-      })
-      .eq("id", sig.id);
+    for (const sig of sigs) {
+      const result = sig.picked_outcome === winningOutcome ? "WIN" : "LOSS";
 
-    // Update wallet_live_picks table
-    await supabase
-      .from("wallet_live_picks")
-      .update({
-        outcome: result,
-        resolved_outcome: winningOutcome,
-        result_sent_at: new Date()
-      })
-      .eq("market_id", sig.market_id)
-      .eq("picked_outcome", sig.picked_outcome);
+      // 3️⃣ Update signals table
+      await supabase
+        .from("signals")
+        .update({
+          outcome: result,
+          resolved_outcome: winningOutcome,
+          outcome_at: new Date()
+        })
+        .eq("id", sig.id);
+
+      // 4️⃣ Upsert/update wallet_live_picks table safely
+      //    Aggregate vote_count & wallets array if multiple wallets picked same outcome
+      const { data: existingPick } = await supabase
+        .from("wallet_live_picks")
+        .select("*")
+        .eq("market_id", sig.market_id)
+        .eq("picked_outcome", sig.picked_outcome)
+        .single()
+        .catch(() => ({ data: null }));
+
+      if (existingPick) {
+        // Update existing row
+        const updatedWallets = Array.from(new Set([...existingPick.wallets, sig.wallet_id]));
+        await supabase
+          .from("wallet_live_picks")
+          .update({
+            vote_count: updatedWallets.length,
+            wallets: updatedWallets,
+            outcome: result,
+            resolved_outcome: winningOutcome,
+            result_sent_at: new Date()
+          })
+          .eq("id", existingPick.id);
+      } else {
+        // Insert new row
+        await supabase
+          .from("wallet_live_picks")
+          .insert({
+            wallet_id: sig.wallet_id,
+            market_id: sig.market_id,
+            picked_outcome: sig.picked_outcome,
+            side: sig.side,
+            pnl: sig.pnl,
+            outcome: result,
+            resolved_outcome: winningOutcome,
+            vote_count: 1,
+            wallets: [sig.wallet_id],
+            market_name: sig.market_name,
+            event_slug: sig.event_slug,
+            fetched_at: new Date(),
+            result_sent_at: new Date(),
+            signal_sent_at: sig.signal_sent_at
+          });
+      }
+    }
   }
 
-  console.log(`✅ Markets resolved and signals updated`);
+  console.log(`✅ All markets resolved and wallet_live_picks updated`);
 }
 
 /* ===========================

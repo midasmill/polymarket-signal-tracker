@@ -129,9 +129,6 @@ function getConfidenceEmoji(count) {
   return "";
 }
 
-/* ===========================
-   Auto-Resolve Pending Signals (Incremental)
-=========================== */
 async function autoResolvePendingSignals() {
   // 1️⃣ Fetch all pending signals
   const { data: pendingSignals, error: fetchError } = await supabase
@@ -148,15 +145,25 @@ async function autoResolvePendingSignals() {
 
   let resolvedCount = 0;
 
+  // Group signals by market & outcome to count votes
+  const voteMap = new Map();
+  for (const sig of pendingSignals) {
+    const key = `${sig.market_id}||${sig.picked_outcome}`;
+    if (!voteMap.has(key)) voteMap.set(key, { walletIds: new Set(), signals: [] });
+    const entry = voteMap.get(key);
+    entry.walletIds.add(sig.wallet_id);
+    entry.signals.push(sig);
+  }
+
   for (const sig of pendingSignals) {
     try {
       const market = await fetchMarket(sig.event_slug);
-      if (!market || !market.outcome) continue; // skip unresolved markets
+      if (!market || !market.outcome) continue;
 
       const winningOutcome = market.outcome;
       const result = sig.picked_outcome === winningOutcome ? "WIN" : "LOSS";
 
-      // 2️⃣ Update the signal
+      // 2️⃣ Update the signal regardless of vote count
       const { error: updateSignalError } = await supabase
         .from("signals")
         .update({
@@ -171,13 +178,16 @@ async function autoResolvePendingSignals() {
         continue;
       }
 
-      // 3️⃣ Update or insert wallet_live_picks
+      // 3️⃣ Only update/insert wallet_live_picks if vote count >= MIN_WALLETS_FOR_SIGNAL
+      const voteEntry = voteMap.get(`${sig.market_id}||${sig.picked_outcome}`);
+      if (voteEntry.walletIds.size < MIN_WALLETS_FOR_SIGNAL) continue;
+
       const { data: existingPick, error: existingError } = await supabase
         .from("wallet_live_picks")
         .select("*")
         .eq("market_id", sig.market_id)
         .eq("picked_outcome", sig.picked_outcome)
-        .maybeSingle(); // returns null if no row
+        .maybeSingle();
 
       if (existingError) {
         console.error(`❌ Error fetching wallet_live_pick for market ${sig.market_id}:`, existingError.message);
@@ -186,7 +196,7 @@ async function autoResolvePendingSignals() {
 
       if (existingPick) {
         // Merge wallet IDs and update outcome
-        const updatedWallets = Array.from(new Set([...(existingPick.wallets || []), sig.wallet_id]));
+        const updatedWallets = Array.from(new Set([...(existingPick.wallets || []), ...voteEntry.walletIds]));
         const { error: updatePickError } = await supabase
           .from("wallet_live_picks")
           .update({
@@ -206,23 +216,19 @@ async function autoResolvePendingSignals() {
         const { error: insertPickError } = await supabase
           .from("wallet_live_picks")
           .insert({
-            wallet_id: sig.wallet_id,
             market_id: sig.market_id,
             picked_outcome: sig.picked_outcome,
-            side: sig.side || null,
-            pnl: sig.pnl || 0,
+            vote_count: voteEntry.walletIds.size,
+            wallets: Array.from(voteEntry.walletIds),
             outcome: result,
             resolved_outcome: winningOutcome,
-            vote_count: 1,
-            wallets: [sig.wallet_id],
-            market_name: sig.market_name,
-            event_slug: sig.event_slug,
             fetched_at: new Date(),
-            signal_sent_at: sig.signal_sent_at || null
+            market_name: sig.market_name,
+            event_slug: sig.event_slug
           });
 
         if (insertPickError) {
-          console.error(`❌ Failed inserting wallet_live_pick for signal ${sig.id}:`, insertPickError.message);
+          console.error(`❌ Failed inserting wallet_live_pick for market ${sig.market_id}:`, insertPickError.message);
           continue;
         }
       }

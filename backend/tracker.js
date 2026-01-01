@@ -175,8 +175,7 @@ async function autoResolvePendingSignals() {
           vote_count: updatedWallets.length,
           wallets: updatedWallets,
           outcome: result,
-          resolved_outcome: winningOutcome,
-          result_sent_at: new Date()
+          resolved_outcome: winningOutcome
         })
         .eq("id", existingPick.id);
     } else {
@@ -195,7 +194,6 @@ async function autoResolvePendingSignals() {
           market_name: sig.market_name,
           event_slug: sig.event_slug,
           fetched_at: new Date(),
-          result_sent_at: new Date(),
           signal_sent_at: sig.signal_sent_at
         });
     }
@@ -304,8 +302,7 @@ async function resolveMarkets() {
               vote_count: updatedWallets.length,
               wallets: updatedWallets,
               outcome: result,
-              resolved_outcome: winningOutcome,
-              result_sent_at: new Date()
+              resolved_outcome: winningOutcome
             })
             .eq("id", existingPick.id);
         } else {
@@ -325,7 +322,6 @@ async function resolveMarkets() {
               market_name: sig.market_name,
               event_slug: sig.event_slug,
               fetched_at: new Date(),
-              result_sent_at: new Date(),
               signal_sent_at: sig.signal_sent_at
             });
         }

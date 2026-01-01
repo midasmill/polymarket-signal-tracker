@@ -795,11 +795,10 @@ async function trackWallet(wallet, forceRebuild = false) {
 
 /* ===========================
    Rebuild Wallet Live Picks
-   (Batched + Concurrent + Skip Invalid Slugs + Canonical Slug Fix)
+   (Filtered by Vote Threshold + Canonical Slugs + Batched)
 =========================== */
 const invalidMarketSlugs = new Map(); // slug => reason
 
-// Helper: Extract resolved outcome from Polymarket market
 function getResolvedOutcomeFromMarket(market) {
   if (!market || !market.closed || !market.outcomes || !market.outcomePrices) return null;
   try {
@@ -813,7 +812,7 @@ function getResolvedOutcomeFromMarket(market) {
   }
 }
 
-// --- Wallet filter ---
+// Wallet eligibility
 function checkWalletCriteria(wallet) {
   const MIN_NET_PNL = 1000;
   const MAX_DAILY_LOSS_PERCENT = 0.3;
@@ -865,12 +864,12 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   }
   if (!activeWallets.length) return console.log("⚠️ No active wallets");
 
-  // 2️⃣ Fetch signals
+  // 2️⃣ Fetch eligible signals
   const { data: signals, error } = await supabase
     .from("signals")
     .select("wallet_id, market_id, market_name, event_slug, picked_outcome, pnl, resolved_outcome")
     .in("wallet_id", activeWallets.map(w => w.id))
-    .gte("pnl", 1000);
+    .gte("pnl", 1000); // only picks over $1000
 
   if (error) return console.error("❌ Failed fetching signals:", error.message);
   if (!signals?.length) return console.log("⚠️ No signals for active wallets");
@@ -926,7 +925,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   const marketIds = Array.from(marketNetPickMap.keys());
   const { data: existingPicks } = await supabase.from("wallet_live_picks").select("*").in("market_id", marketIds);
 
-  // 6️⃣ Fetch canonical slugs from Polymarket concurrently
+  // 6️⃣ Fetch canonical slugs concurrently
   const marketResolvedMap = {};
   const marketIdToSlug = new Map();
   const BATCH_SIZE = 50;
@@ -944,7 +943,6 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
         slug = market.slug; // canonical slug
         marketIdToSlug.set(marketId, slug);
 
-        // update signals with canonical slug
         await supabase.from("signals")
           .update({ event_slug: slug })
           .eq("market_id", marketId)
@@ -963,7 +961,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     })
   );
 
-  // 7️⃣ Build final picks & signals batch
+  // 7️⃣ Build final picks & signals batch (vote threshold enforced)
   const finalLivePicks = [];
   const signalsToUpsert = [];
 
@@ -973,6 +971,8 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 
     const [dominantOutcome, data] = sortedOutcomes[0];
     const voteCount = data.walletIds.size;
+
+    // ✅ Skip picks below threshold BEFORE upsert
     if (voteCount < MIN_WALLETS_FOR_SIGNAL) continue;
 
     const existing = existingPicks?.find(e => e.market_id === market_id && e.picked_outcome === dominantOutcome);
@@ -1001,20 +1001,21 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     }
   }
 
-  if (!finalLivePicks.length) return;
+  if (!finalLivePicks.length) return console.log("⚠️ No picks above vote threshold");
 
-  // 8️⃣ Remove old picks below threshold
-  await supabase.from("wallet_live_picks").delete()
-    .in("market_id", finalLivePicks.map(p => p.market_id))
+  // 8️⃣ Delete any lingering picks below threshold
+  await supabase.from("wallet_live_picks")
+    .delete()
     .lt("vote_count", MIN_WALLETS_FOR_SIGNAL);
 
   // 9️⃣ Batch upsert wallet_live_picks
   for (let i = 0; i < finalLivePicks.length; i += BATCH_SIZE) {
     const batch = finalLivePicks.slice(i, i + BATCH_SIZE);
-    await supabase.from("wallet_live_picks").upsert(batch, { onConflict: ["market_id", "picked_outcome"] });
+    await supabase.from("wallet_live_picks")
+      .upsert(batch, { onConflict: ["market_id", "picked_outcome"] });
   }
 
-  // 🔟 Batch upsert signals
+  // 🔟 Batch upsert resolved signals
   if (signalsToUpsert.length) {
     const uniqueSignals = [];
     const seen = new Set();
@@ -1028,7 +1029,8 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 
     for (let i = 0; i < uniqueSignals.length; i += BATCH_SIZE) {
       const batch = uniqueSignals.slice(i, i + BATCH_SIZE);
-      await supabase.from("signals").upsert(batch, { onConflict: ["wallet_id", "market_id"] });
+      await supabase.from("signals")
+        .upsert(batch, { onConflict: ["wallet_id", "market_id"] });
     }
   }
 

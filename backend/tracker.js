@@ -391,7 +391,7 @@ async function trackWallet(wallet) {
   }
 
   // 1️⃣ Fetch positions
-  const positions = await fetchWalletPositions(proxyWallet);
+  const positions = async function fetchWalletActivities(proxyWallet);
   console.log(`[TRACK] Wallet ${wallet.id} fetched ${positions.length} activities`);
   if (!positions?.length) return;
 

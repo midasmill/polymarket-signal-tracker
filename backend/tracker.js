@@ -243,13 +243,19 @@ async function autoResolvePendingSignals() {
 }
 
 /* ===========================
-   Fetch Market (Includes Closed + Resolved)
+   Fetch Market (Includes Closed + Resolved) with TTL Cache
 =========================== */
+const MARKET_CACHE_TTL = 5 * 60 * 1000; // 5 minutes TTL
+
 async function fetchMarket(eventSlug, bypassCache = false) {
   if (!eventSlug) return null;
 
+  // Check cache with TTL
   if (!bypassCache && marketCache.has(eventSlug)) {
-    return marketCache.get(eventSlug);
+    const cached = marketCache.get(eventSlug);
+    if (Date.now() - cached.fetchedAt < MARKET_CACHE_TTL) {
+      return cached.market;
+    }
   }
 
   try {
@@ -262,27 +268,43 @@ async function fetchMarket(eventSlug, bypassCache = false) {
         },
       }
     );
-    if (!res.ok) return null;
+
+    if (!res.ok) {
+      console.error(`❌ Failed to fetch market ${eventSlug}: HTTP ${res.status}`);
+      return null;
+    }
 
     const market = await res.json();
 
     // Derive outcome for closed auto-resolved markets
-    if (
-      !market.outcome &&
-      market.closed &&
-      market.outcomePrices &&
-      market.outcomes
-    ) {
-      const prices = JSON.parse(market.outcomePrices);
-      const outcomes = JSON.parse(market.outcomes);
+    if (!market.outcome && market.closed && market.outcomePrices && market.outcomes) {
+      let prices = [];
+      let outcomes = [];
 
-      const winnerIndex = prices.findIndex(p => Number(p) === 1);
+      try {
+        prices = JSON.parse(market.outcomePrices || '[]');
+        outcomes = JSON.parse(market.outcomes || '[]');
+      } catch (err) {
+        console.error(`❌ Failed to parse outcomePrices/outcomes for ${eventSlug}:`, err.message);
+      }
+
+      // First try: price === 1
+      let winnerIndex = prices.findIndex(p => Number(p) === 1);
+
+      // Fallback: pick outcome with highest price
+      if (winnerIndex === -1 && prices.length && outcomes.length) {
+        const maxPrice = Math.max(...prices.map(p => Number(p)));
+        winnerIndex = prices.findIndex(p => Number(p) === maxPrice);
+      }
+
       if (winnerIndex !== -1) {
         market.outcome = outcomes[winnerIndex];
       }
     }
 
-    marketCache.set(eventSlug, market);
+    // Cache with timestamp
+    marketCache.set(eventSlug, { market, fetchedAt: Date.now() });
+
     return market;
   } catch (err) {
     console.error(`❌ Failed to fetch market ${eventSlug}:`, err.message);

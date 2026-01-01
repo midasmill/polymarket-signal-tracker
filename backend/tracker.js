@@ -741,7 +741,6 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       await trackWallet(wallet, true); // force rebuild
     }
 
-    // Refetch signals after rebuild
     const res = await supabase
       .from("signals")
       .select(`
@@ -767,21 +766,24 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 
   if (!signals.length) return;
 
-  // 3️⃣ Compute each wallet's net pick per event (Pending signals only)
+  // 3️⃣ Compute each wallet's net pick per event (ALL signals)
   const walletNetPickMap = new Map();
   for (const sig of signals) {
-    if (sig.outcome !== "Pending") continue;
     const key = `${sig.wallet_id}||${sig.event_slug}`;
     if (!walletNetPickMap.has(key)) {
       walletNetPickMap.set(key, {
         picks: {},
         market_id: sig.market_id,
         market_name: sig.market_name,
-        event_slug: sig.event_slug
+        event_slug: sig.event_slug,
+        resolved_outcome: sig.resolved_outcome || null
       });
     }
     const entry = walletNetPickMap.get(key);
     entry.picks[sig.picked_outcome] = (entry.picks[sig.picked_outcome] || 0) + Number(sig.pnl || 0);
+
+    // Keep resolved outcome if available
+    if (sig.resolved_outcome) entry.resolved_outcome = sig.resolved_outcome;
   }
 
   // 4️⃣ Determine each wallet's dominant pick
@@ -796,7 +798,8 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       market_name: data.market_name,
       event_slug: data.event_slug,
       picked_outcome: sorted[0][0],
-      pnl: sorted[0][1]
+      pnl: sorted[0][1],
+      resolved_outcome: data.resolved_outcome
     });
   }
 
@@ -816,10 +819,14 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     }
     const entry = marketNetPickMap.get(marketKey);
     if (!entry.outcomes[pick.picked_outcome]) {
-      entry.outcomes[pick.picked_outcome] = { totalPnl: 0, walletIds: new Set() };
+      entry.outcomes[pick.picked_outcome] = { totalPnl: 0, walletIds: new Set(), resolved_outcome: pick.resolved_outcome };
     }
-    entry.outcomes[pick.picked_outcome].totalPnl += pick.pnl;
-    entry.outcomes[pick.picked_outcome].walletIds.add(pick.wallet_id);
+    const outcomeData = entry.outcomes[pick.picked_outcome];
+    outcomeData.totalPnl += pick.pnl;
+    outcomeData.walletIds.add(pick.wallet_id);
+    if (!outcomeData.resolved_outcome && pick.resolved_outcome) {
+      outcomeData.resolved_outcome = pick.resolved_outcome;
+    }
   }
 
   // 6️⃣ Build final live picks applying MIN_WALLETS_FOR_SIGNAL
@@ -832,13 +839,11 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 
     const [dominantOutcome, data] = sortedOutcomes[0];
     const voteCount = data.walletIds.size;
-
     if (voteCount < MIN_WALLETS_FOR_SIGNAL) continue;
 
     // Compute confidence
     let confidence = 1;
-    for (const [stars, threshold] of Object.entries(CONFIDENCE_THRESHOLDS)
-      .sort((a, b) => b[1] - a[1])) {
+    for (const [stars, threshold] of Object.entries(CFIDENCE_THRESHOLDS).sort((a, b) => b[1] - a[1])) {
       if (voteCount >= threshold) {
         confidence = stars.length;
         break;
@@ -856,24 +861,15 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       if (exPick) {
         exPick.wallets?.forEach(w => data.walletIds.add(w));
         data.totalPnl += Number(exPick.pnl || 0);
+        if (!data.resolved_outcome && exPick.resolved_outcome) {
+          data.resolved_outcome = exPick.resolved_outcome;
+        }
       }
     }
 
-    // Fetch market to sync resolved outcome
+    // Fetch market to sync resolved outcome if not yet set
     const market = await fetchMarket(entry.event_slug);
-
-    const resolvedOutcomes = signals.filter(
-      s => s.market_id === entry.market_id &&
-           s.picked_outcome === dominantOutcome &&
-           s.outcome !== "Pending"
-    );
-
-    let resolved = null;
-    if (resolvedOutcomes.length > 0 && resolvedOutcomes.every(s => s.outcome !== "Pending")) {
-      resolved = resolvedOutcomes[0].resolved_outcome;
-    } else if (market?.outcome) {
-      resolved = market.outcome;
-    }
+    const resolved = data.resolved_outcome || market?.outcome || null;
 
     finalLivePicks.push({
       market_id: entry.market_id,
@@ -889,7 +885,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     });
   }
 
-  // 7️⃣ Upsert final picks in parallel for performance
+  // 7️⃣ Upsert final picks in parallel
   await Promise.allSettled(finalLivePicks.map(pick =>
     supabase
       .from("wallet_live_picks")

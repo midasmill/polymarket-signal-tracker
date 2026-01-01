@@ -818,9 +818,26 @@ Signal Sent: ${new Date().toLocaleString("en-US", { timeZone: TIMEZONE })}`;
 }
 
 /* ===========================
-   Tracker Loop (Enhanced)
+   Tracker Loop (Enhanced + Safe Concurrency)
 =========================== */
+
 let isTrackerRunning = false;
+
+/**
+ * Helper: run async tasks in batches
+ */
+async function runInBatches(items, batchSize, fn) {
+  for (let i = 0; i < items.length; i += batchSize) {
+    const batch = items.slice(i, i + batchSize);
+    const results = await Promise.allSettled(batch.map(fn));
+    results.forEach((r, idx) => {
+      if (r.status === "rejected") {
+        console.error(`❌ Batch item ${i + idx} failed:`, r.reason);
+      }
+    });
+  }
+}
+
 async function trackerLoop() {
   if (isTrackerRunning) return;
   isTrackerRunning = true;
@@ -829,30 +846,36 @@ async function trackerLoop() {
     // 1️⃣ Fetch all active wallets
     const { data: wallets, error: walletsError } = await supabase
       .from("wallets")
-      .select("*");
+      .select("*")
+      .eq("paused", false)
+      .gte("win_rate", WIN_RATE_THRESHOLD);
 
     if (walletsError) {
       console.error("❌ Failed fetching wallets:", walletsError.message);
       return;
     }
-    if (!wallets?.length) return;
+    if (!wallets?.length) {
+      console.log("⚠ No active wallets found, skipping tracker loop.");
+      return;
+    }
 
-    // 2️⃣ Track wallets concurrently
-    await Promise.allSettled(wallets.map(trackWallet));
+    // 2️⃣ Track wallets in batches to avoid overloading API
+    await runInBatches(wallets, 10, trackWallet); // batch size = 10
 
-    // 3️⃣ Rebuild live picks from updated signals
+    // 3️⃣ Rebuild live picks (auto-rebuild if signals are empty)
     await rebuildWalletLivePicks();
 
+    // 4️⃣ Resolve markets
     await resolveMarkets(); 
 
-    // 4️⃣ Process and send signals
+    // 5️⃣ Process and send signals
     await processAndSendSignals();
 
-    // 5️⃣ Update wallet metrics (win_rate, paused, daily losses)
+    // 6️⃣ Update wallet metrics
     await updateWalletMetricsJS();
 
   } catch (err) {
-    console.error("❌ Tracker loop failed:", err.message);
+    console.error("❌ Tracker loop failed:", err);
   } finally {
     isTrackerRunning = false;
   }
@@ -864,11 +887,11 @@ async function trackerLoop() {
 async function main() {
   console.log("🚀 POLYMARKET TRACKER LIVE 🚀");
 
-  // 1️⃣ Initial fetch leaderboard and wallet tracking
+  // 1️⃣ Initial leaderboard & wallet tracking
   await fetchAndInsertLeaderboardWallets().catch(err => console.error(err));
   await trackerLoop();
 
-  // 2️⃣ Set continuous polling
+  // 2️⃣ Continuous polling
   setInterval(trackerLoop, POLL_INTERVAL);
 
   // 3️⃣ Daily cron for leaderboard refresh

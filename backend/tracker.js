@@ -795,7 +795,7 @@ async function trackWallet(wallet, forceRebuild = false) {
 
 /* ===========================
    Rebuild Wallet Live Picks
-   (Batched + Skip Invalid Slugs with Reason)
+   (Batched + Concurrent + Skip Invalid Slugs)
 =========================== */
 const invalidMarketSlugs = new Map(); // slug => reason
 
@@ -880,7 +880,12 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   for (const sig of signals) {
     const key = `${sig.wallet_id}||${sig.event_slug}`;
     if (!walletNetPickMap.has(key)) {
-      walletNetPickMap.set(key, { picks: {}, market_id: sig.market_id, resolved_outcome: sig.resolved_outcome || null, event_slug: sig.event_slug });
+      walletNetPickMap.set(key, {
+        picks: {},
+        market_id: sig.market_id,
+        resolved_outcome: sig.resolved_outcome || null,
+        event_slug: sig.event_slug
+      });
     }
     const entry = walletNetPickMap.get(key);
     entry.picks[sig.picked_outcome] = (entry.picks[sig.picked_outcome] || 0) + Number(sig.pnl || 0);
@@ -921,38 +926,33 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   const marketIds = Array.from(marketNetPickMap.keys());
   const { data: existingPicks } = await supabase.from("wallet_live_picks").select("*").in("market_id", marketIds);
 
-  // 6️⃣ Fetch market resolved outcomes & log skipped slugs with reason
+  // 6️⃣ Fetch market resolved outcomes concurrently & log skipped slugs
   const marketSlugs = [...new Set(Array.from(marketNetPickMap.values()).map(m => m.event_slug))];
   const marketResolvedMap = {};
 
   const { data: existingSkipped } = await supabase.from("skipped_markets").select("slug");
   const globallySkipped = new Set(existingSkipped?.map(m => m.slug) || []);
 
-  for (const slug of marketSlugs) {
-    if (invalidMarketSlugs.has(slug) || globallySkipped.has(slug)) continue;
-    try {
-      const market = await fetchMarket(slug);
-      if (!market) {
-        invalidMarketSlugs.set(slug, "404 Not Found");
-        await supabase.from("skipped_markets").insert({ slug, reason: "404 Not Found", fetched_at: new Date() }).catch(() => null);
-        continue;
-      }
-      const resolved = getResolvedOutcomeFromMarket(market);
-      if (!resolved) {
-        invalidMarketSlugs.set(slug, "Could not determine winner");
-        await supabase.from("skipped_markets").insert({ slug, reason: "Could not determine winner", fetched_at: new Date() }).catch(() => null);
-      } else {
+  await Promise.all(
+    marketSlugs.map(async slug => {
+      if (invalidMarketSlugs.has(slug) || globallySkipped.has(slug)) return;
+      try {
+        const market = await fetchMarket(slug);
+        if (!market) throw new Error("404 Not Found");
+        const resolved = getResolvedOutcomeFromMarket(market);
+        if (!resolved) throw new Error("Could not determine winner");
         marketResolvedMap[slug] = resolved;
+      } catch (err) {
+        invalidMarketSlugs.set(slug, err.message);
+        await supabase.from("skipped_markets").insert({ slug, reason: err.message, fetched_at: new Date() }).catch(() => null);
       }
-    } catch (err) {
-      invalidMarketSlugs.set(slug, err.message);
-      await supabase.from("skipped_markets").insert({ slug, reason: err.message, fetched_at: new Date() }).catch(() => null);
-    }
-  }
+    })
+  );
 
-  // 7️⃣ Build final picks & batch signals
+  // 7️⃣ Build final picks & prepare signals batch
   const finalLivePicks = [];
   const signalsToUpsert = [];
+
   for (const [market_id, entry] of marketNetPickMap.entries()) {
     const sortedOutcomes = Object.entries(entry.outcomes).sort((a, b) => b[1].totalPnl - a[1].totalPnl);
     if (!sortedOutcomes.length) continue;
@@ -994,10 +994,12 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     .in("market_id", finalLivePicks.map(p => p.market_id))
     .lt("vote_count", MIN_WALLETS_FOR_SIGNAL);
 
-  // 9️⃣ Upsert final picks
-  await Promise.allSettled(finalLivePicks.map(p =>
-    supabase.from("wallet_live_picks").upsert(p, { onConflict: ["market_id", "picked_outcome"] })
-  ));
+  // 9️⃣ Batch upsert wallet_live_picks
+  const BATCH_SIZE = 50;
+  for (let i = 0; i < finalLivePicks.length; i += BATCH_SIZE) {
+    const batch = finalLivePicks.slice(i, i + BATCH_SIZE);
+    await supabase.from("wallet_live_picks").upsert(batch, { onConflict: ["market_id", "picked_outcome"] });
+  }
 
   // 🔟 Batch upsert signals
   if (signalsToUpsert.length) {
@@ -1010,11 +1012,20 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
         uniqueSignals.push(s);
       }
     }
-    await supabase.from("signals").upsert(uniqueSignals, { onConflict: ["wallet_id", "market_id"] });
+
+    for (let i = 0; i < uniqueSignals.length; i += BATCH_SIZE) {
+      const batch = uniqueSignals.slice(i, i + BATCH_SIZE);
+      await supabase.from("signals").upsert(batch, { onConflict: ["wallet_id", "market_id"] });
+    }
+  }
+
+  if (invalidMarketSlugs.size) {
+    console.warn("⚠️ Skipped markets:", Array.from(invalidMarketSlugs.entries()));
   }
 
   console.log(`✅ Wallet live picks rebuilt & batch synced (${finalLivePicks.length})`);
 }
+
 
 /* ===========================
    Fetch Wallet Activity (DATA-API)

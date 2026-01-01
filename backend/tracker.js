@@ -233,8 +233,17 @@ async function autoResolvePendingSignals() {
 /* ===========================
    Fetch Market (Includes Closed + Resolved)
 =========================== */
-const marketCache = new Map(); // ✅ Only declare once at the top
+const marketCache = new Map(); // ✅ Single cache for all markets
 
+/**
+ * Fetches a Polymarket market safely, with caching and auto-resolve for closed markets.
+ * @param {Object} params
+ * @param {string} params.event_slug
+ * @param {number|string} params.polymarket_id
+ * @param {number|string} params.market_id
+ * @param {boolean} bypassCache
+ * @returns {Object|null} market object
+ */
 async function fetchMarketSafe({ event_slug, polymarket_id, market_id }, bypassCache = false) {
   if (!event_slug && !polymarket_id && !market_id) return null;
 
@@ -244,6 +253,7 @@ async function fetchMarketSafe({ event_slug, polymarket_id, market_id }, bypassC
   }
 
   try {
+    // Construct URL
     let url = "";
     if (event_slug) url = `https://gamma-api.polymarket.com/markets/slug/${event_slug}`;
     else if (polymarket_id) url = `https://gamma-api.polymarket.com/markets/${polymarket_id}`;
@@ -267,22 +277,33 @@ async function fetchMarketSafe({ event_slug, polymarket_id, market_id }, bypassC
 
     const market = await res.json();
 
+    // Auto-resolve outcome for closed markets
     if (!market.outcome && market.closed && market.outcomePrices && market.outcomes) {
       try {
         let prices = market.outcomePrices;
         let outcomes = market.outcomes;
+
         if (typeof prices === "string") prices = JSON.parse(prices);
         if (typeof outcomes === "string") outcomes = JSON.parse(outcomes);
+
+        // Convert object to array if needed
         if (!Array.isArray(prices) && typeof prices === "object") prices = Object.values(prices);
+
         const winnerIndex = prices.findIndex(p => Number(p) === 1);
-        if (winnerIndex !== -1) market.outcome = outcomes[winnerIndex];
+        if (winnerIndex !== -1) {
+          market.outcome = outcomes[winnerIndex];
+        } else {
+          console.warn(`⚠️ Could not determine winner for ${cacheKey}`);
+        }
       } catch (err) {
         console.error(`❌ Failed to parse outcomes for ${cacheKey}:`, err.message);
       }
     }
 
+    // Cache and return
     marketCache.set(cacheKey, market);
     return market;
+
   } catch (err) {
     console.error(`❌ Failed to fetch market ${cacheKey}:`, err.message);
     return null;
@@ -922,36 +943,7 @@ async function safeInsert(table, rows) {
   return data || [];
 }
 
-// Cache Polymarket info to reduce repeated API calls
-const polymarketCache = new Map(); // event_slug -> { market_id, polymarket_id, market }
-
-async function fetchMarketSafe({ polymarket_id, event_slug, market_id }) {
-  if (polymarketCache.has(event_slug)) return polymarketCache.get(event_slug).market;
-
-  try {
-    let market;
-    if (polymarket_id) {
-      const res = await fetch(`https://gamma-api.polymarket.com/markets/${polymarket_id}`);
-      if (!res.ok) throw new Error("404");
-      market = await res.json();
-    } else if (event_slug) {
-      const res = await fetch(`https://gamma-api.polymarket.com/markets/slug/${event_slug}`);
-      if (!res.ok) throw new Error("404");
-      market = await res.json();
-    } else return null;
-
-    polymarketCache.set(event_slug, {
-      market_id: String(market.id),
-      polymarket_id: Number(market.id),
-      market
-    });
-
-    return market;
-  } catch (err) {
-    console.warn(`❌ Failed fetching market ${event_slug || polymarket_id}:`, err.message);
-    return null;
-  }
-}
+// ✅ Now we use the global fetchMarketSafe with caching and auto-resolve
 
 async function rebuildWalletLivePicks(forceRebuild = false) {
   const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "10", 10);
@@ -1034,7 +1026,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       outcomeData.resolved_outcome = pick.resolved_outcome;
   }
 
-  /* 6️⃣ Resolve markets */
+  /* 6️⃣ Resolve markets using global fetchMarketSafe */
   const marketResolvedMap = {};
   await Promise.all([...marketNetPickMap.entries()].map(async ([marketId, entry]) => {
     try {

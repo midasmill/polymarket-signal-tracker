@@ -630,7 +630,7 @@ async function fetchWalletActivities(proxyWallet, retries = 3) {
 }
 
 /* ===========================
-   Track Wallet (Net-Pick / Auto-Resolve Safe)
+   Track Wallet (Net-Pick / Auto-Resolve Safe + Warning)
 =========================== */
 async function trackWallet(wallet, forceRebuild = false) {
   const proxyWallet = wallet.polymarket_proxy_wallet;
@@ -740,15 +740,15 @@ async function trackWallet(wallet, forceRebuild = false) {
       event_slug: data.event_slug,
       picked_outcome,
       pnl,
-      side: side || "BUY",             // NOT NULL
-      signal: picked_outcome || "UNKNOWN", // NOT NULL
+      side: side || "BUY",                  // NOT NULL
+      signal: picked_outcome || "UNKNOWN",  // NOT NULL
       outcome,
       resolved_outcome: data.resolved_outcome ?? null,
       outcome_at: data.outcome_at ?? null,
       win_rate: wallet.win_rate,
       created_at: new Date(),
       event_start_at: null,
-      tx_hash: Array.from(data.tx_hashes)[0] || "UNKNOWN" // NOT NULL if needed
+      tx_hash: Array.from(data.tx_hashes)[0] || "UNKNOWN" // NOT NULL
     });
   }
 
@@ -778,7 +778,47 @@ async function trackWallet(wallet, forceRebuild = false) {
     console.error(`❌ Unexpected upsert error for wallet ${wallet.id}:`, err.message);
   }
 
-  // 7️⃣ Update wallet event exposure
+  // 7️⃣ Check for warning based on recent PnL or consecutive losses
+  const TWO_DAYS_AGO = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+
+  const { data: recentSignals = [] } = await supabase
+    .from("signals")
+    .select("pnl")
+    .eq("wallet_id", wallet.id)
+    .gte("created_at", TWO_DAYS_AGO);
+
+  const totalPnl = recentSignals.reduce((sum, s) => sum + Number(s.pnl || 0), 0);
+
+  const { data: lastSignals = [] } = await supabase
+    .from("signals")
+    .select("pnl")
+    .eq("wallet_id", wallet.id)
+    .order("created_at", { ascending: false })
+    .limit(10);
+
+  let consecutiveLosses = 0;
+  for (const sig of lastSignals) {
+    if ((sig.pnl || 0) < 0) consecutiveLosses++;
+    else break;
+  }
+
+  if (totalPnl < 0 || consecutiveLosses >= 3) {
+    const warningMessage = `Warning: totalPnL=${totalPnl.toFixed(2)}, consecutiveLosses=${consecutiveLosses}`;
+    await supabase
+      .from("wallets")
+      .update({ warning: warningMessage, warning_logged_at: new Date() })
+      .eq("id", wallet.id);
+
+    console.log(`⚠️ Wallet ${wallet.id} warning: ${warningMessage}`);
+  } else if (wallet.warning) {
+    // Clear warning if conditions no longer apply
+    await supabase
+      .from("wallets")
+      .update({ warning: null, warning_logged_at: null })
+      .eq("id", wallet.id);
+  }
+
+  // 8️⃣ Update wallet event exposure
   const affectedEvents = [...new Set(netSignals.map(s => s.event_slug))];
   for (const eventSlug of affectedEvents) {
     const totals = await getWalletOutcomeTotals(wallet.id, eventSlug);
@@ -804,7 +844,7 @@ async function trackWallet(wallet, forceRebuild = false) {
       });
   }
 
-  // 8️⃣ Auto-resolve pending signals
+  // 9️⃣ Auto-resolve pending signals
   await autoResolvePendingSignals();
 }
 

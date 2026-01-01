@@ -32,6 +32,18 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) throw new Error("Supabase keys 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 /* ===========================
+   🔥 START HTTP SERVER IMMEDIATELY
+=========================== */
+const PORT = process.env.PORT || 3000;
+
+http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("Polymarket tracker running\n");
+}).listen(PORT, "0.0.0.0", () => {
+  console.log(`✅ HTTP server listening on port ${PORT}`);
+});
+
+/* ===========================
    Global Crash Logger
 =========================== */
 process.on("unhandledRejection", err => console.error("🔥 Unhandled rejection:", err));
@@ -1511,12 +1523,6 @@ async function main() {
   // 4️⃣ Heartbeat log
   setInterval(() => console.log(`[HEARTBEAT] Tracker alive @ ${new Date().toISOString()}`), 60_000);
 
-  // 5️⃣ Simple HTTP server for health check
-  const PORT = process.env.PORT || 3000;
-  http.createServer((req, res) => {
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("Polymarket tracker running\n");
-  }).listen(PORT, () => console.log(`Tracker listening on port ${PORT}`));
 }
 
 main();

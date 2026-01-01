@@ -1097,36 +1097,51 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 }
 
 /* ===========================
-   Fetch Wallet Activity (DATA-API)
+   Fetch Wallet Activity (DATA-API, Robust)
 =========================== */
-async function fetchWalletPositions(proxyWallet) {
+async function fetchWalletPositions(proxyWallet, retries = 3, delayMs = 2000) {
   if (!proxyWallet) throw new Error("Proxy wallet required");
 
-  try {
-    const url = `https://data-api.polymarket.com/activity?limit=100&sortBy=TIMESTAMP&sortDirection=DESC&user=${proxyWallet}`;
-    const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+  const url = `https://data-api.polymarket.com/activity?limit=100&sortBy=TIMESTAMP&sortDirection=DESC&user=${proxyWallet}`;
 
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(url, {
+        headers: {
+          "User-Agent": "Polymarket-Tracker/1.0",
+          "Accept": "application/json"
+        },
+        timeout: 10000 // 10s timeout
+      });
+
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+
+      const data = await res.json();
+      if (!Array.isArray(data)) return [];
+
+      // Map API data to tracker positions
+      return data.map(item => ({
+        asset: item.transactionHash || "",
+        conditionId: item.conditionId || "",
+        eventSlug: item.eventSlug || item.slug || "",
+        title: item.title || "",
+        slug: item.slug || "",
+        timestamp: item.timestamp || Math.floor(Date.now() / 1000),
+        side: item.side || "BUY",
+        cashPnl: Number(item.usdcSize ?? item.size ?? 0)
+      }));
+
+    } catch (err) {
+      console.warn(`⚠️ Attempt ${attempt} failed fetching activity for ${proxyWallet}: ${err.message}`);
+      if (attempt < retries) {
+        await new Promise(r => setTimeout(r, delayMs));
+        continue;
+      }
+      console.error(`❌ Activity fetch failed (fetchWalletPositions) for ${proxyWallet} after ${retries} attempts`);
+      return [];
     }
-
-    const data = await res.json();
-    if (!Array.isArray(data)) return [];
-
-    // Map API data to tracker positions
-    return data.map(item => ({
-      asset: item.transactionHash || "",       // original tx hash
-      conditionId: item.conditionId || "",    // market id
-      eventSlug: item.eventSlug || item.slug || "", // event slug
-      title: item.title || "",
-      slug: item.slug || "",
-      timestamp: item.timestamp || Math.floor(Date.now() / 1000),
-      side: item.side || "BUY",               // default to BUY if missing
-      cashPnl: Number(item.usdcSize ?? item.size ?? 0), // can adjust later
-    }));
-  } catch (err) {
-    console.error(`❌ Activity fetch failed (fetchWalletPositions) for ${proxyWallet}`, err.message);
-    return [];
   }
 }
 

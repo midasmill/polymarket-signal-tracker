@@ -850,19 +850,16 @@ async function trackWallet(wallet, forceRebuild = false) {
 
 /* ===========================
    Rebuild Wallet Live Picks
-   (Threshold-Safe + Batched + Concurrent + Robust)
+   (Threshold-Safe + Deduplicated + Batched + Robust)
 =========================== */
 
 const invalidMarketSlugs = new Map(); // slug => reason
 
-// Robust resolved outcome extraction
 function getResolvedOutcomeFromMarket(market) {
   if (!market || !market.closed || !market.outcomes || !market.outcomePrices) return null;
 
   try {
-    const outcomes = Array.isArray(market.outcomes)
-      ? market.outcomes
-      : JSON.parse(market.outcomes || "[]");
+    const outcomes = Array.isArray(market.outcomes) ? market.outcomes : JSON.parse(market.outcomes || "[]");
 
     let outcomePrices = market.outcomePrices;
     if (typeof outcomePrices === "string") outcomePrices = JSON.parse(outcomePrices);
@@ -882,7 +879,6 @@ function getResolvedOutcomeFromMarket(market) {
   }
 }
 
-// Determine side for signals
 function determineSide(pickedOutcome, marketName, eventSlug) {
   if (!pickedOutcome) return "BUY";
   if (/YES|NO|OVER|UNDER/i.test(pickedOutcome)) return pickedOutcome.toUpperCase();
@@ -891,10 +887,9 @@ function determineSide(pickedOutcome, marketName, eventSlug) {
   return "BUY";
 }
 
-// Safe Supabase helpers
 async function safeUpsert(table, rows, options = {}) {
+  if (!rows.length) return [];
   try {
-    if (!rows.length) return [];
     const { data, error } = await supabase.from(table).upsert(rows, options);
     if (error) console.error(`❌ Upsert failed into ${table}:`, error.message);
     return data;
@@ -905,8 +900,8 @@ async function safeUpsert(table, rows, options = {}) {
 }
 
 async function safeInsert(table, rows) {
+  if (!rows.length) return [];
   try {
-    if (!rows.length) return [];
     const { data, error } = await supabase.from(table).insert(rows);
     if (error) console.error(`❌ Insert failed into ${table}:`, error.message);
     return data;
@@ -916,7 +911,6 @@ async function safeInsert(table, rows) {
   }
 }
 
-// Main rebuild function
 async function rebuildWalletLivePicks(forceRebuild = false) {
   const MIN_WALLETS_FOR_SIGNAL = 2;
   const BATCH_SIZE = 50;
@@ -1016,7 +1010,6 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       if (!market) throw new Error("404 Not Found");
       slug = market.slug || slug;
 
-      // ✅ Update canonical slug safely
       await supabase.from("signals").update({ event_slug: slug }).eq("market_id", marketId);
 
       const resolved = getResolvedOutcomeFromMarket(market);
@@ -1082,21 +1075,42 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     }
   }
 
-  // 9️⃣ Batch upsert wallet_live_picks
-  for (let i = 0; i < finalLivePicks.length; i += BATCH_SIZE) {
-    const batch = finalLivePicks.slice(i, i + BATCH_SIZE);
+  // 9️⃣ Deduplicate wallet_live_picks by market_id + picked_outcome
+  const dedupedLivePicks = [];
+  const seenLive = new Set();
+  for (const pick of finalLivePicks) {
+    const key = `${pick.market_id}||${pick.picked_outcome}`;
+    if (!seenLive.has(key)) {
+      seenLive.add(key);
+      dedupedLivePicks.push(pick);
+    }
+  }
+
+  // 🔟 Deduplicate signals by wallet_id + market_id
+  const dedupedSignals = [];
+  const seenSignals = new Set();
+  for (const s of signalsToUpsert) {
+    const key = `${s.wallet_id}||${s.market_id}`;
+    if (!seenSignals.has(key)) {
+      seenSignals.add(key);
+      dedupedSignals.push(s);
+    }
+  }
+
+  // 1️⃣1️⃣ Batch upsert wallet_live_picks
+  for (let i = 0; i < dedupedLivePicks.length; i += BATCH_SIZE) {
+    const batch = dedupedLivePicks.slice(i, i + BATCH_SIZE);
     await safeUpsert("wallet_live_picks", batch, { onConflict: ["market_id", "picked_outcome"] });
   }
 
-  // 🔟 Batch upsert signals safely
-  const validSignals = signalsToUpsert.filter(s => s.wallet_id != null && s.market_id != null);
-  for (let i = 0; i < validSignals.length; i += BATCH_SIZE) {
-    const batch = validSignals.slice(i, i + BATCH_SIZE);
+  // 1️⃣2️⃣ Batch upsert signals
+  for (let i = 0; i < dedupedSignals.length; i += BATCH_SIZE) {
+    const batch = dedupedSignals.slice(i, i + BATCH_SIZE);
     await safeUpsert("signals", batch, { onConflict: ["wallet_id", "market_id"] });
   }
 
   if (invalidMarketSlugs.size) console.warn("⚠️ Skipped markets:", Array.from(invalidMarketSlugs.entries()));
-  console.log(`✅ Wallet live picks rebuilt & batch synced (${finalLivePicks.length})`);
+  console.log(`✅ Wallet live picks rebuilt & batch synced (${dedupedLivePicks.length})`);
 }
 
 /* ===========================

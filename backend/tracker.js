@@ -844,7 +844,7 @@ async function trackWallet(wallet, forceRebuild = false) {
 
 /* ===========================
    Rebuild Wallet Live Picks & Pending
-   (All Picks + Pending + Thresholded Dominant Picks)
+   (All Picks + Pending + Dominant Picks)
 =========================== */
 
 const invalidMarketSlugs = new Map(); // slug => reason
@@ -884,13 +884,6 @@ function determineSide(pickedOutcome, marketName, eventSlug) {
   return "BUY";
 }
 
-async function safeUpsert(table, rows, options = {}) {
-  if (!rows.length) return [];
-  const { data, error } = await supabase.from(table).upsert(rows, options);
-  if (error) console.error(`❌ Upsert failed into ${table}:`, error.message);
-  return data || [];
-}
-
 async function safeInsert(table, rows) {
   if (!rows.length) return [];
   const { data, error } = await supabase.from(table).insert(rows);
@@ -900,7 +893,6 @@ async function safeInsert(table, rows) {
 
 async function rebuildWalletLivePicks(forceRebuild = false) {
   const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "5", 10);
-  const BATCH_SIZE = 50;
 
   /* 1️⃣ Fetch wallets */
   const { data: wallets } = await supabase.from("wallets").select("id");
@@ -1013,14 +1005,9 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       });
     }
   }
+  await safeInsert("wallet_live_pending", finalPendingPicks);
 
-  for (let i = 0; i < finalPendingPicks.length; i += BATCH_SIZE) {
-    await safeUpsert("wallet_live_pending", finalPendingPicks.slice(i, i + BATCH_SIZE), {
-      onConflict: ["market_id", "picked_outcome"]
-    });
-  }
-
-  /* 8️⃣ Build wallet_live_picks (thresholded dominant picks) */
+  /* 8️⃣ Build wallet_live_picks (dominant picks) */
   const finalLivePicks = [];
   for (const [market_id, entry] of marketNetPickMap.entries()) {
     const sortedOutcomes = Object.entries(entry.outcomes).sort((a, b) => b[1].walletIds.size - a[1].walletIds.size);
@@ -1043,12 +1030,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       fetched_at: new Date()
     });
   }
-
-  for (let i = 0; i < finalLivePicks.length; i += BATCH_SIZE) {
-    await safeUpsert("wallet_live_picks", finalLivePicks.slice(i, i + BATCH_SIZE), {
-      onConflict: ["market_id", "picked_outcome"]
-    });
-  }
+  await safeInsert("wallet_live_picks", finalLivePicks);
 
   /* 9️⃣ Build signals */
   const signalsToUpsert = [];
@@ -1082,24 +1064,10 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       });
     });
   }
-
-  // Deduplicate signals by wallet + market
-  const seenSignals = new Set();
-  const dedupedSignals = signalsToUpsert.filter(s => {
-    const key = `${s.wallet_id}||${s.market_id}`;
-    if (seenSignals.has(key)) return false;
-    seenSignals.add(key);
-    return true;
-  });
-
-  for (let i = 0; i < dedupedSignals.length; i += BATCH_SIZE) {
-    await safeUpsert("signals", dedupedSignals.slice(i, i + BATCH_SIZE), {
-      onConflict: ["wallet_id", "market_id"]
-    });
-  }
+  await safeInsert("signals", signalsToUpsert);
 
   invalidMarketSlugs.clear();
-  console.log(`✅ Wallet live picks, pending, and signals rebuilt safely`);
+  console.log(`✅ Wallet live picks, pending, and signals rebuilt without constraints or batching`);
 }
 
 /* ===========================

@@ -844,7 +844,7 @@ async function trackWallet(wallet, forceRebuild = false) {
 
 /* ===========================
    Rebuild Wallet Live Picks & Pending
-   (All Picks + Pending + Thresholded Dominant Picks)
+   (All Picks + Pending + Thresholded Dominant Picks + Constraint Safe)
 =========================== */
 
 const invalidMarketSlugs = new Map(); // slug => reason
@@ -996,12 +996,13 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     }
   }));
 
-  /* 7️⃣ Build wallet_live_pending (all picks) */
+  /* 7️⃣ Build wallet_live_pending (all picks, PENDING included) */
   const finalPendingPicks = [];
   for (const [market_id, entry] of marketNetPickMap.entries()) {
     for (const [outcome, data] of Object.entries(entry.outcomes)) {
       const resolved = data.resolved_outcome || marketResolvedMap[market_id] || null;
       const outcomeStatus = resolved ? (outcome === resolved ? "WIN" : "LOSS") : "PENDING";
+      const resolvedOutcomeSafe = outcomeStatus === "PENDING" ? null : resolved;
 
       finalPendingPicks.push({
         market_id,
@@ -1009,14 +1010,13 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
         wallets: Array.from(data.walletIds),
         vote_count: Array.from(data.walletIds).length,
         pnl: data.totalPnl,
-        resolved_outcome: resolved,
+        resolved_outcome: resolvedOutcomeSafe,
         outcome: outcomeStatus,
         fetched_at: new Date()
       });
     }
   }
 
-  // Upsert wallet_live_pending
   for (let i = 0; i < finalPendingPicks.length; i += BATCH_SIZE) {
     await safeUpsert("wallet_live_pending", finalPendingPicks.slice(i, i + BATCH_SIZE), {
       onConflict: ["market_id", "picked_outcome"]
@@ -1034,6 +1034,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 
     const resolved = data.resolved_outcome || marketResolvedMap[market_id] || null;
     const outcomeStatus = resolved ? (dominantOutcome === resolved ? "WIN" : "LOSS") : "PENDING";
+    const resolvedOutcomeSafe = outcomeStatus === "PENDING" ? null : resolved;
 
     finalLivePicks.push({
       market_id,
@@ -1041,7 +1042,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       wallets: Array.from(data.walletIds),
       vote_count: Array.from(data.walletIds).length,
       pnl: data.totalPnl,
-      resolved_outcome: resolved,
+      resolved_outcome: resolvedOutcomeSafe,
       outcome: outcomeStatus,
       fetched_at: new Date()
     });
@@ -1056,6 +1057,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   invalidMarketSlugs.clear();
   console.log(`✅ Wallet live picks and pending rebuilt safely`);
 }
+
 
 /* ===========================
    Fetch Wallet Activity (DATA-API, Robust)

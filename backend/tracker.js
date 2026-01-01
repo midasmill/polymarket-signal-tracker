@@ -867,8 +867,15 @@ function getResolvedOutcomeFromMarket(market) {
   if (!market || !market.closed || !market.outcomes || !market.outcomePrices) return null;
   try {
     const outcomes = JSON.parse(market.outcomes);
-    const idx = market.outcomePrices.findIndex(p => Number(p) === 1);
+
+    // Normalize outcomePrices to an array (object or array)
+    const prices = Array.isArray(market.outcomePrices)
+      ? market.outcomePrices
+      : Object.values(market.outcomePrices || {});
+
+    const idx = prices.findIndex(p => Number(p) === 1);
     if (idx === -1) return null;
+
     return outcomes[idx];
   } catch (err) {
     console.error("❌ Failed parsing market outcomes:", err);
@@ -959,10 +966,9 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     const marketId = pick.market_id;
     let slug = pick.event_slug;
     try {
-      // Try fetch by slug first
       let market = await fetchMarket(slug);
 
-      // Fallback to numeric id
+      // fallback to numeric id
       if (!market && marketId) {
         const resp = await fetch(`https://gamma-api.polymarket.com/markets/${marketId}`);
         if (resp.ok) market = await resp.json();
@@ -974,7 +980,6 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       const polymarketId = market.id;
       const resolved = getResolvedOutcomeFromMarket(market) || null;
 
-      // ✅ Update signals with canonical slug and Polymarket ID
       await supabase
         .from("signals")
         .update({
@@ -985,7 +990,6 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
         .or(`market_id.eq.${marketId},event_slug.eq.${pick.event_slug}`)
         .catch(err => console.error("❌ Failed updating signals:", err.message));
 
-      // Cache for later
       if (marketId) marketResolvedMap[marketId] = resolved;
 
     } catch (err) {
@@ -1010,7 +1014,6 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     const voteCount = data.walletIds.size;
     const isHighConfidence = voteCount >= MIN_WALLETS_FOR_SIGNAL || confidence >= CONFIDENCE_THRESHOLD;
 
-    // ✅ Push all picks that meet threshold/min wallets
     if (isHighConfidence) {
       const existing = existingPicks?.find(e => e.market_id === market_id && e.picked_outcome === dominantOutcome);
       if (existing) {
@@ -1030,7 +1033,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       });
     }
 
-    // ✅ Always push signals, resolved or pending
+    // always push signals
     data.walletIds.forEach(wallet_id => {
       signalsToUpsert.push({
         wallet_id,
@@ -1081,6 +1084,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   if (invalidMarketSlugs.size) console.warn("⚠️ Skipped markets:", Array.from(invalidMarketSlugs.entries()));
   console.log(`✅ Wallet live picks rebuilt & batch synced (${finalLivePicks.length})`);
 }
+
 
 /* ===========================
    Fetch Wallet Activity (DATA-API)

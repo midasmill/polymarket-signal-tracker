@@ -1290,9 +1290,10 @@ Outcome: ${outcome} ${outcomeEmoji}`;
 }
 
 /* ===========================
-   Tracker Loop (Enhanced)
+   Tracker Loop (Enhanced, Safe)
 =========================== */
 let isTrackerRunning = false;
+
 async function trackerLoop() {
   if (isTrackerRunning) return;
   isTrackerRunning = true;
@@ -1315,17 +1316,40 @@ async function trackerLoop() {
     // 3️⃣ Rebuild live picks from updated signals
     await rebuildWalletLivePicks(true);
 
-    await forceResolvePendingMarkets();
-    
-    await resolveMarkets(); 
+    // 4️⃣ Force resolve pending markets safely
+    try {
+      await forceResolvePendingMarkets();
+    } catch (err) {
+      console.error("❌ Failed in forceResolvePendingMarkets:", err.message);
+    }
 
-    await processAndSendResults();
+    // 5️⃣ Resolve markets safely
+    try {
+      await resolveMarkets();
+    } catch (err) {
+      console.error("❌ Failed in resolveMarkets:", err.message);
+    }
 
-    // 4️⃣ Process and send signals
-    await processAndSendSignals();
+    // 6️⃣ Process and send results safely
+    try {
+      await processAndSendResults();
+    } catch (err) {
+      console.error("❌ Failed in processAndSendResults:", err.message);
+    }
 
-    // 5️⃣ Update wallet metrics (win_rate, paused, daily losses)
-    await updateWalletMetricsJS();
+    // 7️⃣ Process and send signals safely
+    try {
+      await processAndSendSignals();
+    } catch (err) {
+      console.error("❌ Failed in processAndSendSignals:", err.message);
+    }
+
+    // 8️⃣ Update wallet metrics safely
+    try {
+      await updateWalletMetricsJS();
+    } catch (err) {
+      console.error("❌ Failed in updateWalletMetricsJS:", err.message);
+    }
 
   } catch (err) {
     console.error("❌ Tracker loop failed:", err.message);
@@ -1333,6 +1357,7 @@ async function trackerLoop() {
     isTrackerRunning = false;
   }
 }
+
 
 /* ===========================
    Main Entry

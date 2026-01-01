@@ -145,6 +145,82 @@ function getConfidenceEmoji(count) {
 }
 
 /* ===========================
+   Auto-Resolve Pending Signals (Incremental)
+=========================== */
+async function autoResolvePendingSignals() {
+  // 1️⃣ Fetch all pending signals
+  const { data: pendingSignals } = await supabase
+    .from("signals")
+    .select("*")
+    .eq("outcome", "Pending");
+
+  if (!pendingSignals?.length) return;
+
+  for (const sig of pendingSignals) {
+    const market = await fetchMarket(sig.event_slug);
+    if (!market || !market.outcome) continue; // skip unresolved
+
+    const winningOutcome = market.outcome;
+    const result = sig.picked_outcome === winningOutcome ? "WIN" : "LOSS";
+
+    // 2️⃣ Update the signal
+    await supabase
+      .from("signals")
+      .update({
+        outcome: result,
+        resolved_outcome: winningOutcome,
+        outcome_at: new Date()
+      })
+      .eq("id", sig.id);
+
+    // 3️⃣ Update wallet_live_picks
+    const { data: existingPick } = await supabase
+      .from("wallet_live_picks")
+      .select("*")
+      .eq("market_id", sig.market_id)
+      .eq("picked_outcome", sig.picked_outcome)
+      .single()
+      .catch(() => ({ data: null }));
+
+    if (existingPick) {
+      const updatedWallets = Array.from(new Set([...existingPick.wallets, sig.wallet_id]));
+      await supabase
+        .from("wallet_live_picks")
+        .update({
+          vote_count: updatedWallets.length,
+          wallets: updatedWallets,
+          outcome: result,
+          resolved_outcome: winningOutcome,
+          result_sent_at: new Date()
+        })
+        .eq("id", existingPick.id);
+    } else {
+      await supabase
+        .from("wallet_live_picks")
+        .insert({
+          wallet_id: sig.wallet_id,
+          market_id: sig.market_id,
+          picked_outcome: sig.picked_outcome,
+          side: sig.side,
+          pnl: sig.pnl,
+          outcome: result,
+          resolved_outcome: winningOutcome,
+          vote_count: 1,
+          wallets: [sig.wallet_id],
+          market_name: sig.market_name,
+          event_slug: sig.event_slug,
+          fetched_at: new Date(),
+          result_sent_at: new Date(),
+          signal_sent_at: sig.signal_sent_at
+        });
+    }
+  }
+
+  console.log(`✅ Auto-resolved ${pendingSignals.length} pending signal(s)`);
+}
+
+
+/* ===========================
    Force Resolve Pending Markets
 =========================== */
 async function forceResolvePendingMarkets() {
@@ -534,56 +610,59 @@ async function trackWallet(wallet, forceRebuild = false) {
     });
   }
 
-  if (!netSignals.length) return;
+  if (netSignals.length) {
+    // 5️⃣ DELETE old signals for this wallet/event that are NOT the net pick
+    for (const sig of netSignals) {
+      await supabase
+        .from("signals")
+        .delete()
+        .eq("wallet_id", sig.wallet_id)
+        .eq("event_slug", sig.event_slug)
+        .neq("picked_outcome", sig.picked_outcome);
+    }
 
-  // 5️⃣ DELETE old signals for this wallet/event that are NOT the net pick
-  for (const sig of netSignals) {
-    await supabase
+    // 6️⃣ Upsert net signals safely
+    const { error } = await supabase
       .from("signals")
-      .delete()
-      .eq("wallet_id", sig.wallet_id)
-      .eq("event_slug", sig.event_slug)
-      .neq("picked_outcome", sig.picked_outcome);
-  }
-
-  // 6️⃣ Upsert net signals safely
-  const { error } = await supabase
-    .from("signals")
-    .upsert(netSignals, {
-      onConflict: ["wallet_id", "event_slug", "picked_outcome"]
-    });
-
-  if (error) {
-    console.error(`❌ Failed upserting signals for wallet ${wallet.id}:`, error.message);
-  } else {
-    console.log(`✅ Upserted ${netSignals.length} net signal(s) for wallet ${wallet.id}`);
-  }
-
-  // 7️⃣ Update wallet event exposure
-  const affectedEvents = [...new Set(netSignals.map(s => s.event_slug))];
-  for (const eventSlug of affectedEvents) {
-    const totals = await getWalletOutcomeTotals(wallet.id, eventSlug);
-    const entries = Object.entries(totals).sort((a, b) => b[1] - a[1]);
-    if (!entries.length) continue;
-
-    const [netOutcome, netAmount] = entries[0];
-    const secondAmount = entries[1]?.[1] ?? 0;
-    if (secondAmount > 0 && netAmount / secondAmount < 1.05) continue;
-
-    const marketId = netSignals.find(s => s.event_slug === eventSlug)?.market_id || null;
-
-    await supabase
-      .from("wallet_event_exposure")
-      .upsert({
-        wallet_id: wallet.id,
-        event_slug: eventSlug,
-        market_id: marketId,
-        totals,
-        net_outcome: netOutcome,
-        net_amount: netAmount,
-        updated_at: new Date()
+      .upsert(netSignals, {
+        onConflict: ["wallet_id", "event_slug", "picked_outcome"]
       });
+
+    if (error) {
+      console.error(`❌ Failed upserting signals for wallet ${wallet.id}:`, error.message);
+    } else {
+      console.log(`✅ Upserted ${netSignals.length} net signal(s) for wallet ${wallet.id}`);
+    }
+
+    // 7️⃣ Update wallet event exposure
+    const affectedEvents = [...new Set(netSignals.map(s => s.event_slug))];
+    for (const eventSlug of affectedEvents) {
+      const totals = await getWalletOutcomeTotals(wallet.id, eventSlug);
+      const entries = Object.entries(totals).sort((a, b) => b[1] - a[1]);
+      if (!entries.length) continue;
+
+      const [netOutcome, netAmount] = entries[0];
+      const secondAmount = entries[1]?.[1] ?? 0;
+      if (secondAmount > 0 && netAmount / secondAmount < 1.05) continue;
+
+      const marketId = netSignals.find(s => s.event_slug === eventSlug)?.market_id || null;
+
+      await supabase
+        .from("wallet_event_exposure")
+        .upsert({
+          wallet_id: wallet.id,
+          event_slug: eventSlug,
+          market_id: marketId,
+          totals,
+          net_outcome: netOutcome,
+          net_amount: netAmount,
+          updated_at: new Date()
+        });
+    }
   }
+
+  // 8️⃣ Auto-resolve any pending signals after tracking
+  await autoResolvePendingSignals();
 }
 
 /* ===========================

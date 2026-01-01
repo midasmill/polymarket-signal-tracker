@@ -1049,27 +1049,31 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       fetched_at: new Date()
     });
 
+    // ✅ Determine outcome column: PENDING / WIN / LOSS
+    let outcome = "PENDING";
     if (resolved) {
-      data.walletIds.forEach(wallet_id => {
-        if (wallet_id && market_id) {
-          const side = determineSide(dominantOutcome, entry.market_name, entry.event_slug);
-          signalsToUpsert.push({
-            wallet_id,
-            market_id,
-            market_name: entry.market_name,
-            event_slug: entry.event_slug,
-            picked_outcome: dominantOutcome,
-            pnl: data.totalPnl,
-            resolved_outcome: resolved,
-            outcome: resolved,
-            signal: dominantOutcome,
-            side,
-            tx_hash: null,
-            win_rate: null
-          });
-        }
-      });
+      outcome = dominantOutcome === resolved ? "WIN" : "LOSS";
     }
+
+    data.walletIds.forEach(wallet_id => {
+      if (wallet_id && market_id) {
+        const side = determineSide(dominantOutcome, entry.market_name, entry.event_slug);
+        signalsToUpsert.push({
+          wallet_id,
+          market_id,
+          market_name: entry.market_name,
+          event_slug: entry.event_slug,
+          picked_outcome: dominantOutcome,
+          pnl: data.totalPnl,
+          resolved_outcome: resolved,
+          outcome,          // ✅ now shows PENDING/WIN/LOSS
+          signal: dominantOutcome,
+          side,
+          tx_hash: null,
+          win_rate: null
+        });
+      }
+    });
   }
 
   // 9️⃣ Deduplicate and batch upsert wallet_live_picks

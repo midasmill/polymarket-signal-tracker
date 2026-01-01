@@ -1066,9 +1066,9 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       continue;
 
     const resolved = data.resolved_outcome || marketResolvedMap[market_id] || null;
-    if (!resolved) continue;
 
-    const outcome = dominantOutcome === resolved ? "WIN" : "LOSS";
+    // ✅ Use "Pending" if market is not resolved yet
+    const outcome = resolved ? (dominantOutcome === resolved ? "WIN" : "LOSS") : "Pending";
 
     data.walletIds.forEach(wallet_id => {
       if (wallet_id && market_id) {
@@ -1082,7 +1082,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
           picked_outcome: dominantOutcome,
           pnl: data.totalPnl || MIN_TOTAL_PNL,
           resolved_outcome: resolved,
-          outcome,        // guaranteed WIN/LOSS
+          outcome,        // guaranteed WIN/LOSS/Pending
           signal: dominantOutcome,
           side,
           tx_hash: null,

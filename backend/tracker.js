@@ -216,42 +216,6 @@ async function autoResolvePendingSignals() {
   console.log(`✅ Auto-resolved ${resolvedCount} pending signal(s)`);
 }
 
-function normalizePickedOutcome(pickedOutcome, marketName, eventSlug, marketOutcomes) {
-  if (!pickedOutcome) return null;
-
-  const upperPick = pickedOutcome.toUpperCase();
-
-  // 1️⃣ If pickedOutcome is already one of the actual outcomes, return it
-  if (marketOutcomes?.includes(pickedOutcome)) return pickedOutcome;
-
-  // 2️⃣ Detect if this is a binary YES/NO market
-  const isBinaryYesNo = marketOutcomes?.length === 2 &&
-                        marketOutcomes.includes("YES") &&
-                        marketOutcomes.includes("NO");
-
-  if (isBinaryYesNo) {
-    // Keep YES/NO as-is
-    if (upperPick === "YES" || upperPick === "NO") return upperPick;
-    return pickedOutcome; // fallback
-  }
-
-  // 3️⃣ Map YES/NO, OVER/UNDER only for sports or over/under markets
-  if (upperPick === "YES" || upperPick === "OVER") return marketOutcomes?.[0] ?? pickedOutcome;
-  if (upperPick === "NO" || upperPick === "UNDER") return marketOutcomes?.[1] ?? pickedOutcome;
-
-  // 4️⃣ If it's a team pick for sports, match by name in marketName or eventSlug
-  const teams = marketName?.split(" vs. ").map(s => s.trim()) ||
-                eventSlug?.split(" vs. ").map(s => s.trim()) || [];
-  if (teams.length === 2) {
-    if (teams.includes(pickedOutcome)) return pickedOutcome;
-    if (upperPick === "HOME") return teams[0];
-    if (upperPick === "AWAY") return teams[1];
-  }
-
-  // 5️⃣ Fallback: return original
-  return pickedOutcome;
-}
-
 /* ===========================
    Fetch Market (Includes Closed + Resolved)
 =========================== */
@@ -909,17 +873,46 @@ function getResolvedOutcomeFromMarket(market) {
 }
 
 // --- Normalize picked_outcome ---
-function normalizePick(pickedOutcome, marketOutcomes) {
+function normalizePickedOutcome(pickedOutcome, marketName, eventSlug, marketOutcomes) {
   if (!pickedOutcome || !marketOutcomes?.length) return null;
-  pickedOutcome = pickedOutcome.toUpperCase();
+  const upperPick = pickedOutcome.toUpperCase();
 
-  if (pickedOutcome === "YES" || pickedOutcome === "OVER") return marketOutcomes[0]; // team1
-  if (pickedOutcome === "NO" || pickedOutcome === "UNDER") return marketOutcomes[1]; // team2
-
-  // Already a team name?
+  // 1️⃣ Exact match (case-sensitive)
   if (marketOutcomes.includes(pickedOutcome)) return pickedOutcome;
 
-  return pickedOutcome; // fallback
+  // 2️⃣ Case-insensitive match
+  const ciMatch = marketOutcomes.find(o => o.toUpperCase() === upperPick);
+  if (ciMatch) return ciMatch;
+
+  // 3️⃣ Auto-detect binary YES/NO markets
+  // If market has exactly 2 outcomes and they are not numeric or obvious team names
+  const isBinaryMarket = marketOutcomes.length === 2 &&
+                         !marketOutcomes.every(o => !isNaN(Number(o))) && // not both numbers
+                         !marketOutcomes.some(o => o.includes(" vs."));   // not team names
+  if (isBinaryMarket) {
+    if (upperPick === "YES" || upperPick === "NO") {
+      // Return the actual market outcome string preserving original casing
+      return marketOutcomes.find(o => o.toUpperCase() === upperPick) || marketOutcomes[0];
+    }
+    // fallback: pick first outcome as default
+    return marketOutcomes[0];
+  }
+
+  // 4️⃣ Over/Under markets
+  if (upperPick === "OVER" || upperPick === "YES") return marketOutcomes[0];
+  if (upperPick === "UNDER" || upperPick === "NO") return marketOutcomes[1];
+
+  // 5️⃣ Sports HOME/AWAY
+  const teams = marketName?.split(" vs. ").map(s => s.trim()) ||
+                eventSlug?.split(" vs. ").map(s => s.trim()) || [];
+  if (teams.length === 2) {
+    if (teams.includes(pickedOutcome)) return pickedOutcome;
+    if (upperPick === "HOME") return teams[0];
+    if (upperPick === "AWAY") return teams[1];
+  }
+
+  // 6️⃣ Fallback: return first market outcome
+  return marketOutcomes[0];
 }
 
 // --- Determine BUY/SELL side ---
@@ -1058,7 +1051,12 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL || data.totalPnl < MIN_TOTAL_PNL) continue;
 
     const marketOutcomes = entry.market_name?.split(" vs. ").map(s => s.trim()) || [];
-    const canonicalOutcome = normalizePick(dominantOutcome, marketOutcomes);
+    const canonicalOutcome = normalizePickedOutcome(
+      dominantOutcome,
+      entry.market_name,
+      entry.event_slug,
+      marketOutcomes
+    );
     if (!canonicalOutcome) continue;
 
     const resolved = data.resolved_outcome || marketResolvedMap[market_id] || null;
@@ -1090,7 +1088,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     });
   }
 
-  // 9️⃣ Build signals safely (canonical + constraint safe)
+  // 9️⃣ Build signals safely
   const signalsToUpsert = [];
   for (const [market_id, entry] of marketNetPickMap.entries()) {
     const sortedOutcomes = Object.entries(entry.outcomes).sort((a, b) => b[1].totalPnl - a[1].totalPnl);
@@ -1100,10 +1098,13 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL || data.totalPnl < MIN_TOTAL_PNL) continue;
 
     const marketOutcomes = entry.market_name?.split(" vs. ").map(s => s.trim()) || [];
-    const canonicalOutcome = normalizePick(dominantOutcome, marketOutcomes);
+    const canonicalOutcome = normalizePickedOutcome(
+      dominantOutcome,
+      entry.market_name,
+      entry.event_slug,
+      marketOutcomes
+    );
     const resolved = data.resolved_outcome || marketResolvedMap[market_id] || null;
-
-    // ✅ Skip invalid signals
     if (!canonicalOutcome || !resolved) continue;
 
     const outcome = canonicalOutcome === resolved ? "WIN" : "LOSS";

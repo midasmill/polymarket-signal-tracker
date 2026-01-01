@@ -14,14 +14,14 @@ const TIMEZONE = process.env.TIMEZONE || "America/New_York";
 
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || "30000", 10);
 const WIN_RATE_THRESHOLD = parseInt(process.env.WIN_RATE_THRESHOLD || "0", 10);
-const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "9", 10);
+const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "10", 10);
 const FORCE_SEND = process.env.FORCE_SEND === "true";
 
 const CONFIDENCE_THRESHOLDS = {
-  "⭐": 9,
-  "⭐⭐": 15,
-  "⭐⭐⭐": 25,
-  "⭐⭐⭐⭐": 35,
+  "⭐": 10,
+  "⭐⭐": 20,
+  "⭐⭐⭐": 30,
+  "⭐⭐⭐⭐": 40,
   "⭐⭐⭐⭐⭐": 50
 };
 
@@ -795,7 +795,7 @@ async function trackWallet(wallet, forceRebuild = false) {
 
 /* ===========================
    Rebuild Wallet Live Picks
-   (Batched + Concurrent + Skip Invalid Slugs)
+   (Batched + Concurrent + Skip Invalid Slugs + Canonical Slug Fix)
 =========================== */
 const invalidMarketSlugs = new Map(); // slug => reason
 
@@ -926,30 +926,44 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   const marketIds = Array.from(marketNetPickMap.keys());
   const { data: existingPicks } = await supabase.from("wallet_live_picks").select("*").in("market_id", marketIds);
 
-  // 6️⃣ Fetch market resolved outcomes concurrently & log skipped slugs
-  const marketSlugs = [...new Set(Array.from(marketNetPickMap.values()).map(m => m.event_slug))];
+  // 6️⃣ Fetch canonical slugs from Polymarket concurrently
   const marketResolvedMap = {};
-
-  const { data: existingSkipped } = await supabase.from("skipped_markets").select("slug");
-  const globallySkipped = new Set(existingSkipped?.map(m => m.slug) || []);
+  const marketIdToSlug = new Map();
+  const BATCH_SIZE = 50;
 
   await Promise.all(
-    marketSlugs.map(async slug => {
-      if (invalidMarketSlugs.has(slug) || globallySkipped.has(slug)) return;
+    walletFinalPicks.map(async pick => {
+      const marketId = pick.market_id;
+      if (marketResolvedMap[marketId]) return;
+
+      let slug = pick.event_slug;
       try {
         const market = await fetchMarket(slug);
         if (!market) throw new Error("404 Not Found");
+
+        slug = market.slug; // canonical slug
+        marketIdToSlug.set(marketId, slug);
+
+        // update signals with canonical slug
+        await supabase.from("signals")
+          .update({ event_slug: slug })
+          .eq("market_id", marketId)
+          .catch(() => null);
+
         const resolved = getResolvedOutcomeFromMarket(market);
         if (!resolved) throw new Error("Could not determine winner");
-        marketResolvedMap[slug] = resolved;
+        marketResolvedMap[marketId] = resolved;
+
       } catch (err) {
         invalidMarketSlugs.set(slug, err.message);
-        await supabase.from("skipped_markets").insert({ slug, reason: err.message, fetched_at: new Date() }).catch(() => null);
+        await supabase.from("skipped_markets")
+          .insert({ slug, reason: err.message, fetched_at: new Date() })
+          .catch(() => null);
       }
     })
   );
 
-  // 7️⃣ Build final picks & prepare signals batch
+  // 7️⃣ Build final picks & signals batch
   const finalLivePicks = [];
   const signalsToUpsert = [];
 
@@ -968,7 +982,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       if (!data.resolved_outcome && existing.resolved_outcome) data.resolved_outcome = existing.resolved_outcome;
     }
 
-    const resolved = data.resolved_outcome || marketResolvedMap[entry.event_slug] || null;
+    const resolved = data.resolved_outcome || marketResolvedMap[market_id] || null;
 
     finalLivePicks.push({
       market_id,
@@ -995,7 +1009,6 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     .lt("vote_count", MIN_WALLETS_FOR_SIGNAL);
 
   // 9️⃣ Batch upsert wallet_live_picks
-  const BATCH_SIZE = 50;
   for (let i = 0; i < finalLivePicks.length; i += BATCH_SIZE) {
     const batch = finalLivePicks.slice(i, i + BATCH_SIZE);
     await supabase.from("wallet_live_picks").upsert(batch, { onConflict: ["market_id", "picked_outcome"] });
@@ -1025,7 +1038,6 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 
   console.log(`✅ Wallet live picks rebuilt & batch synced (${finalLivePicks.length})`);
 }
-
 
 /* ===========================
    Fetch Wallet Activity (DATA-API)

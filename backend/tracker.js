@@ -553,7 +553,7 @@ async function rebuildWalletLivePicks() {
       pnl,
       outcome,
       resolved_outcome,
-      wallets!inner (paused, win_rate)
+      wallets!inner(paused, win_rate)
     `)
     .eq("wallets.paused", false)
     .gte("wallets.win_rate", WIN_RATE_THRESHOLD)
@@ -622,31 +622,26 @@ async function rebuildWalletLivePicks() {
   // 5️⃣ Build final live picks applying MIN_WALLETS_FOR_SIGNAL
   const finalLivePicks = [];
 
+  // Fetch all existing wallet_live_picks at once
+  const { data: existingPicks = [] } = await supabase.from("wallet_live_picks").select("*");
+  const existingMap = new Map(existingPicks.map(p => [`${p.market_id}||${p.picked_outcome}`, p]));
+
   for (const entry of marketNetPickMap.values()) {
     const sortedOutcomes = Object.entries(entry.outcomes)
       .sort((a, b) => b[1].totalPnl - a[1].totalPnl);
     if (!sortedOutcomes.length) continue;
 
     const [dominantOutcome, data] = sortedOutcomes[0];
+    const key = `${entry.market_id}||${dominantOutcome}`;
 
-    // 🔹 Merge with existing wallet_live_picks first
-    const { data: existing } = await supabase
-      .from("wallet_live_picks")
-      .select("*")
-      .eq("market_id", entry.market_id);
-
-    if (existing?.length) {
-      const exPick = existing.find(e => e.picked_outcome === dominantOutcome);
-      if (exPick) {
-        exPick.wallets?.forEach(w => data.walletIds.add(w));
-        data.totalPnl = (data.totalPnl || 0) + Number(exPick.pnl || 0);
-      }
+    // Merge with existing
+    const existing = existingMap.get(key);
+    if (existing) {
+      existing.wallets?.forEach(w => data.walletIds.add(w));
+      data.totalPnl += Number(existing.pnl || 0);
     }
 
-    // Recalculate voteCount after merge
     const voteCount = data.walletIds.size;
-
-    // 🔹 Skip picks below the minimum wallet threshold
     if (voteCount < MIN_WALLETS_FOR_SIGNAL) continue;
 
     // Compute confidence
@@ -683,14 +678,14 @@ async function rebuildWalletLivePicks() {
     });
   }
 
-  // 6️⃣ Upsert final live picks
-  for (const pick of finalLivePicks) {
+  // 6️⃣ Upsert all final picks at once
+  if (finalLivePicks.length) {
     await supabase
       .from("wallet_live_picks")
-      .upsert(pick, { onConflict: ["market_id", "picked_outcome"] });
+      .upsert(finalLivePicks, { onConflict: ["market_id", "picked_outcome"] });
   }
 
-  console.log(`✅ Wallet live picks rebuilt, merged & synced with outcomes (${finalLivePicks.length})`);
+  console.log(`✅ Wallet live picks rebuilt, merged & synced (${finalLivePicks.length})`);
 }
 
 /* ===========================

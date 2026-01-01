@@ -1034,11 +1034,12 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     // ✅ Threshold check BEFORE merging with existing picks
     if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL || data.totalPnl < MIN_TOTAL_PNL) continue;
 
-    // Merge existing info after threshold check
+    // Merge existing info AFTER threshold check, but only include wallets that meet thresholds
     const existing = existingPicks?.find(e => e.market_id === market_id && e.picked_outcome === dominantOutcome);
     if (existing) {
-      (existing.wallets || []).forEach(w => data.walletIds.add(w));
-      data.totalPnl += Number(existing.pnl || 0);
+      const validExistingWallets = (existing.wallets || []).filter((_, idx) => (existing.pnl || 0) >= MIN_TOTAL_PNL);
+      validExistingWallets.forEach(w => data.walletIds.add(w));
+      if ((existing.pnl || 0) >= MIN_TOTAL_PNL) data.totalPnl += Number(existing.pnl || 0);
       if (!data.resolved_outcome && existing.resolved_outcome) data.resolved_outcome = existing.resolved_outcome;
     }
 
@@ -1056,9 +1057,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 
     // ✅ Determine outcome column: PENDING / WIN / LOSS
     let outcome = "PENDING";
-    if (resolved) {
-      outcome = dominantOutcome === resolved ? "WIN" : "LOSS";
-    }
+    if (resolved) outcome = dominantOutcome === resolved ? "WIN" : "LOSS";
 
     data.walletIds.forEach(wallet_id => {
       if (wallet_id && market_id) {
@@ -1071,7 +1070,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
           picked_outcome: dominantOutcome,
           pnl: data.totalPnl,
           resolved_outcome: resolved,
-          outcome,          // ✅ now shows PENDING/WIN/LOSS
+          outcome,
           signal: dominantOutcome,
           side,
           tx_hash: null,

@@ -999,7 +999,7 @@ function determineSide(pickedOutcome, marketName, eventSlug) {
 }
 
 async function rebuildWalletLivePicks(forceRebuild = false) {
-  const MIN_WALLETS_FOR_SIGNAL = 2;
+  const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "10", 10);
   const BATCH_SIZE = 50;
 
   // 1️⃣ Fetch wallets
@@ -1140,7 +1140,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     if (!sorted.length) continue;
 
     const [dominantOutcome, data] = sorted[0];
-    if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL) continue;
+    if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL) continue; // ✅ enforce vote threshold
 
     const resolved = data.resolved_outcome || marketResolvedMap[polymarket_id] || null;
 
@@ -1192,6 +1192,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 
   console.log(`✅ Wallet live picks rebuilt (${finalLivePicks.length})`);
 }
+
 
 /* ===========================
    Fetch Wallet Activity (DATA-API)

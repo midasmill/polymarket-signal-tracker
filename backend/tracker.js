@@ -843,8 +843,8 @@ async function trackWallet(wallet, forceRebuild = false) {
 }
 
 /* ===========================
-   Rebuild Wallet Live Picks
-   (Vote + PnL Threshold Safe + Deduplicated + Batched + Deterministic + Signals Safe)
+   Rebuild Wallet Live Picks & Pending
+   (All Picks + Pending + Thresholded Dominant Picks)
 =========================== */
 
 const invalidMarketSlugs = new Map(); // slug => reason
@@ -907,19 +907,17 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   const { data: wallets } = await supabase.from("wallets").select("id");
   if (!wallets?.length) return;
 
-  /* 2️⃣ Fetch raw signals (no filtering yet) */
+  /* 2️⃣ Fetch all raw signals */
   const { data: signals, error: sigError } = await supabase
     .from("signals")
     .select("wallet_id, market_id, market_name, event_slug, picked_outcome, pnl, resolved_outcome");
 
   if (sigError || !signals?.length) return;
 
-  /* 3️⃣ Aggregate wallet net picks PER EVENT */
+  /* 3️⃣ Aggregate wallet picks per event */
   const walletNetPickMap = new Map();
-
   for (const sig of signals) {
     if (!sig.wallet_id || !sig.market_id || !sig.event_slug) continue;
-
     const key = `${sig.wallet_id}||${sig.event_slug}`;
     if (!walletNetPickMap.has(key)) {
       walletNetPickMap.set(key, {
@@ -931,7 +929,6 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
         walletIds: new Set([sig.wallet_id])
       });
     }
-
     const entry = walletNetPickMap.get(key);
     const outcomeKey = sig.picked_outcome || "UNKNOWN";
     entry.picks[outcomeKey] = (entry.picks[outcomeKey] || 0) + Number(sig.pnl || 0);
@@ -939,14 +936,11 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     if (sig.resolved_outcome) entry.resolved_outcome = sig.resolved_outcome;
   }
 
-  /* 4️⃣ Determine wallet final pick (enforce PnL threshold) */
+  /* 4️⃣ Determine wallet final pick */
   const walletFinalPicks = [];
-
   for (const data of walletNetPickMap.values()) {
     const sorted = Object.entries(data.picks).sort((a, b) => b[1] - a[1]);
     if (!sorted.length) continue;
-    if (sorted[0][1] < MIN_TOTAL_PNL) continue;
-
     walletFinalPicks.push({
       market_id: data.market_id,
       event_slug: data.event_slug,
@@ -957,12 +951,10 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       walletIds: data.walletIds
     });
   }
-
   if (!walletFinalPicks.length) return;
 
   /* 5️⃣ Aggregate per market */
   const marketNetPickMap = new Map();
-
   for (const pick of walletFinalPicks) {
     if (!marketNetPickMap.has(pick.market_id)) {
       marketNetPickMap.set(pick.market_id, {
@@ -971,7 +963,6 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
         outcomes: {}
       });
     }
-
     const entry = marketNetPickMap.get(pick.market_id);
     if (!entry.outcomes[pick.picked_outcome]) {
       entry.outcomes[pick.picked_outcome] = {
@@ -980,7 +971,6 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
         resolved_outcome: pick.resolved_outcome
       };
     }
-
     const outcomeData = entry.outcomes[pick.picked_outcome];
     outcomeData.totalPnl += pick.pnl;
     pick.walletIds.forEach(w => outcomeData.walletIds.add(w));
@@ -990,127 +980,82 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 
   /* 6️⃣ Resolve markets */
   const marketResolvedMap = {};
+  await Promise.all([...marketNetPickMap.entries()].map(async ([marketId, entry]) => {
+    try {
+      const market = await fetchMarket(entry.event_slug);
+      if (!market) throw new Error("404");
+      const resolved = getResolvedOutcomeFromMarket(market);
+      if (resolved) marketResolvedMap[marketId] = resolved;
+    } catch (err) {
+      invalidMarketSlugs.set(entry.event_slug, err.message);
+      await safeInsert("skipped_markets", {
+        slug: entry.event_slug,
+        reason: err.message,
+        fetched_at: new Date()
+      });
+    }
+  }));
 
-  await Promise.all(
-    [...marketNetPickMap.entries()].map(async ([marketId, entry]) => {
-      try {
-        const market = await fetchMarket(entry.event_slug);
-        if (!market) throw new Error("404");
-        const resolved = getResolvedOutcomeFromMarket(market);
-        if (resolved) marketResolvedMap[marketId] = resolved;
-      } catch (err) {
-        invalidMarketSlugs.set(entry.event_slug, err.message);
-        await safeInsert("skipped_markets", {
-          slug: entry.event_slug,
-          reason: err.message,
-          fetched_at: new Date()
-        });
-      }
-    })
-  );
-
-  /* 7️⃣ Build final wallet_live_picks */
-  const finalLivePicks = [];
-
+  /* 7️⃣ Build wallet_live_pending (all picks) */
+  const finalPendingPicks = [];
   for (const [market_id, entry] of marketNetPickMap.entries()) {
-    const sorted = Object.entries(entry.outcomes).sort(
-      (a, b) => b[1].totalPnl - a[1].totalPnl
-    );
-    if (!sorted.length) continue;
+    for (const [outcome, data] of Object.entries(entry.outcomes)) {
+      const resolved = data.resolved_outcome || marketResolvedMap[market_id] || null;
+      const outcomeStatus = resolved ? (outcome === resolved ? "WIN" : "LOSS") : "PENDING";
 
-    const [dominantOutcome, data] = sorted[0];
-    if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL || data.totalPnl < MIN_TOTAL_PNL)
-      continue;
-
-    const resolved = data.resolved_outcome || marketResolvedMap[market_id] || null;
-
-    finalLivePicks.push({
-      market_id,
-      picked_outcome: dominantOutcome,
-      wallets: Array.from(data.walletIds).filter(w => w != null),
-      vote_count: Array.from(data.walletIds).filter(w => w != null).length,
-      pnl: data.totalPnl || MIN_TOTAL_PNL,
-      resolved_outcome: resolved,
-      fetched_at: new Date()
-    });
+      finalPendingPicks.push({
+        market_id,
+        picked_outcome: outcome,
+        wallets: Array.from(data.walletIds),
+        vote_count: Array.from(data.walletIds).length,
+        pnl: data.totalPnl,
+        resolved_outcome: resolved,
+        outcome: outcomeStatus,
+        fetched_at: new Date()
+      });
+    }
   }
 
-  /* 8️⃣ Deduplicate + batch upsert wallet_live_picks */
-  const seenLive = new Set();
-  const dedupedLive = finalLivePicks.filter(p => {
-    if (!p.picked_outcome || !p.wallets.length || p.pnl < MIN_TOTAL_PNL) return false;
-    const k = `${p.market_id}||${p.picked_outcome}`;
-    if (seenLive.has(k)) return false;
-    seenLive.add(k);
-    return true;
-  });
-
-  for (let i = 0; i < dedupedLive.length; i += BATCH_SIZE) {
-    await safeUpsert("wallet_live_picks", dedupedLive.slice(i, i + BATCH_SIZE), {
+  // Upsert wallet_live_pending
+  for (let i = 0; i < finalPendingPicks.length; i += BATCH_SIZE) {
+    await safeUpsert("wallet_live_pending", finalPendingPicks.slice(i, i + BATCH_SIZE), {
       onConflict: ["market_id", "picked_outcome"]
     });
   }
 
-  /* 9️⃣ Build signals safely (never violate constraints) */
-  const signalsToUpsert = [];
-
+  /* 8️⃣ Build wallet_live_picks (thresholded dominant picks) */
+  const finalLivePicks = [];
   for (const [market_id, entry] of marketNetPickMap.entries()) {
-    const sortedOutcomes = Object.entries(entry.outcomes).sort(
-      (a, b) => b[1].totalPnl - a[1].totalPnl
-    );
+    const sortedOutcomes = Object.entries(entry.outcomes).sort((a, b) => b[1].totalPnl - a[1].totalPnl);
     if (!sortedOutcomes.length) continue;
 
     const [dominantOutcome, data] = sortedOutcomes[0];
-
-    if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL || data.totalPnl < MIN_TOTAL_PNL)
-      continue;
+    if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL || data.totalPnl < MIN_TOTAL_PNL) continue;
 
     const resolved = data.resolved_outcome || marketResolvedMap[market_id] || null;
+    const outcomeStatus = resolved ? (dominantOutcome === resolved ? "WIN" : "LOSS") : "PENDING";
 
-    // ✅ Use "Pending" if market is not resolved yet
-    const outcome = resolved ? (dominantOutcome === resolved ? "WIN" : "LOSS") : "Pending";
-
-    data.walletIds.forEach(wallet_id => {
-      if (wallet_id && market_id) {
-        const side = determineSide(dominantOutcome, entry.market_name, entry.event_slug);
-
-        signalsToUpsert.push({
-          wallet_id,
-          market_id,
-          market_name: entry.market_name,
-          event_slug: entry.event_slug,
-          picked_outcome: dominantOutcome,
-          pnl: data.totalPnl || MIN_TOTAL_PNL,
-          resolved_outcome: resolved,
-          outcome,        // guaranteed WIN/LOSS/Pending
-          signal: dominantOutcome,
-          side,
-          tx_hash: null,
-          win_rate: null
-        });
-      }
+    finalLivePicks.push({
+      market_id,
+      picked_outcome: dominantOutcome,
+      wallets: Array.from(data.walletIds),
+      vote_count: Array.from(data.walletIds).length,
+      pnl: data.totalPnl,
+      resolved_outcome: resolved,
+      outcome: outcomeStatus,
+      fetched_at: new Date()
     });
   }
 
-  /* Deduplicate & batch upsert signals */
-  const seenSignals = new Set();
-  const dedupedSignals = signalsToUpsert.filter(s => {
-    const key = `${s.wallet_id}||${s.market_id}`;
-    if (seenSignals.has(key)) return false;
-    seenSignals.add(key);
-    return true;
-  });
-
-  for (let i = 0; i < dedupedSignals.length; i += BATCH_SIZE) {
-    await safeUpsert("signals", dedupedSignals.slice(i, i + BATCH_SIZE), {
-      onConflict: ["wallet_id","market_id"]
+  for (let i = 0; i < finalLivePicks.length; i += BATCH_SIZE) {
+    await safeUpsert("wallet_live_picks", finalLivePicks.slice(i, i + BATCH_SIZE), {
+      onConflict: ["market_id", "picked_outcome"]
     });
   }
 
   invalidMarketSlugs.clear();
-  console.log(`✅ Wallet live picks and signals rebuilt safely (${dedupedLive.length})`);
+  console.log(`✅ Wallet live picks and pending rebuilt safely`);
 }
-
 
 /* ===========================
    Fetch Wallet Activity (DATA-API, Robust)

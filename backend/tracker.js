@@ -532,9 +532,8 @@ async function trackWallet(wallet) {
   }
 }
 
-
 /* ===========================
-   Rebuild Wallet Live Picks (Dominant Net Pick Per Market – Merge Existing)
+   Rebuild Wallet Live Picks (Dominant Net Pick Per Market – Merge Existing & Min Wallets)
 =========================== */
 async function rebuildWalletLivePicks() {
   const { data: signals, error } = await supabase
@@ -612,7 +611,7 @@ async function rebuildWalletLivePicks() {
     entry.outcomes[pick.picked_outcome].walletIds.add(pick.wallet_id);
   }
 
-  // 4️⃣ Merge with existing wallet_live_picks
+  // 4️⃣ Merge with existing wallet_live_picks and apply minimum wallet filter
   const finalLivePicks = [];
   for (const entry of marketNetPickMap.values()) {
     // Fetch existing live picks for this market
@@ -641,6 +640,9 @@ async function rebuildWalletLivePicks() {
 
     const [dominantOutcome, data] = sortedOutcomes[0];
     const voteCount = data.walletIds.size;
+
+    // 🔹 Skip if fewer wallets than minimum required
+    if (voteCount < MIN_WALLETS_FOR_SIGNAL) continue;
 
     // Compute confidence
     let confidence = 1;

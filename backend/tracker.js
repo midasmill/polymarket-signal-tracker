@@ -310,10 +310,13 @@ async function fetchMarket(eventSlug, bypassCache = false) {
 }
 
 /* ===========================
-   Resolve Markets (Fixed & Robust)
+   Resolve Markets (FINAL — Safe & Deterministic)
+   - Updates signals outcomes
+   - Updates wallet_live_picks outcomes ONLY if row already exists
+   - NEVER creates or mutates votes/wallets
 =========================== */
 async function resolveMarkets() {
-  // 1️⃣ Fetch all signals with a valid event_slug
+  // 1️⃣ Fetch unresolved signals with a valid event_slug
   const { data: signals, error: fetchError } = await supabase
     .from("signals")
     .select("*")
@@ -333,20 +336,26 @@ async function resolveMarkets() {
     return acc;
   }, {});
 
+  // 3️⃣ Resolve each event
   for (const [eventSlug, sigs] of Object.entries(signalsByEvent)) {
     try {
       const market = await fetchMarket(eventSlug);
-      if (!market || !market.outcome) continue; // skip unresolved markets
+      if (!market || !market.outcome) continue;
 
       const winningOutcome = market.outcome;
 
       for (const sig of sigs) {
         const result = sig.picked_outcome === winningOutcome ? "WIN" : "LOSS";
 
-        // Skip if already up-to-date
-        if (sig.outcome === result && sig.resolved_outcome === winningOutcome) continue;
+        // Skip if already resolved correctly
+        if (
+          sig.outcome === result &&
+          sig.resolved_outcome === winningOutcome
+        ) {
+          continue;
+        }
 
-        // 3️⃣ Update the signals table
+        // 4️⃣ Update signals table (source of truth)
         const { error: updateSignalError } = await supabase
           .from("signals")
           .update({
@@ -357,70 +366,56 @@ async function resolveMarkets() {
           .eq("id", sig.id);
 
         if (updateSignalError) {
-          console.error(`❌ Failed updating signal ${sig.id}:`, updateSignalError.message);
+          console.error(
+            `❌ Failed updating signal ${sig.id}:`,
+            updateSignalError.message
+          );
           continue;
         }
 
-        // 4️⃣ Upsert wallet_live_picks table
-        const { data: existingPick, error: existingError } = await supabase
+        // 5️⃣ Update wallet_live_picks ONLY if it already exists
+        const { data: existingPick, error: pickError } = await supabase
           .from("wallet_live_picks")
-          .select("*")
+          .select("id")
           .eq("market_id", sig.market_id)
           .eq("picked_outcome", sig.picked_outcome)
-          .maybeSingle(); // returns null if no row
+          .maybeSingle();
 
-        if (existingError) {
-          console.error(`❌ Error fetching wallet_live_pick for market ${sig.market_id}:`, existingError.message);
+        if (pickError) {
+          console.error(
+            `❌ Error fetching wallet_live_pick for market ${sig.market_id}:`,
+            pickError.message
+          );
           continue;
         }
 
-        if (existingPick) {
-          // Update existing pick
-          const updatedWallets = Array.from(new Set([...(existingPick.wallets || []), sig.wallet_id]));
-          const { error: updatePickError } = await supabase
-            .from("wallet_live_picks")
-            .update({
-              vote_count: updatedWallets.length,
-              wallets: updatedWallets,
-              outcome: result,
-              resolved_outcome: winningOutcome
-            })
-            .eq("id", existingPick.id);
+        // IMPORTANT: do nothing if rebuild never created this pick
+        if (!existingPick) continue;
 
-          if (updatePickError) {
-            console.error(`❌ Failed updating wallet_live_pick ${existingPick.id}:`, updatePickError.message);
-          }
-        } else {
-          // Insert new pick
-          const { error: insertPickError } = await supabase
-            .from("wallet_live_picks")
-            .insert({
-              wallet_id: sig.wallet_id,
-              market_id: sig.market_id,
-              picked_outcome: sig.picked_outcome,
-              side: sig.side || null,
-              pnl: sig.pnl || 0,
-              outcome: result,
-              resolved_outcome: winningOutcome,
-              vote_count: 1,
-              wallets: [sig.wallet_id],
-              market_name: sig.market_name,
-              event_slug: sig.event_slug,
-              fetched_at: new Date(),
-              signal_sent_at: sig.signal_sent_at || null
-            });
+        const { error: updatePickError } = await supabase
+          .from("wallet_live_picks")
+          .update({
+            outcome: result,
+            resolved_outcome: winningOutcome
+          })
+          .eq("id", existingPick.id);
 
-          if (insertPickError) {
-            console.error(`❌ Failed inserting wallet_live_pick for signal ${sig.id}:`, insertPickError.message);
-          }
+        if (updatePickError) {
+          console.error(
+            `❌ Failed updating wallet_live_pick ${existingPick.id}:`,
+            updatePickError.message
+          );
         }
       }
     } catch (err) {
-      console.error(`❌ Failed processing signals for event ${eventSlug}:`, err.message);
+      console.error(
+        `❌ Failed processing signals for event ${eventSlug}:`,
+        err.message
+      );
     }
   }
 
-  console.log(`✅ All markets resolved and wallet_live_picks updated`);
+  console.log("✅ Markets resolved safely (signals + existing wallet_live_picks only)");
 }
 
 /* ===========================

@@ -205,32 +205,41 @@ async function autoResolvePendingSignals() {
 }
 
 /* ===========================
-   Fetch Market (Includes Closed)
+   Fetch Market (Includes Closed + Resolved)
 =========================== */
 async function fetchMarket(eventSlug) {
   if (!eventSlug) return null;
   if (marketCache.has(eventSlug)) return marketCache.get(eventSlug);
 
   try {
-    const res = await fetch(`https://gamma-api.polymarket.com/markets/slug/${eventSlug}`, {
-      headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
-    });
+    const res = await fetch(
+      `https://gamma-api.polymarket.com/markets/slug/${eventSlug}`,
+      {
+        headers: {
+          "User-Agent": "Mozilla/5.0",
+          Accept: "application/json",
+        },
+      }
+    );
     if (!res.ok) return null;
 
     const market = await res.json();
 
-    // Attempt to derive outcome if not explicitly set
-    if (!market.outcome && market.closed && market.outcomePrices) {
-      const prices = JSON.parse(market.outcomePrices); // ["0","1"]
-      const outcomes = JSON.parse(market.outcomes);     // ["Team A","Team B"]
-      const index = prices.findIndex(p => p === "1");   // winner = price 1
-      if (index !== -1) market.outcome = outcomes[index];
+    // Derive outcome for closed auto-resolved markets
+    if (!market.outcome && market.closed && market.outcomePrices && market.outcomes) {
+      const prices = JSON.parse(market.outcomePrices);
+      const outcomes = JSON.parse(market.outcomes);
+
+      const winnerIndex = prices.findIndex(p => Number(p) === 1);
+      if (winnerIndex !== -1) {
+        market.outcome = outcomes[winnerIndex];
+      }
     }
 
     marketCache.set(eventSlug, market);
     return market;
   } catch (err) {
-    console.error(`Failed to fetch market ${eventSlug}:`, err.message);
+    console.error(`❌ Failed to fetch market ${eventSlug}:`, err.message);
     return null;
   }
 }
@@ -923,8 +932,7 @@ async function updateNotes(slug, pick, confidenceEmoji) {
   const text = `⚡️ NEW MARKET PREDICTION
 Market Event: ${pick.market_name || pick.event_slug}
 Prediction: ${pick.picked_outcome || "UNKNOWN"}
-Confidence: ${confidenceEmoji}
-Signal Sent: ${new Date(pick.signal_sent_at || Date.now()).toLocaleString("en-US", { timeZone: TIMEZONE })}`;
+Confidence: ${confidenceEmoji}`;
 
   // Fetch current note content
   const { data: note } = await supabase
@@ -938,6 +946,36 @@ Signal Sent: ${new Date(pick.signal_sent_at || Date.now()).toLocaleString("en-US
   newContent += newContent ? `\n\n${text}` : text;
 
   // Update Supabase
+  await supabase
+    .from("notes")
+    .update({ content: newContent, public: true })
+    .eq("slug", slug);
+}
+
+/* ===========================
+   Notes Update Helper (Result)
+=========================== */
+async function updateNotesWithResult(slug, pick, confidenceEmoji) {
+  const outcomeEmoji =
+    pick.outcome === "WIN" ? "✅" :
+    pick.outcome === "LOSS" ? "❌" :
+    "";
+
+  const text = `⚡️ RESULT FOR MARKET PREDICTION
+Market Event: ${pick.market_name || pick.event_slug}
+Prediction: ${pick.picked_outcome || "UNKNOWN"}
+Confidence: ${confidenceEmoji}
+Outcome: ${pick.outcome} ${outcomeEmoji}`;
+
+  const { data: note } = await supabase
+    .from("notes")
+    .select("content")
+    .eq("slug", slug)
+    .maybeSingle();
+
+  let newContent = note?.content || "";
+  newContent += newContent ? `\n\n${text}` : text;
+
   await supabase
     .from("notes")
     .update({ content: newContent, public: true })
@@ -1038,8 +1076,7 @@ async function processAndSendSignals() {
     const text = `⚡️ NEW MARKET PREDICTION
 Market Event: ${pick.market_name || pick.event_slug}
 Prediction: ${pick.picked_outcome || "UNKNOWN"}
-Confidence: ${confidenceEmoji}
-Signal Sent: ${new Date().toLocaleString("en-US", { timeZone: TIMEZONE })}`;
+Confidence: ${confidenceEmoji}`;
 
     try {
       await sendTelegram(text, false);
@@ -1067,6 +1104,61 @@ Signal Sent: ${new Date().toLocaleString("en-US", { timeZone: TIMEZONE })}`;
     }
   }
 }
+
+/* ===========================
+   Result Processing + Telegram + Notes
+=========================== */
+async function processAndSendResults() {
+  const { data: resolvedPicks, error } = await supabase
+    .from("wallet_live_picks")
+    .select("*")
+    .in("outcome", ["WIN", "LOSS"]);
+
+  if (error) {
+    console.error("❌ Failed fetching resolved picks:", error.message);
+    return;
+  }
+
+  if (!resolvedPicks?.length) return;
+
+  for (const pick of resolvedPicks) {
+    // ✅ Must have been sent as a signal first
+    if (!pick.signal_sent_at) continue;
+
+    // ✅ Prevent duplicate result alerts
+    if (pick.result_sent_at) continue;
+
+    const confidenceEmoji = getConfidenceEmoji(pick.vote_count);
+    const outcomeEmoji = pick.outcome === "WIN" ? "✅" : "❌";
+
+    const text = `⚡️ RESULT FOR MARKET PREDICTION
+Market Event: ${pick.market_name || pick.event_slug}
+Prediction: ${pick.picked_outcome || "UNKNOWN"}
+Confidence: ${confidenceEmoji}
+Outcome: ${pick.outcome} ${outcomeEmoji}`;
+
+    try {
+      await sendTelegram(text, false);
+      await updateNotesWithResult("midas-sports", pick, confidenceEmoji);
+
+      await supabase
+        .from("wallet_live_picks")
+        .update({ result_sent_at: new Date() })
+        .eq("id", pick.id);
+
+      console.log(
+        `✅ Sent RESULT for market ${pick.market_id} (${pick.picked_outcome})`
+      );
+
+    } catch (err) {
+      console.error(
+        `❌ Failed sending RESULT for market ${pick.market_id}:`,
+        err.message
+      );
+    }
+  }
+}
+
 
 /* ===========================
    Tracker Loop (Enhanced)
@@ -1097,6 +1189,10 @@ async function trackerLoop() {
     await forceResolvePendingMarkets();
     
     await resolveMarkets(); 
+
+    await resolveMarkets();
+
+    await processAndSendResults();
 
     // 4️⃣ Process and send signals
     await processAndSendSignals();

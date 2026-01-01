@@ -555,16 +555,7 @@ async function forceResolvePendingMarkets() {
       console.log(`✅ Market force-resolved: ${eventSlug} (polymarket_id=${market.id})`);
     } catch (err) {
       console.error(`❌ Failed to force-resolve market ${eventSlug}:`, err.message);
-
-      invalidMarketSlugs.set(eventSlug, err.message);
-
-      const { error } = await supabase.from("skipped_markets").insert({
-        slug: eventSlug,
-        reason: err.message,
-        fetched_at: new Date()
-      });
-
-      if (error) console.warn("⚠️ skipped_markets insert failed:", error.message);
+      // ⚠️ No skipped_markets insert, just log the error
     }
   }));
 

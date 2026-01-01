@@ -268,65 +268,68 @@ async function autoResolvePendingSignals() {
 =========================== */
 const marketCache = new Map();
 
-async function fetchMarket(eventSlug, bypassCache = false) {
-  if (!eventSlug) return null;
+async function fetchMarketSafe({ event_slug, polymarket_id, market_id }, bypassCache = false) {
+  if (!event_slug && !polymarket_id && !market_id) return null;
 
-  // 1️⃣ Return cached market if available
-  if (!bypassCache && marketCache.has(eventSlug)) {
-    return marketCache.get(eventSlug);
+  // Use event_slug as primary cache key
+  const cacheKey = event_slug || polymarket_id || market_id;
+  if (!bypassCache && marketCache.has(cacheKey)) {
+    return marketCache.get(cacheKey);
   }
 
   try {
-    const res = await fetch(
-      `https://gamma-api.polymarket.com/markets/slug/${eventSlug}`,
-      {
-        headers: {
-          "User-Agent": "Mozilla/5.0",
-          Accept: "application/json",
-        },
-      }
-    );
+    // Construct URL: prefer slug, fallback to numeric ID if needed
+    let url = "";
+    if (event_slug) url = `https://gamma-api.polymarket.com/markets/slug/${event_slug}`;
+    else if (polymarket_id) url = `https://gamma-api.polymarket.com/markets/${polymarket_id}`;
+    else if (market_id) url = `https://gamma-api.polymarket.com/markets/${market_id}`;
+
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "Polymarket-Tracker/1.0",
+        Accept: "application/json",
+      },
+    });
 
     if (res.status === 404) {
-      console.warn(`⚠️ Market not found: ${eventSlug}`);
+      console.warn(`⚠️ Market not found: ${cacheKey}`);
       return null;
     }
 
     if (!res.ok) {
-      console.error(`❌ Failed to fetch market ${eventSlug}: HTTP ${res.status}`);
+      console.error(`❌ Failed to fetch market ${cacheKey}: HTTP ${res.status}`);
       return null;
     }
 
     const market = await res.json();
 
-    // 2️⃣ Auto-resolve outcome for closed markets
-    if (
-      !market.outcome &&
-      market.closed &&
-      market.outcomePrices &&
-      market.outcomes
-    ) {
+    // Auto-resolve outcome for closed markets
+    if (!market.outcome && market.closed && market.outcomePrices && market.outcomes) {
       try {
-        const prices = JSON.parse(market.outcomePrices);
-        const outcomes = JSON.parse(market.outcomes);
+        let prices = market.outcomePrices;
+        let outcomes = market.outcomes;
+
+        if (typeof prices === "string") prices = JSON.parse(prices);
+        if (typeof outcomes === "string") outcomes = JSON.parse(outcomes);
+
+        // If outcomePrices is an object, convert to array
+        if (!Array.isArray(prices) && typeof prices === "object") prices = Object.values(prices);
 
         const winnerIndex = prices.findIndex(p => Number(p) === 1);
         if (winnerIndex !== -1) {
           market.outcome = outcomes[winnerIndex];
         } else {
-          console.warn(`⚠️ Could not determine winner for ${eventSlug}`);
+          console.warn(`⚠️ Could not determine winner for ${cacheKey}`);
         }
       } catch (err) {
-        console.error(`❌ Failed to parse outcomes for ${eventSlug}:`, err.message);
+        console.error(`❌ Failed to parse outcomes for ${cacheKey}:`, err.message);
       }
     }
 
-    // 3️⃣ Cache and return market
-    marketCache.set(eventSlug, market);
+    marketCache.set(cacheKey, market);
     return market;
-
   } catch (err) {
-    console.error(`❌ Failed to fetch market ${eventSlug}:`, err.message);
+    console.error(`❌ Failed to fetch market ${cacheKey}:`, err.message);
     return null;
   }
 }

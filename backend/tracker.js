@@ -916,18 +916,33 @@ async function fetchWalletPositions(proxyWallet) {
 }
 
 /* ===========================
-   Notes Update Helper (new lines)
+   Notes Update Helper (with proper line breaks)
 =========================== */
-async function updateNotes(slug, text) {
-  const noteText = text.split("\n").join("\n"); // preserve line breaks
-  const { data: notes } = await supabase.from("notes").select("content").eq("slug", slug).maybeSingle();
-  let newContent = notes?.content || "";
+async function updateNotes(slug, pick, confidenceEmoji) {
+  // Build the text for this pick
+  const text = `⚡️ NEW MARKET PREDICTION
+Market Event: ${pick.market_name || pick.event_slug}
+Prediction: ${pick.picked_outcome || "UNKNOWN"}
+Confidence: ${confidenceEmoji}
+Signal Sent: ${new Date(pick.signal_sent_at || Date.now()).toLocaleString("en-US", { timeZone: TIMEZONE })}`;
 
-  newContent += newContent ? `\n\n${noteText}` : noteText;
+  // Fetch current note content
+  const { data: note } = await supabase
+    .from("notes")
+    .select("content")
+    .eq("slug", slug)
+    .maybeSingle();
 
-  await supabase.from("notes").update({ content: newContent, public: true }).eq("slug", slug);
+  // Append new note with 2 line breaks
+  let newContent = note?.content || "";
+  newContent += newContent ? `\n\n${text}` : text;
+
+  // Update Supabase
+  await supabase
+    .from("notes")
+    .update({ content: newContent, public: true })
+    .eq("slug", slug);
 }
-
 
 /* ===========================
    Wallet Metrics Update
@@ -1020,7 +1035,8 @@ async function processAndSendSignals() {
 
     const confidenceEmoji = getConfidenceEmoji(pick.vote_count);
 
-    const text = `⚡️ Market Event: ${pick.market_name || pick.event_slug}
+    const text = `⚡️ NEW MARKET PREDICTION
+Market Event: ${pick.market_name || pick.event_slug}
 Prediction: ${pick.picked_outcome || "UNKNOWN"}
 Confidence: ${confidenceEmoji}
 Signal Sent: ${new Date().toLocaleString("en-US", { timeZone: TIMEZONE })}`;

@@ -842,10 +842,10 @@ async function trackWallet(wallet, forceRebuild = false) {
 
 /* ===========================
    Rebuild Wallet Live Picks
-   (Normalized Picks + Constraint Safe + Deduplicated + Batched)
+   (Normalized + Constraint Safe + Deduplicated + Batched)
 =========================== */
 
-const invalidMarketSlugs = new Map(); // slug => reason
+const invalidMarketSlugs = new Map();
 
 // --- Resolve market outcome from API ---
 function getResolvedOutcomeFromMarket(market) {
@@ -872,46 +872,29 @@ function getResolvedOutcomeFromMarket(market) {
   }
 }
 
-// --- Normalize picked_outcome ---
-function normalizePickedOutcome(pickedOutcome, marketName, eventSlug, marketOutcomes) {
+// --- Strict normalization: always return a valid market outcome ---
+function normalizePickedOutcome(pickedOutcome, marketOutcomes) {
   if (!pickedOutcome || !marketOutcomes?.length) return null;
+
   const upperPick = pickedOutcome.toUpperCase();
 
-  // 1️⃣ Exact match (case-sensitive)
+  // 1️⃣ Exact match
   if (marketOutcomes.includes(pickedOutcome)) return pickedOutcome;
 
   // 2️⃣ Case-insensitive match
   const ciMatch = marketOutcomes.find(o => o.toUpperCase() === upperPick);
   if (ciMatch) return ciMatch;
 
-  // 3️⃣ Auto-detect binary YES/NO markets
-  // If market has exactly 2 outcomes and they are not numeric or obvious team names
-  const isBinaryMarket = marketOutcomes.length === 2 &&
-                         !marketOutcomes.every(o => !isNaN(Number(o))) && // not both numbers
-                         !marketOutcomes.some(o => o.includes(" vs."));   // not team names
-  if (isBinaryMarket) {
-    if (upperPick === "YES" || upperPick === "NO") {
-      // Return the actual market outcome string preserving original casing
-      return marketOutcomes.find(o => o.toUpperCase() === upperPick) || marketOutcomes[0];
-    }
-    // fallback: pick first outcome as default
-    return marketOutcomes[0];
+  // 3️⃣ Map YES/NO or OVER/UNDER to first/second outcome
+  if (upperPick === "YES" || upperPick === "OVER") return marketOutcomes[0];
+  if (upperPick === "NO" || upperPick === "UNDER") return marketOutcomes[1];
+
+  // 4️⃣ HOME/AWAY for sports (team1/team2)
+  if (upperPick === "HOME" || upperPick === "AWAY") {
+    if (marketOutcomes.length === 2) return upperPick === "HOME" ? marketOutcomes[0] : marketOutcomes[1];
   }
 
-  // 4️⃣ Over/Under markets
-  if (upperPick === "OVER" || upperPick === "YES") return marketOutcomes[0];
-  if (upperPick === "UNDER" || upperPick === "NO") return marketOutcomes[1];
-
-  // 5️⃣ Sports HOME/AWAY
-  const teams = marketName?.split(" vs. ").map(s => s.trim()) ||
-                eventSlug?.split(" vs. ").map(s => s.trim()) || [];
-  if (teams.length === 2) {
-    if (teams.includes(pickedOutcome)) return pickedOutcome;
-    if (upperPick === "HOME") return teams[0];
-    if (upperPick === "AWAY") return teams[1];
-  }
-
-  // 6️⃣ Fallback: return first market outcome
+  // 5️⃣ Fallback: first outcome to satisfy DB constraint
   return marketOutcomes[0];
 }
 
@@ -1033,62 +1016,19 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     try {
       const market = await fetchMarket(entry.event_slug);
       if (!market) throw new Error("404");
+
       const resolved = getResolvedOutcomeFromMarket(market);
       if (resolved) marketResolvedMap[marketId] = resolved;
+
+      // Ensure marketOutcomes array exists
+      entry.marketOutcomes = Array.isArray(market.outcomes) ? market.outcomes : JSON.parse(market.outcomes || "[]");
     } catch (err) {
       invalidMarketSlugs.set(entry.event_slug, err.message);
       await safeInsert("skipped_markets", { slug: entry.event_slug, reason: err.message, fetched_at: new Date() });
     }
   }));
 
-  // 7️⃣ Build final wallet_live_picks
-  const finalLivePicks = [];
-  for (const [market_id, entry] of marketNetPickMap.entries()) {
-    const sorted = Object.entries(entry.outcomes).sort((a, b) => b[1].totalPnl - a[1].totalPnl);
-    if (!sorted.length) continue;
-
-    const [dominantOutcome, data] = sorted[0];
-    if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL || data.totalPnl < MIN_TOTAL_PNL) continue;
-
-    const marketOutcomes = entry.market_name?.split(" vs. ").map(s => s.trim()) || [];
-    const canonicalOutcome = normalizePickedOutcome(
-      dominantOutcome,
-      entry.market_name,
-      entry.event_slug,
-      marketOutcomes
-    );
-    if (!canonicalOutcome) continue;
-
-    const resolved = data.resolved_outcome || marketResolvedMap[market_id] || null;
-
-    finalLivePicks.push({
-      market_id,
-      picked_outcome: canonicalOutcome,
-      wallets: Array.from(data.walletIds).filter(Boolean),
-      vote_count: Array.from(data.walletIds).filter(Boolean).length,
-      pnl: data.totalPnl || MIN_TOTAL_PNL,
-      resolved_outcome: resolved,
-      fetched_at: new Date()
-    });
-  }
-
-  // 8️⃣ Deduplicate + batch upsert wallet_live_picks
-  const seenLive = new Set();
-  const dedupedLive = finalLivePicks.filter(p => {
-    if (!p.picked_outcome || !p.wallets.length || p.pnl < MIN_TOTAL_PNL) return false;
-    const k = `${p.market_id}||${p.picked_outcome}`;
-    if (seenLive.has(k)) return false;
-    seenLive.add(k);
-    return true;
-  });
-
-  for (let i = 0; i < dedupedLive.length; i += BATCH_SIZE) {
-    await safeUpsert("wallet_live_picks", dedupedLive.slice(i, i + BATCH_SIZE), {
-      onConflict: ["market_id", "picked_outcome"]
-    });
-  }
-
-  // 9️⃣ Build signals safely
+  // 7️⃣ Build signals safely
   const signalsToUpsert = [];
   for (const [market_id, entry] of marketNetPickMap.entries()) {
     const sortedOutcomes = Object.entries(entry.outcomes).sort((a, b) => b[1].totalPnl - a[1].totalPnl);
@@ -1097,15 +1037,18 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     const [dominantOutcome, data] = sortedOutcomes[0];
     if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL || data.totalPnl < MIN_TOTAL_PNL) continue;
 
-    const marketOutcomes = entry.market_name?.split(" vs. ").map(s => s.trim()) || [];
-    const canonicalOutcome = normalizePickedOutcome(
-      dominantOutcome,
-      entry.market_name,
-      entry.event_slug,
-      marketOutcomes
-    );
+    const marketOutcomes = entry.marketOutcomes || entry.market_name?.split(" vs. ").map(s => s.trim()) || [];
+    if (!marketOutcomes.length) continue;
+
+    const canonicalOutcome = normalizePickedOutcome(dominantOutcome, marketOutcomes);
     const resolved = data.resolved_outcome || marketResolvedMap[market_id] || null;
+
+    // ✅ Strict DB validation
     if (!canonicalOutcome || !resolved) continue;
+    if (!marketOutcomes.includes(canonicalOutcome) || !marketOutcomes.includes(resolved)) {
+      console.warn(`Skipping invalid signal: canonical=${canonicalOutcome}, resolved=${resolved}, marketOutcomes=${marketOutcomes}`);
+      continue;
+    }
 
     const outcome = canonicalOutcome === resolved ? "WIN" : "LOSS";
 
@@ -1145,7 +1088,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   }
 
   invalidMarketSlugs.clear();
-  console.log(`✅ Wallet live picks and signals rebuilt safely (${dedupedLive.length})`);
+  console.log(`✅ Wallet live picks and signals rebuilt safely (${dedupedSignals.length})`);
 }
 
 /* ===========================

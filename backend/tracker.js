@@ -459,7 +459,7 @@ async function trackWallet(wallet) {
       event_slug: data.event_slug,
       picked_outcome,
       pnl,
-      signal: data.market_name, // ✅ required NOT NULL field
+      signal: data.market_name || picked_outcome || "UNKNOWN", // ✅ always NOT NULL
       outcome: "Pending",
       resolved_outcome: null,
       outcome_at: null,
@@ -520,7 +520,6 @@ async function trackWallet(wallet) {
       });
   }
 }
-
 
 /* ===========================
    Rebuild Wallet Live Picks (Dominant Net Pick Per Market - Corrected)

@@ -653,7 +653,7 @@ async function trackWallet(wallet, forceRebuild = false) {
     .from("signals")
     .select("*")
     .eq("wallet_id", wallet.id);
-  const existingTxs = new Set(existingSignals.map(s => s.tx_hash));
+  const existingTxs = new Set((existingSignals || []).map(s => s.tx_hash));
 
   // 3️⃣ Aggregate PnL per wallet/event/outcome
   const walletEventMap = new Map();
@@ -683,7 +683,8 @@ async function trackWallet(wallet, forceRebuild = false) {
       continue;
     }
 
-    const syntheticTx = [proxyWallet, pos.asset || "", pos.timestamp || "", effectivePnl].join("-");
+    // Make tx_hash unique with timestamp
+    const syntheticTx = [proxyWallet, pos.asset || "", pos.timestamp || "", effectivePnl, Date.now()].join("-");
     if (!forceRebuild && existingTxs.has(syntheticTx)) continue;
 
     const key = `${wallet.id}||${eventSlug}`;
@@ -724,15 +725,12 @@ async function trackWallet(wallet, forceRebuild = false) {
       side = teams?.[0] === picked_outcome ? "BUY" : "SELL";
     }
 
-    const existing = existingSignals.find(s =>
-      s.wallet_id === wallet_id && s.event_slug === data.event_slug && s.picked_outcome === picked_outcome
-    );
+    // Compute outcome as Pending/WIN/LOSS
+    let outcome = "Pending";
+    if (data.resolved_outcome) {
+      outcome = data.resolved_outcome === picked_outcome ? "WIN" : "LOSS";
+    }
 
-    const outcome = (!forceRebuild && existing?.outcome !== "Pending")
-      ? existing.outcome
-      : data.resolved_outcome ?? "Pending";
-
-    // ✅ Push net signal with required NOT NULL columns
     netSignals.push({
       wallet_id,
       market_id: data.market_id,
@@ -748,7 +746,7 @@ async function trackWallet(wallet, forceRebuild = false) {
       win_rate: wallet.win_rate,
       created_at: new Date(),
       event_start_at: null,
-      tx_hash: Array.from(data.tx_hashes)[0] || "UNKNOWN" // NOT NULL
+      tx_hash: Array.from(data.tx_hashes)[0] || `${wallet.id}-${Date.now()}` // unique
     });
   }
 
@@ -764,16 +762,24 @@ async function trackWallet(wallet, forceRebuild = false) {
       .neq("picked_outcome", sig.picked_outcome);
   }
 
-  // 6️⃣ Upsert net signals safely
+  // 6️⃣ Deduplicate before upsert to avoid tx_hash conflicts
+  const seenSignals = new Set();
+  const dedupedSignals = netSignals.filter(s => {
+    const key = `${s.wallet_id}||${s.event_slug}||${s.picked_outcome}||${s.tx_hash}`;
+    if (seenSignals.has(key)) return false;
+    seenSignals.add(key);
+    return true;
+  });
+
   try {
     const { error } = await supabase
       .from("signals")
-      .upsert(netSignals, {
+      .upsert(dedupedSignals, {
         onConflict: ["wallet_id", "event_slug", "picked_outcome"]
       });
 
     if (error) console.error(`❌ Failed upserting signals for wallet ${wallet.id}:`, error.message);
-    else console.log(`✅ Upserted ${netSignals.length} net signal(s) for wallet ${wallet.id}`);
+    else console.log(`✅ Upserted ${dedupedSignals.length} net signal(s) for wallet ${wallet.id}`);
   } catch (err) {
     console.error(`❌ Unexpected upsert error for wallet ${wallet.id}:`, err.message);
   }
@@ -787,7 +793,7 @@ async function trackWallet(wallet, forceRebuild = false) {
     .eq("wallet_id", wallet.id)
     .gte("created_at", TWO_DAYS_AGO);
 
-  const totalPnl = recentSignals.reduce((sum, s) => sum + Number(s.pnl || 0), 0);
+  const totalPnl = (recentSignals || []).reduce((sum, s) => sum + Number(s.pnl || 0), 0);
 
   const { data: lastSignals = [] } = await supabase
     .from("signals")
@@ -797,7 +803,7 @@ async function trackWallet(wallet, forceRebuild = false) {
     .limit(10);
 
   let consecutiveLosses = 0;
-  for (const sig of lastSignals) {
+  for (const sig of (lastSignals || [])) {
     if ((sig.pnl || 0) < 0) consecutiveLosses++;
     else break;
   }
@@ -811,7 +817,6 @@ async function trackWallet(wallet, forceRebuild = false) {
 
     console.log(`⚠️ Wallet ${wallet.id} warning: ${warningMessage}`);
   } else if (wallet.warning) {
-    // Clear warning if conditions no longer apply
     await supabase
       .from("wallets")
       .update({ warning: null, warning_logged_at: null })
@@ -819,7 +824,7 @@ async function trackWallet(wallet, forceRebuild = false) {
   }
 
   // 8️⃣ Update wallet event exposure
-  const affectedEvents = [...new Set(netSignals.map(s => s.event_slug))];
+  const affectedEvents = [...new Set(dedupedSignals.map(s => s.event_slug))];
   for (const eventSlug of affectedEvents) {
     const totals = await getWalletOutcomeTotals(wallet.id, eventSlug);
     const entries = Object.entries(totals).sort((a, b) => b[1] - a[1]);
@@ -829,7 +834,7 @@ async function trackWallet(wallet, forceRebuild = false) {
     const secondAmount = entries[1]?.[1] ?? 0;
     if (secondAmount > 0 && netAmount / secondAmount < 1.05) continue;
 
-    const marketId = netSignals.find(s => s.event_slug === eventSlug)?.market_id || null;
+    const marketId = dedupedSignals.find(s => s.event_slug === eventSlug)?.market_id || null;
 
     await supabase
       .from("wallet_event_exposure")

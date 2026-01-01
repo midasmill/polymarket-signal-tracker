@@ -233,19 +233,17 @@ async function autoResolvePendingSignals() {
 /* ===========================
    Fetch Market (Includes Closed + Resolved)
 =========================== */
-const marketCache = new Map();
+const marketCache = new Map(); // ✅ Only declare once at the top
 
 async function fetchMarketSafe({ event_slug, polymarket_id, market_id }, bypassCache = false) {
   if (!event_slug && !polymarket_id && !market_id) return null;
 
-  // Use event_slug as primary cache key
   const cacheKey = event_slug || polymarket_id || market_id;
   if (!bypassCache && marketCache.has(cacheKey)) {
     return marketCache.get(cacheKey);
   }
 
   try {
-    // Construct URL: prefer slug, fallback to numeric ID if needed
     let url = "";
     if (event_slug) url = `https://gamma-api.polymarket.com/markets/slug/${event_slug}`;
     else if (polymarket_id) url = `https://gamma-api.polymarket.com/markets/${polymarket_id}`;
@@ -262,7 +260,6 @@ async function fetchMarketSafe({ event_slug, polymarket_id, market_id }, bypassC
       console.warn(`⚠️ Market not found: ${cacheKey}`);
       return null;
     }
-
     if (!res.ok) {
       console.error(`❌ Failed to fetch market ${cacheKey}: HTTP ${res.status}`);
       return null;
@@ -270,24 +267,15 @@ async function fetchMarketSafe({ event_slug, polymarket_id, market_id }, bypassC
 
     const market = await res.json();
 
-    // Auto-resolve outcome for closed markets
     if (!market.outcome && market.closed && market.outcomePrices && market.outcomes) {
       try {
         let prices = market.outcomePrices;
         let outcomes = market.outcomes;
-
         if (typeof prices === "string") prices = JSON.parse(prices);
         if (typeof outcomes === "string") outcomes = JSON.parse(outcomes);
-
-        // If outcomePrices is an object, convert to array
         if (!Array.isArray(prices) && typeof prices === "object") prices = Object.values(prices);
-
         const winnerIndex = prices.findIndex(p => Number(p) === 1);
-        if (winnerIndex !== -1) {
-          market.outcome = outcomes[winnerIndex];
-        } else {
-          console.warn(`⚠️ Could not determine winner for ${cacheKey}`);
-        }
+        if (winnerIndex !== -1) market.outcome = outcomes[winnerIndex];
       } catch (err) {
         console.error(`❌ Failed to parse outcomes for ${cacheKey}:`, err.message);
       }
@@ -636,17 +624,13 @@ async function fetchWalletActivities(proxyWallet, retries = 3) {
 /* ===========================
    Track Wallet (Net-Pick / Auto-Resolve Safe + Warning)
 =========================== */
-const marketCache = new Map(); // event_slug -> { market_id, polymarket_id, market }
-
 async function resolveMarketIdFromSlug(eventSlug) {
   if (!eventSlug) return null;
 
   if (marketCache.has(eventSlug)) return marketCache.get(eventSlug);
 
   try {
-    const res = await fetch(
-      `https://gamma-api.polymarket.com/markets/slug/${eventSlug}`
-    );
+    const res = await fetch(`https://gamma-api.polymarket.com/markets/slug/${eventSlug}`);
     if (!res.ok) return null;
 
     const market = await res.json();

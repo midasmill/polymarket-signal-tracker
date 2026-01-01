@@ -908,7 +908,7 @@ async function safeInsert(table, rows) {
 
 async function rebuildWalletLivePicks(forceRebuild = false) {
   const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "10", 10);
-  const MIN_TOTAL_PNL = 1000; // Enforce minimum PnL
+  const MIN_TOTAL_PNL = 1000; // enforce minimum PnL
   const BATCH_SIZE = 50;
 
   // 1️⃣ Fetch wallets
@@ -936,10 +936,10 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     return;
   }
 
-  // 3️⃣ Aggregate wallet net picks (skip low-PnL signals immediately)
+  // 3️⃣ Aggregate wallet net picks (skip low-PnL immediately)
   const walletNetPickMap = new Map();
   for (const sig of signals) {
-    if ((sig.pnl || 0) < MIN_TOTAL_PNL) continue; // Skip low-PnL
+    if ((sig.pnl || 0) < MIN_TOTAL_PNL) continue;
     const key = `${sig.wallet_id}||${sig.event_slug}`;
     if (!walletNetPickMap.has(key)) walletNetPickMap.set(key, {
       picks: {},
@@ -954,11 +954,11 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     if (sig.resolved_outcome) entry.resolved_outcome = sig.resolved_outcome;
   }
 
-  // 4️⃣ Compute wallet final picks
+  // 4️⃣ Compute wallet final picks (apply PnL threshold)
   const walletFinalPicks = [];
   for (const [key, data] of walletNetPickMap.entries()) {
     const sorted = Object.entries(data.picks).sort((a, b) => b[1] - a[1]);
-    if (!sorted.length || sorted[0][1] < MIN_TOTAL_PNL) continue; // enforce total PnL
+    if (!sorted.length || sorted[0][1] < MIN_TOTAL_PNL) continue;
     walletFinalPicks.push({
       wallet_id: parseInt(key.split("||")[0]),
       market_id: data.market_id,
@@ -1016,7 +1016,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     }
   }));
 
-  // 8️⃣ Build final live picks & signals (thresholds enforced)
+  // 8️⃣ Build final live picks & signals (vote & PnL thresholds enforced)
   const finalLivePicks = [];
   const signalsToUpsert = [];
 
@@ -1026,16 +1026,16 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 
     const [dominantOutcome, data] = sortedOutcomes[0];
 
-    // Combine with existing wallets
+    // ✅ Threshold check BEFORE merging with existing picks
+    if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL || data.totalPnl < MIN_TOTAL_PNL) continue;
+
+    // Merge existing info after threshold check
     const existing = existingPicks?.find(e => e.market_id === market_id && e.picked_outcome === dominantOutcome);
     if (existing) {
       (existing.wallets || []).forEach(w => data.walletIds.add(w));
       data.totalPnl += Number(existing.pnl || 0);
       if (!data.resolved_outcome && existing.resolved_outcome) data.resolved_outcome = existing.resolved_outcome;
     }
-
-    // ✅ Enforce both vote count AND total PnL
-    if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL || data.totalPnl < MIN_TOTAL_PNL) continue;
 
     const resolved = data.resolved_outcome || marketResolvedMap[market_id] || null;
 

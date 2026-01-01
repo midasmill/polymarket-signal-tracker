@@ -850,24 +850,50 @@ async function trackWallet(wallet, forceRebuild = false) {
 
 /* ===========================
    Rebuild Wallet Live Picks
-   (Batched + Concurrent + Skip Invalid Slugs + Canonical Slug Fix + Signal Fix)
+   (Batched + Concurrent + Robust + Safe Skips)
 =========================== */
 
 const invalidMarketSlugs = new Map(); // slug => reason
 
+// Robust resolved outcome extraction
 function getResolvedOutcomeFromMarket(market) {
   if (!market || !market.closed || !market.outcomes || !market.outcomePrices) return null;
+
   try {
-    const outcomes = JSON.parse(market.outcomes);
-    const idx = market.outcomePrices.findIndex(p => Number(p) === 1);
-    if (idx === -1) return null;
+    // Normalize outcomes
+    const outcomes = Array.isArray(market.outcomes)
+      ? market.outcomes
+      : JSON.parse(market.outcomes || "[]");
+
+    let outcomePrices = market.outcomePrices;
+
+    // Parse outcomePrices if it's a string
+    if (typeof outcomePrices === "string") {
+      outcomePrices = JSON.parse(outcomePrices);
+    }
+
+    // If object (not array), take values
+    if (outcomePrices && typeof outcomePrices === "object" && !Array.isArray(outcomePrices)) {
+      outcomePrices = Object.values(outcomePrices);
+    }
+
+    if (!Array.isArray(outcomePrices) || outcomePrices.length === 0) {
+      console.warn(`⚠️ outcomePrices invalid for market ${market.slug || market.id}`);
+      return null;
+    }
+
+    // Find index of winning outcome (price ≈ 1)
+    const idx = outcomePrices.findIndex(p => Math.abs(Number(p) - 1) < 1e-6);
+    if (idx === -1 || !outcomes[idx]) return null;
+
     return outcomes[idx];
   } catch (err) {
-    console.error("❌ Failed parsing market outcomes:", err);
+    console.error("❌ Failed parsing market outcomes:", err, market);
     return null;
   }
 }
 
+// Determine side for signals
 function determineSide(pickedOutcome, marketName, eventSlug) {
   if (!pickedOutcome) return "BUY";
   if (/YES|NO|OVER|UNDER/i.test(pickedOutcome)) return pickedOutcome.toUpperCase();
@@ -876,7 +902,7 @@ function determineSide(pickedOutcome, marketName, eventSlug) {
   return "BUY";
 }
 
-/* Safe Supabase insert/upsert helper */
+// Safe Supabase helpers
 async function safeUpsert(table, rows, options = {}) {
   try {
     const { data, error } = await supabase.from(table).upsert(rows, options);
@@ -888,6 +914,21 @@ async function safeUpsert(table, rows, options = {}) {
   }
 }
 
+async function safeInsert(table, rows) {
+  try {
+    const { data, error } = await supabase.from(table).insert(rows);
+    if (error) {
+      console.error(`❌ Insert failed into ${table}:`, error.message);
+      return null;
+    }
+    return data;
+  } catch (err) {
+    console.error(`❌ Unexpected error inserting into ${table}:`, err);
+    return null;
+  }
+}
+
+// Main rebuild function
 async function rebuildWalletLivePicks(forceRebuild = false) {
   const MIN_WALLETS_FOR_SIGNAL = 2;
   const BATCH_SIZE = 50;
@@ -976,7 +1017,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     console.error("❌ Failed fetching existing live picks:", err);
   }
 
-  // 7️⃣ Fetch canonical slugs & resolved outcomes
+  // 7️⃣ Fetch canonical slugs & resolved outcomes safely
   const marketResolvedMap = {};
   await Promise.all(walletFinalPicks.map(async pick => {
     const marketId = pick.market_id;
@@ -985,14 +1026,23 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     try {
       const market = await fetchMarket(slug);
       if (!market) throw new Error("404 Not Found");
-      slug = market.slug;
+      slug = market.slug || slug;
+
+      // Update signals with canonical slug
       await safeUpsert("signals", { event_slug: slug }, { onConflict: ["market_id"] });
+
+      // Extract resolved outcome safely
       const resolved = getResolvedOutcomeFromMarket(market);
       if (!resolved) throw new Error("Could not determine winner");
       marketResolvedMap[marketId] = resolved;
     } catch (err) {
       invalidMarketSlugs.set(slug, err.message);
-      await safeInsert("skipped_markets", { slug, reason: err.message, fetched_at: new Date() });
+      // ✅ Only insert if slug exists
+      if (slug) {
+        await safeInsert("skipped_markets", { slug, reason: err.message, fetched_at: new Date() });
+      } else {
+        console.warn("⚠️ Skipped inserting to skipped_markets: slug missing", err.message);
+      }
     }
   }));
 
@@ -1084,6 +1134,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   if (invalidMarketSlugs.size) console.warn("⚠️ Skipped markets:", Array.from(invalidMarketSlugs.entries()));
   console.log(`✅ Wallet live picks rebuilt & batch synced (${finalLivePicks.length})`);
 }
+
 
 /* ===========================
    Fetch Wallet Activity (DATA-API, Robust)

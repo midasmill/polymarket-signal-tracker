@@ -1000,8 +1000,16 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   for (const [market_id, entry] of marketNetPickMap.entries()) {
     for (const [outcome, data] of Object.entries(entry.outcomes)) {
       const resolved = data.resolved_outcome || marketResolvedMap[market_id] || null;
-      const outcomeStatus = resolved ? (outcome === resolved ? "WIN" : "LOSS") : "PENDING";
-      const resolvedOutcomeSafe = outcomeStatus === "PENDING" ? null : resolved;
+
+      let resolvedOutcomeSafe;
+      let outcomeStatus;
+      if (!resolved) {
+        resolvedOutcomeSafe = null;
+        outcomeStatus = "PENDING";
+      } else {
+        resolvedOutcomeSafe = outcome === resolved ? "WIN" : "LOSS";
+        outcomeStatus = resolvedOutcomeSafe;
+      }
 
       finalPendingPicks.push({
         market_id,
@@ -1032,8 +1040,16 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL || data.totalPnl < MIN_TOTAL_PNL) continue;
 
     const resolved = data.resolved_outcome || marketResolvedMap[market_id] || null;
-    const outcomeStatus = resolved ? (dominantOutcome === resolved ? "WIN" : "LOSS") : "PENDING";
-    const resolvedOutcomeSafe = outcomeStatus === "PENDING" ? null : resolved;
+
+    let resolvedOutcomeSafe;
+    let outcomeStatus;
+    if (!resolved) {
+      resolvedOutcomeSafe = null;
+      outcomeStatus = "PENDING";
+    } else {
+      resolvedOutcomeSafe = dominantOutcome === resolved ? "WIN" : "LOSS";
+      outcomeStatus = resolvedOutcomeSafe;
+    }
 
     finalLivePicks.push({
       market_id,
@@ -1063,8 +1079,16 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL || data.totalPnl < MIN_TOTAL_PNL) continue;
 
     const resolved = data.resolved_outcome || marketResolvedMap[market_id] || null;
-    const outcomeStatus = resolved ? (dominantOutcome === resolved ? "WIN" : "LOSS") : "PENDING";
-    const resolvedOutcomeSafe = outcomeStatus === "PENDING" ? null : resolved;
+
+    let resolvedOutcomeSafe;
+    let outcomeStatus;
+    if (!resolved) {
+      resolvedOutcomeSafe = null;
+      outcomeStatus = "PENDING";
+    } else {
+      resolvedOutcomeSafe = dominantOutcome === resolved ? "WIN" : "LOSS";
+      outcomeStatus = resolvedOutcomeSafe;
+    }
 
     data.walletIds.forEach(wallet_id => {
       if (!wallet_id || !market_id) return;
@@ -1096,13 +1120,14 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 
   for (let i = 0; i < dedupedSignals.length; i += BATCH_SIZE) {
     await safeUpsert("signals", dedupedSignals.slice(i, i + BATCH_SIZE), {
-      onConflict: ["wallet_id","market_id"]
+      onConflict: ["wallet_id", "market_id"]
     });
   }
 
   invalidMarketSlugs.clear();
   console.log(`✅ Wallet live picks, pending, and signals rebuilt safely`);
 }
+
 
 /* ===========================
    Fetch Wallet Activity (DATA-API, Robust)

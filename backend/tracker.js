@@ -539,10 +539,11 @@ async function trackWallet(wallet) {
 /* ===========================
    Rebuild Wallet Live Picks
    (Dominant Net Pick Per Market – Merge + Min Wallets + Resolved Sync)
+   Auto-rebuild signals if table is empty
 =========================== */
 async function rebuildWalletLivePicks() {
   // 1️⃣ Fetch signals linked to active wallets
-  const { data: signals, error } = await supabase
+  let { data: signals, error } = await supabase
     .from("signals")
     .select(`
       wallet_id,
@@ -559,7 +560,55 @@ async function rebuildWalletLivePicks() {
     .gte("wallets.win_rate", WIN_RATE_THRESHOLD)
     .gte("pnl", 1000);
 
-  if (error || !signals?.length) return;
+  if (error) {
+    console.error("❌ Error fetching signals:", error.message);
+    return;
+  }
+
+  // ⚡ Auto-recreate signals if table is empty
+  if (!signals?.length) {
+    console.log("⚡ Signals table empty — rebuilding signals from active wallets...");
+    const { data: wallets } = await supabase
+      .from("wallets")
+      .select("*")
+      .eq("paused", false)
+      .gte("win_rate", WIN_RATE_THRESHOLD);
+
+    if (wallets?.length) {
+      for (const wallet of wallets) {
+        await trackWallet(wallet); // fetch positions & upsert signals
+      }
+    }
+
+    // Refetch signals after tracking
+    const { data: newSignals, error: refetchError } = await supabase
+      .from("signals")
+      .select(`
+        wallet_id,
+        market_id,
+        market_name,
+        event_slug,
+        picked_outcome,
+        pnl,
+        outcome,
+        resolved_outcome,
+        wallets!inner(paused, win_rate)
+      `)
+      .eq("wallets.paused", false)
+      .gte("wallets.win_rate", WIN_RATE_THRESHOLD)
+      .gte("pnl", 1000);
+
+    if (refetchError) {
+      console.error("❌ Error refetching signals:", refetchError.message);
+      return;
+    }
+    signals = newSignals;
+  }
+
+  if (!signals?.length) {
+    console.log("⚠ No signals found after rebuilding, skipping wallet live picks");
+    return;
+  }
 
   // 2️⃣ Compute net pick per wallet per event (only Pending signals)
   const walletNetPickMap = new Map();
@@ -575,6 +624,7 @@ async function rebuildWalletLivePicks() {
         event_slug: sig.event_slug
       });
     }
+
     const entry = walletNetPickMap.get(key);
     entry.picks[sig.picked_outcome] = (entry.picks[sig.picked_outcome] || 0) + Number(sig.pnl || 0);
   }

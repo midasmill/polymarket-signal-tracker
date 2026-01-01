@@ -494,29 +494,42 @@ for (const sig of signals) {
 
 
 /* ===========================
-   Count Wallet Daily Losses
+   Count Wallet Daily Losses (Fixed & Optimized)
 =========================== */
 async function countWalletDailyLosses(walletId) {
-  const start = new Date(); start.setHours(0, 0, 0, 0);
-  const end = new Date(); end.setHours(23, 59, 59, 999);
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  const end = new Date();
+  end.setHours(23, 59, 59, 999);
 
-  const { data: events } = await supabase
+  // Fetch today's LOSS signals for this wallet
+  const { data: signals, error } = await supabase
     .from("signals")
-    .select("event_slug")
+    .select("event_slug, picked_outcome, outcome")
     .eq("wallet_id", walletId)
     .eq("outcome", "LOSS")
     .gte("outcome_at", start.toISOString())
     .lte("outcome_at", end.toISOString());
 
-  if (!events?.length) return 0;
-
-  let lossCount = 0;
-  const uniqueEvents = [...new Set(events.map(e => e.event_slug).filter(Boolean))];
-
-  for (const eventSlug of uniqueEvents) {
-    const result = await resolveWalletEventOutcome(walletId, eventSlug);
-    if (result === "LOSS") lossCount++;
+  if (error) {
+    console.error(`❌ Error fetching daily losses for wallet ${walletId}:`, error);
+    return 0;
   }
+  if (!signals?.length) return 0;
+
+  // Count unique events that are actually losses for this wallet
+  const uniqueEventSlugs = [...new Set(signals.map(s => s.event_slug).filter(Boolean))];
+  let lossCount = 0;
+
+  // Optional: only count events where the wallet's net pick actually lost
+  const promises = uniqueEventSlugs.map(async (eventSlug) => {
+    const outcome = await resolveWalletEventOutcome(walletId, eventSlug);
+    if (outcome === "LOSS") return 1;
+    return 0;
+  });
+
+  const results = await Promise.all(promises);
+  lossCount = results.reduce((sum, val) => sum + val, 0);
 
   return lossCount;
 }
@@ -1139,20 +1152,28 @@ Outcome: ${pick.outcome} ${outcomeEmoji}`;
 }
 
 /* ===========================
-   Wallet Metrics Update
+   Wallet Metrics Update (Fixed)
 =========================== */
 async function updateWalletMetricsJS() {
-  const { data: wallets } = await supabase.from("wallets").select("*");
+  const { data: wallets, error: walletErr } = await supabase.from("wallets").select("*");
+  if (walletErr) {
+    console.error("❌ Error fetching wallets:", walletErr);
+    return;
+  }
   if (!wallets?.length) return;
 
   for (const wallet of wallets) {
     // Fetch resolved signals for this wallet
-    const { data: resolvedSignals } = await supabase
+    const { data: resolvedSignals, error: sigErr } = await supabase
       .from("signals")
       .select("event_slug, picked_outcome, outcome")
       .eq("wallet_id", wallet.id)
       .in("outcome", ["WIN", "LOSS"]);
 
+    if (sigErr) {
+      console.error(`❌ Error fetching signals for wallet ${wallet.id}:`, sigErr);
+      continue;
+    }
     if (!resolvedSignals?.length) continue;
 
     // Group signals by event
@@ -1168,19 +1189,14 @@ async function updateWalletMetricsJS() {
     for (const [eventSlug, signalsForEvent] of eventsMap.entries()) {
       // Skip wallets that have both sides for this event
       const netPick = await getWalletNetPick(wallet.id, eventSlug);
-if (!netPick) continue;
+      if (!netPick) continue;
 
-const sig = signalsForEvent.find(s => s.picked_outcome === netPick);
-if (!sig) continue;
+      // Count outcome only for the wallet's chosen side
+      const sig = signalsForEvent.find(s => s.picked_outcome === netPick);
+      if (!sig) continue;
 
-if (sig.outcome === "WIN") wins++;
-if (sig.outcome === "LOSS") losses++;
-
-
-      // Determine majority outcome for this wallet/event
-      const outcome = signalsForEvent[0]?.outcome || null;
-      if (outcome === "WIN") wins++;
-      if (outcome === "LOSS") losses++;
+      if (sig.outcome === "WIN") wins++;
+      else if (sig.outcome === "LOSS") losses++;
     }
 
     const total = wins + losses;
@@ -1188,7 +1204,13 @@ if (sig.outcome === "LOSS") losses++;
 
     // Count daily losses safely
     const dailyLosses = await countWalletDailyLosses(wallet.id);
-    const shouldPause = dailyLosses >= 3;
+
+    // Pause wallet only if daily losses are high AND win rate is low
+    const shouldPause = dailyLosses >= 3 && winRate < 80;
+
+    if (shouldPause) console.log(
+      `⚠️ Pausing wallet ${wallet.id}: ${dailyLosses} daily losses, win rate ${winRate}%`
+    );
 
     await supabase
       .from("wallets")
@@ -1200,6 +1222,7 @@ if (sig.outcome === "LOSS") losses++;
       .eq("id", wallet.id);
   }
 }
+
 
 /* ===========================
    Signal Processing + Telegram Sending (Fixed)

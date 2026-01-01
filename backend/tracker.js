@@ -400,12 +400,10 @@ async function trackWallet(wallet) {
     .from("signals")
     .select("tx_hash")
     .eq("wallet_id", wallet.id);
-
   const existingTxs = new Set(existingSignals.map(s => s.tx_hash));
 
   // 3️⃣ Aggregate PNL per wallet/event per outcome
   const walletEventMap = new Map();
-
   for (const pos of positions) {
     const eventSlug = pos.eventSlug || pos.slug;
     if (!eventSlug) continue;
@@ -414,7 +412,6 @@ async function trackWallet(wallet) {
     // Determine picked_outcome
     let pickedOutcome;
     const sideValue = (pos.side || "BUY").toUpperCase();
-
     if (pos.title?.includes(" vs. ")) {
       const [teamA, teamB] = pos.title.split(" vs. ").map(s => s.trim());
       pickedOutcome = sideValue === "BUY" ? teamA : teamB;
@@ -438,6 +435,7 @@ async function trackWallet(wallet) {
         event_slug: eventSlug
       });
     }
+
     const entry = walletEventMap.get(key);
     entry.picks[pickedOutcome] = (entry.picks[pickedOutcome] || 0) + Number(pos.cashPnl || 0);
   }
@@ -445,12 +443,24 @@ async function trackWallet(wallet) {
   // 4️⃣ Compute net pick per wallet/event
   const netSignals = [];
   for (const [key, data] of walletEventMap.entries()) {
-    const sorted = Object.entries(data.picks).sort((a, b) => b[1] - a[1]);
+    const sorted = Object.entries(data.picks).sort((a, b) => b[1] - a[1]); // highest PNL first
     if (!sorted.length) continue;
 
     const wallet_id = parseInt(key.split("||")[0]);
     const picked_outcome = sorted[0][0];
     const pnl = sorted[0][1];
+
+    // Determine side based on outcome type
+    let side;
+    if (/YES|NO/i.test(picked_outcome)) {
+      side = picked_outcome.toUpperCase(); // YES / NO
+    } else if (/OVER|UNDER/i.test(picked_outcome)) {
+      side = picked_outcome.toUpperCase(); // OVER / UNDER
+    } else {
+      // For team markets, assume first team = BUY, second = SELL
+      const teams = data.market_name?.split(" vs. ").map(s => s.trim());
+      side = teams?.[0] === picked_outcome ? "BUY" : "SELL";
+    }
 
     netSignals.push({
       wallet_id,
@@ -459,7 +469,8 @@ async function trackWallet(wallet) {
       event_slug: data.event_slug,
       picked_outcome,
       pnl,
-      signal: data.market_name || picked_outcome || "UNKNOWN", // ✅ always NOT NULL
+      signal: data.market_name || picked_outcome || "UNKNOWN", // always NOT NULL
+      side, // ✅ always NOT NULL
       outcome: "Pending",
       resolved_outcome: null,
       outcome_at: null,
@@ -520,6 +531,7 @@ async function trackWallet(wallet) {
       });
   }
 }
+
 
 /* ===========================
    Rebuild Wallet Live Picks (Dominant Net Pick Per Market – Merge Existing)

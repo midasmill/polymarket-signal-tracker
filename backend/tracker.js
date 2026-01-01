@@ -770,7 +770,7 @@ async function trackWallet(wallet, forceRebuild = false) {
 
 /* ===========================
    Rebuild Wallet Live Picks
-   (Dominant Net Pick Per Market – Min Wallets + Merge Existing + Resolved Sync)
+   (Dominant Net Pick Per Market – Min Wallets + Merge Existing + Resolved Sync + Threshold Cleanup)
 =========================== */
 
 // Helper: Extract resolved outcome from Polymarket market
@@ -848,7 +848,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 
   if (!signals.length) return;
 
-  // 3️⃣ Compute each wallet's net pick per event (ALL signals)
+  // 3️⃣ Compute each wallet's net pick per event
   const walletNetPickMap = new Map();
   for (const sig of signals) {
     const key = `${sig.wallet_id}||${sig.event_slug}`;
@@ -864,7 +864,6 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     const entry = walletNetPickMap.get(key);
     entry.picks[sig.picked_outcome] = (entry.picks[sig.picked_outcome] || 0) + Number(sig.pnl || 0);
 
-    // Keep resolved outcome if available
     if (sig.resolved_outcome) entry.resolved_outcome = sig.resolved_outcome;
   }
 
@@ -967,7 +966,15 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     });
   }
 
-  // 7️⃣ Upsert final picks in parallel
+  // 6.5️⃣ Remove resolved picks below threshold before upsert
+  const marketIdsToCheck = finalLivePicks.map(p => p.market_id);
+  await supabase
+    .from("wallet_live_picks")
+    .delete()
+    .in("market_id", marketIdsToCheck)
+    .lt("vote_count", MIN_WALLETS_FOR_SIGNAL);
+
+  // 7️⃣ Upsert final picks
   await Promise.allSettled(finalLivePicks.map(pick =>
     supabase
       .from("wallet_live_picks")
@@ -976,6 +983,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 
   console.log(`✅ Wallet live picks rebuilt, merged & synced with outcomes (${finalLivePicks.length})`);
 }
+
 
 /* ===========================
    Fetch Wallet Activity (DATA-API)

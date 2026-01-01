@@ -706,6 +706,22 @@ async function trackWallet(wallet, forceRebuild = false) {
    Rebuild Wallet Live Picks
    (Dominant Net Pick Per Market – Min Wallets + Merge Existing + Resolved Sync)
 =========================== */
+
+// Helper: Extract resolved outcome from Polymarket market
+function getResolvedOutcomeFromMarket(market) {
+  if (!market || !market.closed || !market.outcomes || !market.outcomePrices) return null;
+
+  try {
+    const outcomes = JSON.parse(market.outcomes); // e.g., ["Arizona", "Arizona State"]
+    const idx = market.outcomePrices.findIndex(p => Number(p) === 1);
+    if (idx === -1) return null;
+    return outcomes[idx]; // resolved outcome
+  } catch (err) {
+    console.error("❌ Failed parsing market outcomes:", err);
+    return null;
+  }
+}
+
 async function rebuildWalletLivePicks(forceRebuild = false) {
   // 1️⃣ Fetch all signals joined with active wallets
   let { data: signals, error } = await supabase
@@ -869,7 +885,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 
     // Fetch market to sync resolved outcome if not yet set
     const market = await fetchMarket(entry.event_slug);
-    const resolved = data.resolved_outcome || market?.outcome || null;
+    const resolved = data.resolved_outcome || getResolvedOutcomeFromMarket(market) || null;
 
     finalLivePicks.push({
       market_id: entry.market_id,

@@ -1,4 +1,4 @@
-import { createClient } from "@supabase/supabase-js";
+ilimport { createClient } from "@supabase/supabase-js";
 import fetch from "node-fetch";
 import cron from "node-cron";
 import http from "http";

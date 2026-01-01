@@ -970,7 +970,7 @@ async function trackWallet(wallet, forceRebuild = false) {
 
 /* ===========================
    Rebuild Wallet Live Picks
-   (Polymarket ID + Vote Threshold + Canonical Slug + Batched)
+   (Polymarket ID + Vote Threshold + Canonical Slug + Batched + Auto-Repopulate Signals)
 =========================== */
 
 const invalidMarketSlugs = new Map(); // slug => reason
@@ -1007,7 +1007,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   if (!wallets?.length) return console.log("⚠️ No wallets found");
 
   // 2️⃣ Fetch signals
-  const { data: signals, error: sigErr } = await supabase
+  let { data: signals, error: sigErr } = await supabase
     .from("signals")
     .select(`
       wallet_id,
@@ -1020,9 +1020,43 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       resolved_outcome
     `);
 
-  if (sigErr || !signals?.length) {
-    console.error("❌ Failed fetching signals:", sigErr?.message);
-    return;
+  // ⚡ Auto-repopulate signals if empty
+  if (!signals?.length) {
+    console.log("⚠️ Signals table empty — repopulating from wallet picks...");
+    signals = [];
+
+    for (const wallet of wallets) {
+      // Replace 'wallet_picks' with your actual raw picks table
+      const { data: picks } = await supabase
+        .from("wallet_picks")
+        .select("market_id, polymarket_id, market_name, event_slug, picked_outcome, pnl")
+        .eq("wallet_id", wallet.id);
+
+      if (!picks?.length) continue;
+
+      for (const pick of picks) {
+        signals.push({
+          wallet_id: wallet.id,
+          market_id: pick.market_id,
+          polymarket_id: pick.polymarket_id,
+          market_name: pick.market_name,
+          event_slug: pick.event_slug,
+          picked_outcome: pick.picked_outcome,
+          pnl: pick.pnl || 0,
+          resolved_outcome: null
+        });
+      }
+    }
+
+    // Upsert back into signals table
+    for (let i = 0; i < signals.length; i += BATCH_SIZE) {
+      await supabase.from("signals").upsert(
+        signals.slice(i, i + BATCH_SIZE),
+        { onConflict: ["wallet_id", "market_id"] }
+      );
+    }
+
+    console.log(`✅ Re-populated ${signals.length} signals from wallet picks`);
   }
 
   // 3️⃣ Aggregate wallet net picks
@@ -1140,7 +1174,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     if (!sorted.length) continue;
 
     const [dominantOutcome, data] = sorted[0];
-    if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL) continue; // ✅ enforce vote threshold
+    if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL) continue;
 
     const resolved = data.resolved_outcome || marketResolvedMap[polymarket_id] || null;
 
@@ -1192,6 +1226,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 
   console.log(`✅ Wallet live picks rebuilt (${finalLivePicks.length})`);
 }
+
 
 
 /* ===========================

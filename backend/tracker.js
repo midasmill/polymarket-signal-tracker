@@ -14,13 +14,13 @@ const TIMEZONE = process.env.TIMEZONE || "America/New_York";
 
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || "30000", 10);
 const WIN_RATE_THRESHOLD = parseInt(process.env.WIN_RATE_THRESHOLD || "0", 10);
-const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "2", 10);
+const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "5", 10);
 const FORCE_SEND = process.env.FORCE_SEND === "true";
 
 const CONFIDENCE_THRESHOLDS = {
-  "⭐": 2,
-  "⭐⭐": 5,
-  "⭐⭐⭐": 10,
+  "⭐": 5,
+  "⭐⭐": 10,
+  "⭐⭐⭐": 15,
   "⭐⭐⭐⭐": 20,
   "⭐⭐⭐⭐⭐": 50
 };
@@ -373,7 +373,7 @@ async function fetchWalletActivities(proxyWallet, retries = 3) {
 }
 
 /* ===========================
-   Track Wallet (Enhanced / Fixed)
+   Track Wallet (Net-Pick / Fixed)
 =========================== */
 async function trackWallet(wallet) {
   const proxyWallet = wallet.polymarket_proxy_wallet;
@@ -398,24 +398,21 @@ async function trackWallet(wallet) {
   // 2️⃣ Fetch existing signals ONCE
   const { data: existingSignals } = await supabase
     .from("signals")
-    .select("tx_hash, event_slug, picked_outcome")
+    .select("tx_hash, event_slug, picked_outcome, pnl")
     .eq("wallet_id", wallet.id);
 
   const existingTxs = new Set(existingSignals.map(s => s.tx_hash));
-  const existingKeys = new Set(existingSignals.map(
-    s => `${s.wallet_id}||${s.event_slug}||${s.picked_outcome}`
-  ));
 
-  const newSignals = [];
+  // 3️⃣ Collect positions per wallet per event and compute net PNL per outcome
+  const walletEventMap = new Map();
 
   for (const pos of positions) {
     const eventSlug = pos.eventSlug || pos.slug;
     if (!eventSlug) continue;
 
-    // ✅ MIN SIZE FILTER ($1,000)
-    if ((pos.cashPnl ?? 0) < 1000) continue;
+    if ((pos.cashPnl ?? 0) < 1000) continue; // min size filter
 
-    // 3️⃣ Determine picked_outcome
+    // Determine picked_outcome
     let pickedOutcome;
     const sideValue = pos.side?.toUpperCase() || "BUY";
 
@@ -428,11 +425,7 @@ async function trackWallet(wallet) {
       pickedOutcome = sideValue === "BUY" ? "YES" : "NO";
     }
 
-    // ✅ Skip ONLY if SAME wallet already picked SAME outcome for this event
-    const key = `${wallet.id}||${eventSlug}||${pickedOutcome}`;
-    if (existingKeys.has(key)) continue;
-
-    // 4️⃣ Generate synthetic tx hash
+    // Generate synthetic tx hash
     const syntheticTx = [
       proxyWallet,
       pos.asset,
@@ -442,67 +435,59 @@ async function trackWallet(wallet) {
 
     if (existingTxs.has(syntheticTx)) continue;
 
-    // 5️⃣ Fetch market (skip closed)
-    const market = await fetchMarket(eventSlug);
-    if (!market) continue;
+    // Aggregate PNL per outcome per wallet per event
+    const key = `${wallet.id}||${eventSlug}`;
+    if (!walletEventMap.has(key)) {
+      walletEventMap.set(key, { picks: {}, market_id: pos.conditionId, market_name: pos.title, event_slug: eventSlug });
+    }
 
-    // 6️⃣ Push signal
-    newSignals.push({
-      wallet_id: wallet.id,
-      signal: pos.title,
-      market_name: pos.title,
-      market_id: pos.conditionId,
-      event_slug: eventSlug,
-      side: sideValue,
-      picked_outcome: pickedOutcome,
-      tx_hash: syntheticTx,
-      pnl: pos.cashPnl,
+    const entry = walletEventMap.get(key);
+    entry.picks[pickedOutcome] = (entry.picks[pickedOutcome] || 0) + Number(pos.cashPnl || 0);
+  }
+
+  // 4️⃣ Compute net pick per wallet per event
+  const netSignals = [];
+  for (const [key, data] of walletEventMap.entries()) {
+    const sorted = Object.entries(data.picks).sort((a, b) => b[1] - a[1]); // highest PNL first
+    if (!sorted.length) continue;
+
+    const wallet_id = parseInt(key.split("||")[0]);
+    const picked_outcome = sorted[0][0];
+    const pnl = sorted[0][1];
+
+    netSignals.push({
+      wallet_id,
+      market_id: data.market_id,
+      market_name: data.market_name,
+      event_slug: data.event_slug,
+      picked_outcome,
+      pnl,
       outcome: "Pending",
       resolved_outcome: null,
       outcome_at: null,
       win_rate: wallet.win_rate,
-      created_at: new Date(pos.timestamp ? pos.timestamp * 1000 : Date.now()),
-      event_start_at: market?.eventStartAt ? new Date(market.eventStartAt) : null
+      created_at: new Date(),
+      event_start_at: null // optional: fetch market.eventStartAt if needed
     });
   }
 
-  if (!newSignals.length) return;
+  if (!netSignals.length) return;
 
-  // 7️⃣ Deduplicate signals before upsert to prevent Postgres conflict errors
-  const dedupedSignalsMap = new Map();
-  for (const sig of newSignals) {
-    const key = `${sig.wallet_id}||${sig.event_slug}||${sig.picked_outcome}`;
-    if (!dedupedSignalsMap.has(key)) {
-      dedupedSignalsMap.set(key, sig);
-    } else {
-      // Merge PNL if duplicate occurs in same batch
-      dedupedSignalsMap.get(key).pnl += Number(sig.pnl || 0);
-    }
-  }
-
-  const dedupedSignals = Array.from(dedupedSignalsMap.values());
-
-  // 8️⃣ Upsert safely
+  // 5️⃣ Upsert signals safely
   const { error } = await supabase
     .from("signals")
-    .upsert(dedupedSignals, {
+    .upsert(netSignals, {
       onConflict: ["wallet_id", "event_slug", "picked_outcome"]
     });
 
   if (error) {
-    console.error(
-      `❌ Failed inserting/upserting signals for wallet ${wallet.id}:`,
-      error.message
-    );
+    console.error(`❌ Failed upserting signals for wallet ${wallet.id}:`, error.message);
   } else {
-    console.log(
-      `✅ Inserted/updated ${dedupedSignals.length} signal(s) for wallet ${wallet.id}`
-    );
+    console.log(`✅ Upserted ${netSignals.length} net signal(s) for wallet ${wallet.id}`);
   }
 
-  // 9️⃣ Update wallet event exposure (PER EVENT)
-  const affectedEvents = [...new Set(dedupedSignals.map(s => s.event_slug))];
-
+  // 6️⃣ Update wallet event exposure (per event)
+  const affectedEvents = [...new Set(netSignals.map(s => s.event_slug))];
   for (const eventSlug of affectedEvents) {
     const totals = await getWalletOutcomeTotals(wallet.id, eventSlug);
     const entries = Object.entries(totals).sort((a, b) => b[1] - a[1]);
@@ -512,7 +497,7 @@ async function trackWallet(wallet) {
     const secondAmount = entries[1]?.[1] ?? 0;
     if (secondAmount > 0 && netAmount / secondAmount < 1.05) continue;
 
-    const marketId = dedupedSignals.find(s => s.event_slug === eventSlug)?.market_id || null;
+    const marketId = netSignals.find(s => s.event_slug === eventSlug)?.market_id || null;
 
     await supabase
       .from("wallet_event_exposure")

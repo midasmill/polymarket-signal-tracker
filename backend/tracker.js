@@ -850,7 +850,7 @@ async function trackWallet(wallet, forceRebuild = false) {
 
 /* ===========================
    Rebuild Wallet Live Picks
-   (Batched + Concurrent + Robust + Safe Skips)
+   (Threshold-Safe + Batched + Concurrent + Robust)
 =========================== */
 
 const invalidMarketSlugs = new Map(); // slug => reason
@@ -867,12 +867,12 @@ function getResolvedOutcomeFromMarket(market) {
 
     let outcomePrices = market.outcomePrices;
 
-    // Parse outcomePrices if it's a string
+    // Parse outcomePrices if string
     if (typeof outcomePrices === "string") {
       outcomePrices = JSON.parse(outcomePrices);
     }
 
-    // If object (not array), take values
+    // If object, take values
     if (outcomePrices && typeof outcomePrices === "object" && !Array.isArray(outcomePrices)) {
       outcomePrices = Object.values(outcomePrices);
     }
@@ -882,7 +882,7 @@ function getResolvedOutcomeFromMarket(market) {
       return null;
     }
 
-    // Find index of winning outcome (price ≈ 1)
+    // Find winning outcome (price ≈ 1)
     const idx = outcomePrices.findIndex(p => Math.abs(Number(p) - 1) < 1e-6);
     if (idx === -1 || !outcomes[idx]) return null;
 
@@ -902,7 +902,7 @@ function determineSide(pickedOutcome, marketName, eventSlug) {
   return "BUY";
 }
 
-// Safe Supabase helpers
+// Unified safe Supabase helper
 async function safeUpsert(table, rows, options = {}) {
   try {
     const { data, error } = await supabase.from(table).upsert(rows, options);
@@ -1017,7 +1017,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     console.error("❌ Failed fetching existing live picks:", err);
   }
 
-  // 7️⃣ Fetch canonical slugs & resolved outcomes safely
+  // 7️⃣ Fetch canonical slugs & resolved outcomes
   const marketResolvedMap = {};
   await Promise.all(walletFinalPicks.map(async pick => {
     const marketId = pick.market_id;
@@ -1028,16 +1028,12 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       if (!market) throw new Error("404 Not Found");
       slug = market.slug || slug;
 
-      // Update signals with canonical slug
       await safeUpsert("signals", { event_slug: slug }, { onConflict: ["market_id"] });
-
-      // Extract resolved outcome safely
       const resolved = getResolvedOutcomeFromMarket(market);
       if (!resolved) throw new Error("Could not determine winner");
       marketResolvedMap[marketId] = resolved;
     } catch (err) {
       invalidMarketSlugs.set(slug, err.message);
-      // ✅ Only insert if slug exists
       if (slug) {
         await safeInsert("skipped_markets", { slug, reason: err.message, fetched_at: new Date() });
       } else {
@@ -1046,7 +1042,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     }
   }));
 
-  // 8️⃣ Build final live picks & signals
+  // 8️⃣ Build final live picks & signals (threshold-safe)
   const finalLivePicks = [];
   const signalsToUpsert = [];
 
@@ -1055,6 +1051,8 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     if (!sortedOutcomes.length) continue;
 
     const [dominantOutcome, data] = sortedOutcomes[0];
+
+    // ✅ Only process picks meeting vote/wallet threshold
     if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL) continue;
 
     const existing = existingPicks?.find(e => e.market_id === market_id && e.picked_outcome === dominantOutcome);
@@ -1078,63 +1076,48 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 
     if (resolved) {
       data.walletIds.forEach(wallet_id => {
-        if (wallet_id && market_id) {
-          const side = determineSide(dominantOutcome, entry.market_name, entry.event_slug);
-          signalsToUpsert.push({
-            wallet_id,
-            market_id,
-            market_name: entry.market_name,
-            event_slug: entry.event_slug,
-            picked_outcome: dominantOutcome,
-            pnl: data.totalPnl,
-            resolved_outcome: resolved,
-            outcome: resolved,
-            signal: dominantOutcome,
-            side,
-            tx_hash: null,
-            win_rate: null
-          });
-        }
+        const side = determineSide(dominantOutcome, entry.market_name, entry.event_slug);
+        signalsToUpsert.push({
+          wallet_id,
+          market_id,
+          market_name: entry.market_name,
+          event_slug: entry.event_slug,
+          picked_outcome: dominantOutcome,
+          pnl: data.totalPnl,
+          resolved_outcome: resolved,
+          outcome: resolved,
+          signal: dominantOutcome,
+          side,
+          tx_hash: null,
+          win_rate: null
+        });
       });
     }
   }
 
-  // 9️⃣ Remove old picks below threshold
-  try {
-    await supabase.from("wallet_live_picks").delete()
-      .in("market_id", finalLivePicks.map(p => p.market_id))
-      .lt("vote_count", MIN_WALLETS_FOR_SIGNAL);
-  } catch (err) {
-    console.error("❌ Failed deleting old picks:", err);
-  }
-
-  // 🔟 Batch upsert wallet_live_picks
+  // 9️⃣ Batch upsert wallet_live_picks & signals
   for (let i = 0; i < finalLivePicks.length; i += BATCH_SIZE) {
     const batch = finalLivePicks.slice(i, i + BATCH_SIZE);
     await safeUpsert("wallet_live_picks", batch, { onConflict: ["market_id", "picked_outcome"] });
   }
 
-  // 1️⃣1️⃣ Batch upsert signals
-  if (signalsToUpsert.length) {
-    const uniqueSignals = [];
-    const seen = new Set();
-    for (const s of signalsToUpsert) {
-      const key = `${s.wallet_id}||${s.market_id}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        uniqueSignals.push(s);
-      }
+  const uniqueSignals = [];
+  const seen = new Set();
+  for (const s of signalsToUpsert) {
+    const key = `${s.wallet_id}||${s.market_id}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      uniqueSignals.push(s);
     }
-    for (let i = 0; i < uniqueSignals.length; i += BATCH_SIZE) {
-      const batch = uniqueSignals.slice(i, i + BATCH_SIZE);
-      await safeUpsert("signals", batch, { onConflict: ["wallet_id", "market_id"] });
-    }
+  }
+  for (let i = 0; i < uniqueSignals.length; i += BATCH_SIZE) {
+    const batch = uniqueSignals.slice(i, i + BATCH_SIZE);
+    await safeUpsert("signals", batch, { onConflict: ["wallet_id", "market_id"] });
   }
 
   if (invalidMarketSlugs.size) console.warn("⚠️ Skipped markets:", Array.from(invalidMarketSlugs.entries()));
   console.log(`✅ Wallet live picks rebuilt & batch synced (${finalLivePicks.length})`);
 }
-
 
 /* ===========================
    Fetch Wallet Activity (DATA-API, Robust)
@@ -1518,25 +1501,6 @@ async function trackerLoop() {
     isTrackerRunning = false;
   }
 }
-
-
-/* ===========================
-   Safe Insert Utility
-=========================== */
-async function safeInsert(table, rows) {
-  try {
-    const { data, error } = await supabase.from(table).insert(rows);
-    if (error) {
-      console.error(`❌ Insert failed into ${table}:`, error.message);
-      return null;
-    }
-    return data;
-  } catch (err) {
-    console.error(`❌ Unexpected error inserting into ${table}:`, err);
-    return null;
-  }
-}
-
 
 /* ===========================
    Main Entry

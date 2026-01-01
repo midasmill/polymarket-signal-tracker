@@ -216,37 +216,39 @@ async function autoResolvePendingSignals() {
   console.log(`✅ Auto-resolved ${resolvedCount} pending signal(s)`);
 }
 
-/* ===========================
-   Normalize picked_outcome
-   Maps generic YES/NO/OVER/UNDER to actual market outcomes
-=========================== */
 function normalizePickedOutcome(pickedOutcome, marketName, eventSlug, marketOutcomes) {
   if (!pickedOutcome) return null;
+
+  const upperPick = pickedOutcome.toUpperCase();
 
   // 1️⃣ If pickedOutcome is already one of the actual outcomes, return it
   if (marketOutcomes?.includes(pickedOutcome)) return pickedOutcome;
 
-  // 2️⃣ Map YES/NO, OVER/UNDER based on market type
-  const upperPick = pickedOutcome.toUpperCase();
-  if (upperPick === "YES" || upperPick === "OVER") {
-    return marketOutcomes?.[0] ?? pickedOutcome;
-  }
-  if (upperPick === "NO" || upperPick === "UNDER") {
-    return marketOutcomes?.[1] ?? pickedOutcome;
+  // 2️⃣ Detect if this is a binary YES/NO market
+  const isBinaryYesNo = marketOutcomes?.length === 2 &&
+                        marketOutcomes.includes("YES") &&
+                        marketOutcomes.includes("NO");
+
+  if (isBinaryYesNo) {
+    // Keep YES/NO as-is
+    if (upperPick === "YES" || upperPick === "NO") return upperPick;
+    return pickedOutcome; // fallback
   }
 
-  // 3️⃣ If it's a team pick for sports, match by name in marketName or eventSlug
+  // 3️⃣ Map YES/NO, OVER/UNDER only for sports or over/under markets
+  if (upperPick === "YES" || upperPick === "OVER") return marketOutcomes?.[0] ?? pickedOutcome;
+  if (upperPick === "NO" || upperPick === "UNDER") return marketOutcomes?.[1] ?? pickedOutcome;
+
+  // 4️⃣ If it's a team pick for sports, match by name in marketName or eventSlug
   const teams = marketName?.split(" vs. ").map(s => s.trim()) ||
                 eventSlug?.split(" vs. ").map(s => s.trim()) || [];
   if (teams.length === 2) {
     if (teams.includes(pickedOutcome)) return pickedOutcome;
-    // If pickedOutcome matches first team partially
-    if (pickedOutcome.toUpperCase() === "HOME" || pickedOutcome.toUpperCase() === "AWAY") {
-      return teams[pickedOutcome.toUpperCase() === "HOME" ? 0 : 1];
-    }
+    if (upperPick === "HOME") return teams[0];
+    if (upperPick === "AWAY") return teams[1];
   }
 
-  // 4️⃣ Fallback: return original
+  // 5️⃣ Fallback: return original
   return pickedOutcome;
 }
 

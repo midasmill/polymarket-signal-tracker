@@ -529,7 +529,7 @@ async function trackWallet(wallet) {
 }
 
 /* ===========================
-   Rebuild Wallet Live Picks (Fixed / Safe)
+   Rebuild Wallet Live Picks (Net Pick Per Wallet)
 =========================== */
 async function rebuildWalletLivePicks() {
   const { data: signals, error } = await supabase
@@ -553,20 +553,43 @@ async function rebuildWalletLivePicks() {
 
   if (error || !signals?.length) return;
 
-  // 1️⃣ Group by market_id + picked_outcome
-  const livePicksMap = new Map();
+  // 1️⃣ Compute net pick per wallet per event
+  const walletNetPickMap = new Map();
 
   for (const sig of signals) {
-    const netPick = await getWalletNetPick(sig.wallet_id, sig.event_slug);
-    if (!netPick) continue;
+    const key = `${sig.wallet_id}||${sig.event_slug}`;
+    if (!walletNetPickMap.has(key)) walletNetPickMap.set(key, { picks: {}, market_id: sig.market_id, market_name: sig.market_name, event_slug: sig.event_slug });
 
-    const key = `${sig.market_id}||${netPick}`;
+    const entry = walletNetPickMap.get(key);
+    entry.picks[sig.picked_outcome] = (entry.picks[sig.picked_outcome] || 0) + Number(sig.pnl || 0);
+  }
+
+  // Determine largest side per wallet
+  const walletFinalPicks = [];
+  for (const [key, data] of walletNetPickMap.entries()) {
+    const sorted = Object.entries(data.picks).sort((a, b) => b[1] - a[1]); // largest PNL first
+    if (!sorted.length) continue;
+
+    walletFinalPicks.push({
+      wallet_id: parseInt(key.split("||")[0]),
+      market_id: data.market_id,
+      market_name: data.market_name,
+      event_slug: data.event_slug,
+      picked_outcome: sorted[0][0], // net pick
+      pnl: sorted[0][1],
+    });
+  }
+
+  // 2️⃣ Aggregate across wallets
+  const livePicksMap = new Map();
+  for (const pick of walletFinalPicks) {
+    const key = `${pick.market_id}||${pick.picked_outcome}`;
     if (!livePicksMap.has(key)) {
       livePicksMap.set(key, {
-        market_id: sig.market_id,
-        market_name: sig.market_name,
-        event_slug: sig.event_slug,
-        picked_outcome: netPick,
+        market_id: pick.market_id,
+        market_name: pick.market_name,
+        event_slug: pick.event_slug,
+        picked_outcome: pick.picked_outcome,
         wallets: [],
         vote_count: 0,
         pnl: 0,
@@ -574,12 +597,12 @@ async function rebuildWalletLivePicks() {
     }
 
     const entry = livePicksMap.get(key);
-    if (!entry.wallets.includes(sig.wallet_id)) entry.wallets.push(sig.wallet_id);
+    entry.wallets.push(pick.wallet_id);
     entry.vote_count = entry.wallets.length;
-    entry.pnl += Number(sig.pnl || 0);
+    entry.pnl += Number(pick.pnl || 0);
   }
 
-  // 2️⃣ Filter by minimum wallets & compute confidence
+  // 3️⃣ Filter by minimum wallets & compute confidence
   const finalLivePicks = [];
   for (const pick of livePicksMap.values()) {
     if (pick.vote_count < MIN_WALLETS_FOR_SIGNAL) continue;
@@ -588,7 +611,7 @@ async function rebuildWalletLivePicks() {
     for (const [stars, threshold] of Object.entries(CONFIDENCE_THRESHOLDS)
       .sort((a, b) => b[1] - a[1])) {
       if (pick.vote_count >= threshold) {
-        confidence = stars.length; // convert stars to integer
+        confidence = stars.length;
         break;
       }
     }
@@ -596,7 +619,7 @@ async function rebuildWalletLivePicks() {
     finalLivePicks.push({ ...pick, confidence, fetched_at: new Date() });
   }
 
-  // 3️⃣ Upsert safely: merge wallets & PNL if already exists
+  // 4️⃣ Upsert wallet_live_picks safely
   for (const pick of finalLivePicks) {
     const { data: existing } = await supabase
       .from("wallet_live_picks")
@@ -605,7 +628,6 @@ async function rebuildWalletLivePicks() {
       .eq("picked_outcome", pick.picked_outcome);
 
     if (existing?.length) {
-      // Merge all existing entries in case there are multiple
       const mergedWallets = new Set([...pick.wallets]);
       let totalPnl = pick.pnl;
 
@@ -619,7 +641,6 @@ async function rebuildWalletLivePicks() {
       pick.pnl = totalPnl;
     }
 
-    // Upsert safely with merged data
     await supabase
       .from("wallet_live_picks")
       .upsert(pick, { onConflict: ["market_id", "picked_outcome"] });

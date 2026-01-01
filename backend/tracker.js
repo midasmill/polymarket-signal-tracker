@@ -827,11 +827,11 @@ function getResolvedOutcomeFromMarket(market) {
 
 // Wallet eligibility
 function checkWalletCriteria(wallet) {
-  const MIN_NET_PNL = 1000;
-  const MAX_DAILY_LOSS_PERCENT = 0.3;
-  const MAX_LOSING_STREAK = 3;
-  const MIN_WIN_RATE = 0.7;
-  const MIN_PICK_VALUE = 1000;
+  const MIN_NET_PNL = 0;
+  const MAX_DAILY_LOSS_PERCENT = 100;
+  const MAX_LOSING_STREAK = 100;
+  const MIN_WIN_RATE = 0;
+  const MIN_PICK_VALUE = 0;
 
   const history = wallet.history || [];
   const today = new Date().toISOString().slice(0, 10);

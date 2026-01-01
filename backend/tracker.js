@@ -17,6 +17,14 @@ const WIN_RATE_THRESHOLD = parseInt(process.env.WIN_RATE_THRESHOLD || "0", 10);
 const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "2", 10);
 const FORCE_SEND = process.env.FORCE_SEND === "true";
 
+const CONFIDENCE_THRESHOLDS = {
+  "⭐": 2,
+  "⭐⭐": 5,
+  "⭐⭐⭐": 10,
+  "⭐⭐⭐⭐": 20,
+  "⭐⭐⭐⭐⭐": 50
+};
+
 const RESULT_EMOJIS = { WIN: "✅", LOSS: "❌", Pending: "⚪" };
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) throw new Error("Supabase keys required");
@@ -29,10 +37,9 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 process.on("unhandledRejection", err => console.error("🔥 Unhandled rejection:", err));
 process.on("uncaughtException", err => console.error("🔥 Uncaught exception:", err));
 
-/**
- * Returns total $ amount picked per outcome
- * for a wallet on a specific event
- */
+/* ===========================
+   Returns total $ amount picked per outcome for a wallet on a specific event
+=========================== */
 async function getWalletOutcomeTotals(walletId, eventSlug) {
   const { data, error } = await supabase
     .from("signals")
@@ -54,15 +61,9 @@ async function getWalletOutcomeTotals(walletId, eventSlug) {
   return totals;
 }
 
-/**
- * Returns the wallet's NET picked_outcome for an event
- * based on total $ amount per side
- *
- * Example:
- *  YES: 3000
- *  NO:  2900
- *  => YES
- */
+/* ===========================
+   Returns the wallet's NET picked_outcome for an event based on total $ amount per side
+=========================== */
 async function getWalletNetPick(walletId, eventSlug) {
   const totals = await getWalletOutcomeTotals(walletId, eventSlug);
 
@@ -467,10 +468,24 @@ async function trackWallet(wallet) {
 
   if (!newSignals.length) return;
 
-  // 7️⃣ Insert/Upsert signals safely to avoid duplicates
+  // 7️⃣ Deduplicate signals before upsert to prevent Postgres conflict errors
+  const dedupedSignalsMap = new Map();
+  for (const sig of newSignals) {
+    const key = `${sig.wallet_id}||${sig.event_slug}||${sig.picked_outcome}`;
+    if (!dedupedSignalsMap.has(key)) {
+      dedupedSignalsMap.set(key, sig);
+    } else {
+      // Merge PNL if duplicate occurs in same batch
+      dedupedSignalsMap.get(key).pnl += Number(sig.pnl || 0);
+    }
+  }
+
+  const dedupedSignals = Array.from(dedupedSignalsMap.values());
+
+  // 8️⃣ Upsert safely
   const { error } = await supabase
     .from("signals")
-    .upsert(newSignals, {
+    .upsert(dedupedSignals, {
       onConflict: ["wallet_id", "event_slug", "picked_outcome"]
     });
 
@@ -481,12 +496,12 @@ async function trackWallet(wallet) {
     );
   } else {
     console.log(
-      `✅ Inserted/updated ${newSignals.length} signal(s) for wallet ${wallet.id}`
+      `✅ Inserted/updated ${dedupedSignals.length} signal(s) for wallet ${wallet.id}`
     );
   }
 
-  // 8️⃣ Update wallet event exposure (PER EVENT)
-  const affectedEvents = [...new Set(newSignals.map(s => s.event_slug))];
+  // 9️⃣ Update wallet event exposure (PER EVENT)
+  const affectedEvents = [...new Set(dedupedSignals.map(s => s.event_slug))];
 
   for (const eventSlug of affectedEvents) {
     const totals = await getWalletOutcomeTotals(wallet.id, eventSlug);
@@ -497,7 +512,7 @@ async function trackWallet(wallet) {
     const secondAmount = entries[1]?.[1] ?? 0;
     if (secondAmount > 0 && netAmount / secondAmount < 1.05) continue;
 
-    const marketId = newSignals.find(s => s.event_slug === eventSlug)?.market_id || null;
+    const marketId = dedupedSignals.find(s => s.event_slug === eventSlug)?.market_id || null;
 
     await supabase
       .from("wallet_event_exposure")
@@ -513,21 +528,8 @@ async function trackWallet(wallet) {
   }
 }
 
-
 /* ===========================
-   Confidence
-=========================== */
-
-const CONFIDENCE_THRESHOLDS = {
-  "⭐": 2,
-  "⭐⭐": 5,
-  "⭐⭐⭐": 10,
-  "⭐⭐⭐⭐": 20,
-  "⭐⭐⭐⭐⭐": 50
-};
-
-/* ===========================
-   Rebuild Wallet Live Picks (Fixed)
+   Rebuild Wallet Live Picks (Fixed / Safe)
 =========================== */
 async function rebuildWalletLivePicks() {
   const { data: signals, error } = await supabase
@@ -551,7 +553,7 @@ async function rebuildWalletLivePicks() {
 
   if (error || !signals?.length) return;
 
-  // Group by market_id + picked_outcome
+  // 1️⃣ Group by market_id + picked_outcome
   const livePicksMap = new Map();
 
   for (const sig of signals) {
@@ -577,11 +579,11 @@ async function rebuildWalletLivePicks() {
     entry.pnl += Number(sig.pnl || 0);
   }
 
+  // 2️⃣ Filter by minimum wallets & compute confidence
   const finalLivePicks = [];
   for (const pick of livePicksMap.values()) {
     if (pick.vote_count < MIN_WALLETS_FOR_SIGNAL) continue;
 
-    // Determine confidence
     let confidence = 1;
     for (const [stars, threshold] of Object.entries(CONFIDENCE_THRESHOLDS)
       .sort((a, b) => b[1] - a[1])) {
@@ -591,28 +593,33 @@ async function rebuildWalletLivePicks() {
       }
     }
 
-    finalLivePicks.push({
-      ...pick,
-      confidence,
-      fetched_at: new Date(),
-    });
+    finalLivePicks.push({ ...pick, confidence, fetched_at: new Date() });
   }
 
-  // Upsert wallet_live_picks safely: merge wallets if already exists
+  // 3️⃣ Upsert safely: merge wallets & PNL if already exists
   for (const pick of finalLivePicks) {
     const { data: existing } = await supabase
       .from("wallet_live_picks")
       .select("*")
       .eq("market_id", pick.market_id)
-      .eq("picked_outcome", pick.picked_outcome)
-      .maybeSingle();
+      .eq("picked_outcome", pick.picked_outcome);
 
-    if (existing) {
-      pick.wallets = Array.from(new Set([...existing.wallets, ...pick.wallets]));
+    if (existing?.length) {
+      // Merge all existing entries in case there are multiple
+      const mergedWallets = new Set([...pick.wallets]);
+      let totalPnl = pick.pnl;
+
+      for (const ex of existing) {
+        ex.wallets?.forEach(w => mergedWallets.add(w));
+        totalPnl += Number(ex.pnl || 0);
+      }
+
+      pick.wallets = Array.from(mergedWallets);
       pick.vote_count = pick.wallets.length;
-      pick.pnl = Number(existing.pnl || 0) + pick.pnl;
+      pick.pnl = totalPnl;
     }
 
+    // Upsert safely with merged data
     await supabase
       .from("wallet_live_picks")
       .upsert(pick, { onConflict: ["market_id", "picked_outcome"] });

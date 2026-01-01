@@ -1012,11 +1012,16 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       fetched_at: new Date()
     });
 
-    if (resolved) {
-      data.walletIds.forEach(wallet_id => {
-        signalsToUpsert.push({ wallet_id, market_id, resolved_outcome: resolved });
+    // ✅ Build signals to upsert with required NOT NULL fields
+    data.walletIds.forEach(wallet_id => {
+      signalsToUpsert.push({
+        wallet_id,
+        market_id,
+        picked_outcome: dominantOutcome,
+        resolved_outcome: resolved,
+        signal: 'rebuild' // required NOT NULL field
       });
-    }
+    });
   }
 
   if (!finalLivePicks.length) return console.log("⚠️ No picks above vote threshold");
@@ -1033,7 +1038,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       .upsert(batch, { onConflict: ["market_id", "picked_outcome"] });
   }
 
-  // 1️⃣1️⃣ Batch upsert resolved signals
+  // 1️⃣1️⃣ Batch upsert resolved signals safely
   if (signalsToUpsert.length) {
     const uniqueSignals = [];
     const seen = new Set();

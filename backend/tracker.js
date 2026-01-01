@@ -62,6 +62,31 @@ async function getWalletOutcomeTotals(walletId, eventSlug) {
 }
 
 /* ===========================
+   Fetch by marketId
+=========================== */
+async function fetchMarketById(marketId) {
+  if (!marketId) return null;
+
+  try {
+    const res = await fetch(
+      `https://gamma-api.polymarket.com/markets/${marketId}`,
+      {
+        headers: {
+          "User-Agent": "Mozilla/5.0",
+          Accept: "application/json",
+        },
+      }
+    );
+
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+
+/* ===========================
    Returns the wallet's NET picked_outcome for an event based on total $ amount per side
 =========================== */
 async function getWalletNetPick(walletId, eventSlug) {
@@ -156,7 +181,7 @@ async function autoResolvePendingSignals() {
 
   for (const sig of pendingSignals) {
     try {
-      const market = await fetchMarket(sig.event_slug);
+      const market = await fetchMarket(sig.event_slug, sig.market_id);
       if (!market || !market.outcome) continue;
 
       const winningOutcome = market.outcome;
@@ -242,72 +267,111 @@ async function autoResolvePendingSignals() {
 }
 
 /* ===========================
-   Fetch Market (Includes Closed + Resolved)
+   Fetch Market (Slug + ID Fallback + Canonical Heal)
 =========================== */
 const marketCache = new Map();
 
-async function fetchMarket(eventSlug, bypassCache = false) {
-  if (!eventSlug) return null;
+async function fetchMarket(eventSlug, marketId = null, bypassCache = false) {
+  if (!eventSlug && !marketId) return null;
 
-  // 1️⃣ Return cached market if available
-  if (!bypassCache && marketCache.has(eventSlug)) {
-    return marketCache.get(eventSlug);
+  const cacheKey = marketId || eventSlug;
+
+  // 1️⃣ Cache
+  if (!bypassCache && marketCache.has(cacheKey)) {
+    return marketCache.get(cacheKey);
   }
 
-  try {
-    const res = await fetch(
-      `https://gamma-api.polymarket.com/markets/slug/${eventSlug}`,
-      {
-        headers: {
-          "User-Agent": "Mozilla/5.0",
-          Accept: "application/json",
-        },
-      }
-    );
+  let market = null;
 
-    if (res.status === 404) {
-      console.warn(`⚠️ Market not found: ${eventSlug}`);
-      return null;
-    }
-
-    if (!res.ok) {
-      console.error(`❌ Failed to fetch market ${eventSlug}: HTTP ${res.status}`);
-      return null;
-    }
-
-    const market = await res.json();
-
-    // 2️⃣ Auto-resolve outcome for closed markets
-    if (
-      !market.outcome &&
-      market.closed &&
-      market.outcomePrices &&
-      market.outcomes
-    ) {
-      try {
-        const prices = JSON.parse(market.outcomePrices);
-        const outcomes = JSON.parse(market.outcomes);
-
-        const winnerIndex = prices.findIndex(p => Number(p) === 1);
-        if (winnerIndex !== -1) {
-          market.outcome = outcomes[winnerIndex];
-        } else {
-          console.warn(`⚠️ Could not determine winner for ${eventSlug}`);
+  // 2️⃣ Try slug first (fast path)
+  if (eventSlug) {
+    try {
+      const res = await fetch(
+        `https://gamma-api.polymarket.com/markets/slug/${eventSlug}`,
+        {
+          headers: {
+            "User-Agent": "Mozilla/5.0",
+            Accept: "application/json",
+          },
         }
-      } catch (err) {
-        console.error(`❌ Failed to parse outcomes for ${eventSlug}:`, err.message);
+      );
+
+      if (res.ok) {
+        market = await res.json();
       }
+    } catch {
+      /* ignore */
     }
+  }
 
-    // 3️⃣ Cache and return market
-    marketCache.set(eventSlug, market);
-    return market;
+  // 3️⃣ Fallback → market_id (THIS FIXES YOUR ISSUE)
+  if (!market && marketId) {
+    try {
+      const res = await fetch(
+        `https://gamma-api.polymarket.com/markets/${marketId}`,
+        {
+          headers: {
+            "User-Agent": "Mozilla/5.0",
+            Accept: "application/json",
+          },
+        }
+      );
 
-  } catch (err) {
-    console.error(`❌ Failed to fetch market ${eventSlug}:`, err.message);
+      if (res.ok) {
+        market = await res.json();
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  if (!market) {
+    console.warn(`⚠️ Market not found (slug=${eventSlug}, id=${marketId})`);
     return null;
   }
+
+  // 4️⃣ Auto-resolve outcome for closed markets
+  if (
+    !market.outcome &&
+    market.closed &&
+    market.outcomePrices &&
+    market.outcomes
+  ) {
+    try {
+      const prices = Array.isArray(market.outcomePrices)
+        ? market.outcomePrices
+        : JSON.parse(market.outcomePrices);
+
+      const outcomes = Array.isArray(market.outcomes)
+        ? market.outcomes
+        : JSON.parse(market.outcomes);
+
+      const winnerIndex = prices.findIndex(p => Number(p) === 1);
+      if (winnerIndex !== -1) {
+        market.outcome = outcomes[winnerIndex];
+      }
+    } catch (err) {
+      console.error(`❌ Failed parsing outcomes for ${market.slug || marketId}:`, err.message);
+    }
+  }
+
+  // 5️⃣ Canonical slug healing (ONE-TIME FIX)
+  if (eventSlug && market.slug && market.slug !== eventSlug) {
+    try {
+      await supabase
+        .from("signals")
+        .update({ event_slug: market.slug })
+        .eq("market_id", market.id);
+    } catch {
+      /* non-fatal */
+    }
+  }
+
+  // 6️⃣ Cache & return
+  marketCache.set(cacheKey, market);
+  return market;
 }
+
 
 /* ===========================
    Resolve Markets (Fixed & Robust)
@@ -335,7 +399,7 @@ async function resolveMarkets() {
 
   for (const [eventSlug, sigs] of Object.entries(signalsByEvent)) {
     try {
-      const market = await fetchMarket(eventSlug);
+      const market = await fetchMarket(sig.event_slug, sig.market_id);
       if (!market || !market.outcome) continue; // skip unresolved markets
 
       const winningOutcome = market.outcome;
@@ -424,41 +488,58 @@ async function resolveMarkets() {
 }
 
 /* ===========================
-   Force Resolve Pending Markets
+   Force Resolve Pending Markets (Safe + Concurrent)
 =========================== */
 async function forceResolvePendingMarkets() {
-  // 1️⃣ Fetch all Pending signals
-  const { data: pendingSignals } = await supabase
+  // 1️⃣ Fetch all pending signals
+  const { data: pendingSignals = [], error } = await supabase
     .from("signals")
-    .select("*")
+    .select("id, wallet_id, market_id, event_slug, picked_outcome")
     .eq("outcome", "Pending");
 
-  if (!pendingSignals?.length) return;
+  if (error) {
+    console.error("❌ Failed fetching pending signals:", error.message);
+    return;
+  }
+  if (!pendingSignals.length) return console.log("⚠️ No pending signals found");
 
+  // 2️⃣ Get unique event slugs
   const eventSlugs = [...new Set(pendingSignals.map(s => s.event_slug).filter(Boolean))];
 
-  for (const slug of eventSlugs) {
-    // Fetch fresh market data, ignore cache
-    const market = await fetchMarket(slug, true);
-    if (!market || !market.outcome) continue;
+  // 3️⃣ Process each market concurrently
+  await Promise.all(eventSlugs.map(async slug => {
+    try {
+      // Fetch fresh market data (ignore cache)
+      const market = await fetchMarket(slug, null, true);
+      if (!market?.outcome) return;
 
-    const winningOutcome = market.outcome;
+      const winningOutcome = market.outcome;
 
-    // Update all signals for this event
-    await supabase
-      .from("signals")
-      .update({
-        outcome: supabase.raw("CASE WHEN picked_outcome = ? THEN 'WIN' ELSE 'LOSS' END", [winningOutcome]),
-        resolved_outcome: winningOutcome,
-        outcome_at: new Date()
-      })
-      .eq("event_slug", slug);
+      // 4️⃣ Update signals safely in two steps
+      // ✅ Wins
+      await supabase
+        .from("signals")
+        .update({ outcome: "WIN", resolved_outcome: winningOutcome, outcome_at: new Date() })
+        .eq("event_slug", slug)
+        .eq("picked_outcome", winningOutcome);
 
-    // Rebuild wallet_live_picks for this market
-    await rebuildWalletLivePicks(true);
-  }
+      // ✅ Losses
+      await supabase
+        .from("signals")
+        .update({ outcome: "LOSS", resolved_outcome: winningOutcome, outcome_at: new Date() })
+        .eq("event_slug", slug)
+        .neq("picked_outcome", winningOutcome);
 
-  console.log(`✅ Force-resolved ${eventSlugs.length} pending markets`);
+      // 5️⃣ Rebuild wallet_live_picks only for this market
+      await rebuildWalletLivePicks(true);
+
+      console.log(`✅ Market force-resolved: ${slug}`);
+    } catch (err) {
+      console.error(`❌ Failed to force-resolve market ${slug}:`, err.message);
+    }
+  }));
+
+  console.log(`✅ Force-resolved ${eventSlugs.length} pending market(s)`);
 }
 
 
@@ -1001,7 +1082,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     if (marketResolvedMap[pick.market_id]) return;
 
     try {
-      const market = await fetchMarket(pick.event_slug);
+      const market = await fetchMarket(pick.event_slug, pick.market_id);
       if (!market) throw new Error("Market not found");
 
       marketResolvedMap[pick.market_id] = getResolvedOutcomeFromMarket(market);

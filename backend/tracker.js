@@ -398,12 +398,12 @@ async function trackWallet(wallet) {
   // 2️⃣ Fetch existing signals ONCE
   const { data: existingSignals } = await supabase
     .from("signals")
-    .select("tx_hash, event_slug, picked_outcome, pnl")
+    .select("tx_hash")
     .eq("wallet_id", wallet.id);
 
   const existingTxs = new Set(existingSignals.map(s => s.tx_hash));
 
-  // 3️⃣ Collect positions per wallet per event and compute net PNL per outcome
+  // 3️⃣ Aggregate PNL per outcome per wallet/event
   const walletEventMap = new Map();
 
   for (const pos of positions) {
@@ -435,17 +435,22 @@ async function trackWallet(wallet) {
 
     if (existingTxs.has(syntheticTx)) continue;
 
-    // Aggregate PNL per outcome per wallet per event
+    // Aggregate PNL per wallet/event
     const key = `${wallet.id}||${eventSlug}`;
     if (!walletEventMap.has(key)) {
-      walletEventMap.set(key, { picks: {}, market_id: pos.conditionId, market_name: pos.title, event_slug: eventSlug });
+      walletEventMap.set(key, {
+        picks: {},
+        market_id: pos.conditionId,
+        market_name: pos.title,
+        event_slug: eventSlug
+      });
     }
 
     const entry = walletEventMap.get(key);
     entry.picks[pickedOutcome] = (entry.picks[pickedOutcome] || 0) + Number(pos.cashPnl || 0);
   }
 
-  // 4️⃣ Compute net pick per wallet per event
+  // 4️⃣ Compute net pick per wallet/event
   const netSignals = [];
   for (const [key, data] of walletEventMap.entries()) {
     const sorted = Object.entries(data.picks).sort((a, b) => b[1] - a[1]); // highest PNL first
@@ -467,13 +472,23 @@ async function trackWallet(wallet) {
       outcome_at: null,
       win_rate: wallet.win_rate,
       created_at: new Date(),
-      event_start_at: null // optional: fetch market.eventStartAt if needed
+      event_start_at: null
     });
   }
 
   if (!netSignals.length) return;
 
-  // 5️⃣ Upsert signals safely
+  // 5️⃣ DELETE any existing signals for this wallet/event that are NOT the net pick
+  for (const sig of netSignals) {
+    await supabase
+      .from("signals")
+      .delete()
+      .eq("wallet_id", sig.wallet_id)
+      .eq("event_slug", sig.event_slug)
+      .neq("picked_outcome", sig.picked_outcome);
+  }
+
+  // 6️⃣ Upsert net signals safely
   const { error } = await supabase
     .from("signals")
     .upsert(netSignals, {
@@ -486,7 +501,7 @@ async function trackWallet(wallet) {
     console.log(`✅ Upserted ${netSignals.length} net signal(s) for wallet ${wallet.id}`);
   }
 
-  // 6️⃣ Update wallet event exposure (per event)
+  // 7️⃣ Update wallet event exposure (per event)
   const affectedEvents = [...new Set(netSignals.map(s => s.event_slug))];
   for (const eventSlug of affectedEvents) {
     const totals = await getWalletOutcomeTotals(wallet.id, eventSlug);
@@ -514,7 +529,7 @@ async function trackWallet(wallet) {
 }
 
 /* ===========================
-   Rebuild Wallet Live Picks (Net Pick Per Wallet)
+   Rebuild Wallet Live Picks (Dominant Net Pick Per Market)
 =========================== */
 async function rebuildWalletLivePicks() {
   const { data: signals, error } = await supabase
@@ -543,16 +558,23 @@ async function rebuildWalletLivePicks() {
 
   for (const sig of signals) {
     const key = `${sig.wallet_id}||${sig.event_slug}`;
-    if (!walletNetPickMap.has(key)) walletNetPickMap.set(key, { picks: {}, market_id: sig.market_id, market_name: sig.market_name, event_slug: sig.event_slug });
+    if (!walletNetPickMap.has(key)) {
+      walletNetPickMap.set(key, {
+        picks: {},
+        market_id: sig.market_id,
+        market_name: sig.market_name,
+        event_slug: sig.event_slug
+      });
+    }
 
     const entry = walletNetPickMap.get(key);
     entry.picks[sig.picked_outcome] = (entry.picks[sig.picked_outcome] || 0) + Number(sig.pnl || 0);
   }
 
-  // Determine largest side per wallet
+  // Determine net pick per wallet
   const walletFinalPicks = [];
   for (const [key, data] of walletNetPickMap.entries()) {
-    const sorted = Object.entries(data.picks).sort((a, b) => b[1] - a[1]); // largest PNL first
+    const sorted = Object.entries(data.picks).sort((a, b) => b[1] - a[1]);
     if (!sorted.length) continue;
 
     walletFinalPicks.push({
@@ -561,47 +583,58 @@ async function rebuildWalletLivePicks() {
       market_name: data.market_name,
       event_slug: data.event_slug,
       picked_outcome: sorted[0][0], // net pick
-      pnl: sorted[0][1],
+      pnl: sorted[0][1]
     });
   }
 
-  // 2️⃣ Aggregate across wallets
-  const livePicksMap = new Map();
+  // 2️⃣ Aggregate net picks per market (dominant outcome across all wallets)
+  const marketNetPickMap = new Map();
+
   for (const pick of walletFinalPicks) {
-    const key = `${pick.market_id}||${pick.picked_outcome}`;
-    if (!livePicksMap.has(key)) {
-      livePicksMap.set(key, {
+    const marketKey = pick.market_id;
+    if (!marketNetPickMap.has(marketKey)) {
+      marketNetPickMap.set(marketKey, {
         market_id: pick.market_id,
         market_name: pick.market_name,
         event_slug: pick.event_slug,
-        picked_outcome: pick.picked_outcome,
-        wallets: [],
-        vote_count: 0,
-        pnl: 0,
+        picks: {},      // outcome -> total PNL
+        wallets: new Set()
       });
     }
 
-    const entry = livePicksMap.get(key);
-    entry.wallets.push(pick.wallet_id);
-    entry.vote_count = entry.wallets.length;
-    entry.pnl += Number(pick.pnl || 0);
+    const entry = marketNetPickMap.get(marketKey);
+    entry.picks[pick.picked_outcome] = (entry.picks[pick.picked_outcome] || 0) + Number(pick.pnl || 0);
+    entry.wallets.add(pick.wallet_id);
   }
 
-  // 3️⃣ Filter by minimum wallets & compute confidence
+  // 3️⃣ Convert to final live picks: choose outcome with largest PNL
   const finalLivePicks = [];
-  for (const pick of livePicksMap.values()) {
-    if (pick.vote_count < MIN_WALLETS_FOR_SIGNAL) continue;
+  for (const entry of marketNetPickMap.values()) {
+    const sortedOutcomes = Object.entries(entry.picks).sort((a, b) => b[1] - a[1]);
+    if (!sortedOutcomes.length) continue;
 
+    const [netOutcome, totalPnl] = sortedOutcomes[0];
+
+    // Compute confidence
     let confidence = 1;
-    for (const [stars, threshold] of Object.entries(CONFIDENCE_THRESHOLDS)
-      .sort((a, b) => b[1] - a[1])) {
-      if (pick.vote_count >= threshold) {
+    for (const [stars, threshold] of Object.entries(CONFIDENCE_THRESHOLDS).sort((a, b) => b[1] - a[1])) {
+      if (entry.wallets.size >= threshold) {
         confidence = stars.length;
         break;
       }
     }
 
-    finalLivePicks.push({ ...pick, confidence, fetched_at: new Date() });
+    finalLivePicks.push({
+      market_id: entry.market_id,
+      market_name: entry.market_name,
+      event_slug: entry.event_slug,
+      picked_outcome: netOutcome,
+      wallets: Array.from(entry.wallets),
+      vote_count: entry.wallets.size,
+      pnl: totalPnl,
+      confidence,
+      fetched_at: new Date()
+    });
   }
 
   // 4️⃣ Upsert wallet_live_picks safely

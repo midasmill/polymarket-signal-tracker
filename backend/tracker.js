@@ -522,7 +522,7 @@ async function trackWallet(wallet) {
 }
 
 /* ===========================
-   Rebuild Wallet Live Picks (Dominant Net Pick Per Market - Corrected)
+   Rebuild Wallet Live Picks (Dominant Net Pick Per Market – Merge Existing)
 =========================== */
 async function rebuildWalletLivePicks() {
   const { data: signals, error } = await supabase
@@ -546,7 +546,7 @@ async function rebuildWalletLivePicks() {
 
   if (error || !signals?.length) return;
 
-  // 1️⃣ Compute net pick per wallet per event (wallet contributes to only 1 outcome)
+  // 1️⃣ Compute net pick per wallet per event
   const walletNetPickMap = new Map();
   for (const sig of signals) {
     const key = `${sig.wallet_id}||${sig.event_slug}`;
@@ -558,12 +558,11 @@ async function rebuildWalletLivePicks() {
         event_slug: sig.event_slug
       });
     }
-
     const entry = walletNetPickMap.get(key);
     entry.picks[sig.picked_outcome] = (entry.picks[sig.picked_outcome] || 0) + Number(sig.pnl || 0);
   }
 
-  // Determine **net pick per wallet**
+  // 2️⃣ Determine each wallet's net pick
   const walletFinalPicks = [];
   for (const [key, data] of walletNetPickMap.entries()) {
     const sorted = Object.entries(data.picks).sort((a, b) => b[1] - a[1]);
@@ -574,12 +573,12 @@ async function rebuildWalletLivePicks() {
       market_id: data.market_id,
       market_name: data.market_name,
       event_slug: data.event_slug,
-      picked_outcome: sorted[0][0], // wallet's net pick
+      picked_outcome: sorted[0][0],
       pnl: sorted[0][1]
     });
   }
 
-  // 2️⃣ Aggregate **across wallets** per market
+  // 3️⃣ Aggregate across wallets per market
   const marketNetPickMap = new Map();
   for (const pick of walletFinalPicks) {
     const marketKey = pick.market_id;
@@ -588,11 +587,11 @@ async function rebuildWalletLivePicks() {
         market_id: pick.market_id,
         market_name: pick.market_name,
         event_slug: pick.event_slug,
-        outcomes: {} // outcome -> { totalPnl, walletIds: Set() }
+        outcomes: {}
       });
     }
-
     const entry = marketNetPickMap.get(marketKey);
+
     if (!entry.outcomes[pick.picked_outcome]) {
       entry.outcomes[pick.picked_outcome] = { totalPnl: 0, walletIds: new Set() };
     }
@@ -601,12 +600,31 @@ async function rebuildWalletLivePicks() {
     entry.outcomes[pick.picked_outcome].walletIds.add(pick.wallet_id);
   }
 
-  // 3️⃣ Choose dominant outcome per market
+  // 4️⃣ Merge with existing wallet_live_picks
   const finalLivePicks = [];
   for (const entry of marketNetPickMap.values()) {
-    const sortedOutcomes = Object.entries(entry.outcomes)
-      .sort((a, b) => b[1].totalPnl - a[1].totalPnl); // pick outcome with largest total PNL
+    // Fetch existing live picks for this market
+    const { data: existing } = await supabase
+      .from("wallet_live_picks")
+      .select("*")
+      .eq("market_id", entry.market_id);
 
+    // Merge wallets & PNL if same outcome exists
+    const mergedOutcomes = { ...entry.outcomes };
+    if (existing?.length) {
+      for (const ex of existing) {
+        const outcome = ex.picked_outcome;
+        if (!mergedOutcomes[outcome]) {
+          mergedOutcomes[outcome] = { totalPnl: 0, walletIds: new Set() };
+        }
+        ex.wallets?.forEach(w => mergedOutcomes[outcome].walletIds.add(w));
+        mergedOutcomes[outcome].totalPnl += Number(ex.pnl || 0);
+      }
+    }
+
+    // Choose dominant outcome (largest total PNL)
+    const sortedOutcomes = Object.entries(mergedOutcomes)
+      .sort((a, b) => b[1].totalPnl - a[1].totalPnl);
     if (!sortedOutcomes.length) continue;
 
     const [dominantOutcome, data] = sortedOutcomes[0];
@@ -635,14 +653,14 @@ async function rebuildWalletLivePicks() {
     });
   }
 
-  // 4️⃣ Upsert wallet_live_picks
+  // 5️⃣ Upsert merged live picks
   for (const pick of finalLivePicks) {
     await supabase
       .from("wallet_live_picks")
       .upsert(pick, { onConflict: ["market_id", "picked_outcome"] });
   }
 
-  console.log(`✅ Wallet live picks rebuilt (${finalLivePicks.length})`);
+  console.log(`✅ Wallet live picks rebuilt and merged (${finalLivePicks.length})`);
 }
 
 /* ===========================

@@ -651,25 +651,32 @@ async function trackWallet(wallet, forceRebuild = false) {
       outcome = data.resolved_outcome === picked_outcome ? "WIN" : "LOSS";
     }
 
-    netSignals.push({
-      wallet_id,
-      market_id: data.market_id,
-      polymarket_id: data.polymarket_id,
-      market_name: data.market_name || "UNKNOWN",
-      event_slug: data.event_slug,
-      picked_outcome,
-      pnl,
-      side: side || "BUY",
-      signal: picked_outcome || "UNKNOWN",
-      outcome,
-      resolved_outcome: data.resolved_outcome ?? null,
-      outcome_at: data.outcome_at ?? null,
-      win_rate: wallet.win_rate,
-      created_at: new Date(),
-      event_start_at: null,
-      gameStartTime: market?.gameStartTime || null, 
-      tx_hash: Array.from(data.tx_hashes)[0] || `${wallet.id}-${Date.now()}`
-    });
+netSignals.push({
+  wallet_id,
+  market_id: data.market_id,
+  polymarket_id: data.polymarket_id,
+  market_name: data.market_name || "UNKNOWN",
+  event_slug: data.event_slug,
+
+  picked_outcome,
+  signal: picked_outcome,
+  side: side || "BUY",
+
+  pnl,
+  amount: Math.abs(pnl) || null,
+
+  outcome,
+  resolved_outcome: data.resolved_outcome ?? null,
+  outcome_at: data.outcome_at ?? null,
+
+  win_rate: wallet.win_rate,
+  created_at: new Date(),
+
+  event_start_at: data.market?.gameStartTime ?? null, // ✅ SINGLE SOURCE
+
+  tx_hash: Array.from(data.tx_hashes)[0]
+});
+
   }
 
   if (!netSignals.length) return;

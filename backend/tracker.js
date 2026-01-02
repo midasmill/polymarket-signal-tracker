@@ -50,6 +50,58 @@ process.on("unhandledRejection", err => console.error("🔥 Unhandled rejection:
 process.on("uncaughtException", err => console.error("🔥 Uncaught exception:", err));
 
 /* ===========================
+   Safe DB insert helper (top-level)
+=========================== */
+async function safeInsert(table, rows) {
+  if (!rows.length) return [];
+  const { data, error } = await supabase.from(table).insert(rows);
+  if (error) console.error(`❌ Insert failed into ${table}:`, error.message);
+  return data || [];
+}
+
+/* ===========================
+   Universal Market Cache & Fetch (Includes Closed + Resolved)
+=========================== */
+const marketCache = new Map();
+
+async function fetchMarketSafe({ event_slug, polymarket_id, market_id }, bypassCache = false) {
+  if (!event_slug && !polymarket_id && !market_id) return null;
+
+  const cacheKey = event_slug || polymarket_id || market_id;
+  if (!bypassCache && marketCache.has(cacheKey)) return marketCache.get(cacheKey);
+
+  try {
+    let url = "";
+    if (event_slug) url = `https://gamma-api.polymarket.com/markets/slug/${event_slug}`;
+    else if (polymarket_id) url = `https://gamma-api.polymarket.com/markets/${polymarket_id}`;
+    else if (market_id) url = `https://gamma-api.polymarket.com/markets/${market_id}`;
+
+    const res = await fetch(url, { headers: { "User-Agent": "Polymarket-Tracker/1.0", Accept: "application/json" }});
+    if (!res.ok) return null;
+
+    const market = await res.json();
+
+    if (!market.outcome && market.closed && market.outcomePrices && market.outcomes) {
+      try {
+        let prices = market.outcomePrices;
+        let outcomes = market.outcomes;
+        if (typeof prices === "string") prices = JSON.parse(prices);
+        if (typeof outcomes === "string") outcomes = JSON.parse(outcomes);
+        if (!Array.isArray(prices) && typeof prices === "object") prices = Object.values(prices);
+        const winnerIndex = prices.findIndex(p => Number(p) === 1);
+        if (winnerIndex !== -1) market.outcome = outcomes[winnerIndex];
+      } catch (err) { console.error(err.message); }
+    }
+
+    if (event_slug) marketCache.set(event_slug, market);
+    if (polymarket_id) marketCache.set(polymarket_id, market);
+    if (market_id) marketCache.set(market_id, market);
+
+    return market;
+  } catch (err) { console.error(err.message); return null; }
+}
+
+/* ===========================
    Returns total $ amount picked per outcome for a wallet on a specific event
 =========================== */
 async function getWalletOutcomeTotals(walletId, eventSlug) {
@@ -815,48 +867,6 @@ async function trackWallet(wallet, forceRebuild = false) {
 }
 
 /* ===========================
-   Universal Market Cache & Fetch (Includes Closed + Resolved)
-=========================== */
-const marketCache = new Map();
-
-async function fetchMarketSafe({ event_slug, polymarket_id, market_id }, bypassCache = false) {
-  if (!event_slug && !polymarket_id && !market_id) return null;
-
-  const cacheKey = event_slug || polymarket_id || market_id;
-  if (!bypassCache && marketCache.has(cacheKey)) return marketCache.get(cacheKey);
-
-  try {
-    let url = "";
-    if (event_slug) url = `https://gamma-api.polymarket.com/markets/slug/${event_slug}`;
-    else if (polymarket_id) url = `https://gamma-api.polymarket.com/markets/${polymarket_id}`;
-    else if (market_id) url = `https://gamma-api.polymarket.com/markets/${market_id}`;
-
-    const res = await fetch(url, { headers: { "User-Agent": "Polymarket-Tracker/1.0", Accept: "application/json" }});
-    if (!res.ok) return null;
-
-    const market = await res.json();
-
-    if (!market.outcome && market.closed && market.outcomePrices && market.outcomes) {
-      try {
-        let prices = market.outcomePrices;
-        let outcomes = market.outcomes;
-        if (typeof prices === "string") prices = JSON.parse(prices);
-        if (typeof outcomes === "string") outcomes = JSON.parse(outcomes);
-        if (!Array.isArray(prices) && typeof prices === "object") prices = Object.values(prices);
-        const winnerIndex = prices.findIndex(p => Number(p) === 1);
-        if (winnerIndex !== -1) market.outcome = outcomes[winnerIndex];
-      } catch (err) { console.error(err.message); }
-    }
-
-    if (event_slug) marketCache.set(event_slug, market);
-    if (polymarket_id) marketCache.set(polymarket_id, market);
-    if (market_id) marketCache.set(market_id, market);
-
-    return market;
-  } catch (err) { console.error(err.message); return null; }
-}
-
-/* ===========================
    Rebuild Wallet Live Picks & Pending & Signals (Weighted)
 =========================== */
 async function rebuildWalletLivePicks(forceRebuild = false) {
@@ -888,13 +898,6 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 
     const match = market.outcomes.find(o => o.toUpperCase() === normalized);
     return match || original;
-  }
-
-  async function safeInsert(table, rows) {
-    if (!rows.length) return [];
-    const { data, error } = await supabase.from(table).insert(rows);
-    if (error) console.error(`❌ Insert failed into ${table}:`, error.message);
-    return data || [];
   }
 
   // 1️⃣ Fetch signals

@@ -109,8 +109,6 @@ async function fetchWithRetry(url, options = {}, retries = 3, delay = 1000) {
   }
 }
 
-
-
 function getConfidenceEmoji(count) {
   const entries = Object.entries(CONFIDENCE_THRESHOLDS).sort(([, a], [, b]) => b - a);
   for (const [emoji, threshold] of entries) if (count >= threshold) return emoji;
@@ -860,12 +858,27 @@ async function fetchMarketSafe({ event_slug, polymarket_id, market_id }, bypassC
 }
 
 /* ===========================
-   Safe insert helper
+   Safe Insert / Upsert Helper
 =========================== */
-async function safeInsert(table, rows) {
+async function safeInsert(table, rows, { upsertColumns = [], ignoreDuplicates = false } = {}) {
   if (!rows.length) return [];
-  const { data, error } = await supabase.from(table).insert(rows);
-  if (error) console.error(`❌ Insert failed into ${table}:`, error.message);
+
+  let query = supabase.from(table);
+  if (ignoreDuplicates) {
+    query = query.insert(rows, { ignoreDuplicates: true });
+  } else if (upsertColumns.length) {
+    query = query.upsert(rows, { onConflict: upsertColumns });
+  } else {
+    query = query.insert(rows);
+  }
+
+  const { data, error } = await query;
+  if (error) {
+    console.error(`❌ Insert/Upsert failed into ${table}:`, error);
+    if (error.details) console.error("Details:", error.details);
+    if (error.hint) console.error("Hint:", error.hint);
+    if (error.code) console.error("Code:", error.code);
+  }
   return data || [];
 }
 
@@ -879,10 +892,8 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   function normalizeOutcome(pickedOutcome, market) {
     if (!pickedOutcome) return "UNKNOWN";
     if (!market?.outcomes?.length) return pickedOutcome;
-
     const original = pickedOutcome;
     const normalized = pickedOutcome.trim().toUpperCase();
-
     if (market.outcomes.length === 2) {
       const [team0, team1] = market.outcomes;
       if (normalized === "YES" || normalized === "OVER") return team0;
@@ -890,7 +901,6 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       if (team0.toUpperCase() === normalized) return team0;
       if (team1.toUpperCase() === normalized) return team1;
     }
-
     const match = market.outcomes.find(o => o.toUpperCase() === normalized);
     return match || original;
   }
@@ -907,7 +917,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     .select("wallet_id, market_id, polymarket_id, market_name, event_slug, picked_outcome, pnl, resolved_outcome");
   if (!signals?.length) return;
 
-  // Aggregate picks per wallet per market (merge multiple picks per wallet)
+  // 1️⃣ Aggregate picks per wallet per market (merge multiple picks per wallet by PnL)
   const walletMarketMap = new Map(); // wallet+market -> dominant outcome by PnL
 
   for (const sig of signals) {
@@ -921,13 +931,11 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     walletEntry[normalized] = (walletEntry[normalized] || 0) + Number(sig.pnl || 0);
   }
 
-  // Aggregate **wallet count** per outcome per market (dominant pick)
+  // 2️⃣ Aggregate wallet count per outcome per market
   const marketNetPickMap = new Map(); // market_id -> { outcome -> { walletIds, totalPnl } }
 
   for (const [key, outcomeMap] of walletMarketMap.entries()) {
     const [wallet_id, market_id] = key.split("_");
-
-    // Pick wallet's dominant outcome by PnL
     let dominantOutcome = null;
     let maxWeight = -Infinity;
     for (const [outcome, weight] of Object.entries(outcomeMap)) {
@@ -945,7 +953,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     marketEntry[dominantOutcome].totalPnl += maxWeight;
   }
 
-  // Build wallet_live_pending (still uses total PnL for info)
+  // 3️⃣ Build wallet_live_pending
   const finalPending = [];
   for (const [market_id, outcomes] of marketNetPickMap.entries()) {
     for (const [outcome, data] of Object.entries(outcomes)) {
@@ -962,14 +970,13 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   }
   await safeInsert("wallet_live_pending", finalPending);
 
-  // Build wallet_live_picks **dominant by wallet count**
+  // 4️⃣ Build wallet_live_picks (dominant by wallet count, MIN_WALLETS_FOR_SIGNAL threshold)
   const finalLive = [];
   for (const [market_id, outcomes] of marketNetPickMap.entries()) {
     const sorted = Object.entries(outcomes).sort((a, b) => b[1].walletIds.size - a[1].walletIds.size);
     if (!sorted.length) continue;
 
     const [dominantOutcome, data] = sorted[0];
-
     if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL) continue;
 
     console.log(`🏆 Market ${market_id}: Dominant pick "${dominantOutcome}" with ${data.walletIds.size} wallets`);
@@ -984,7 +991,9 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       fetched_at: new Date()
     });
   }
-  await safeInsert("wallet_live_picks", finalLive);
+
+  // ✅ Use upsert to avoid duplicate key errors
+  await safeInsert("wallet_live_picks", finalLive, { upsertColumns: ["market_id", "picked_outcome"] });
 
   console.log("✅ Wallet live picks and pending rebuilt successfully (dominant by wallet count)");
 }

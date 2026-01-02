@@ -1044,7 +1044,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   for (const [market_id, entry] of marketNetPickMap.entries()) {
     for (const [outcome, data] of Object.entries(entry.outcomes)) {
       const resolved = data.resolved_outcome || marketResolvedMap[market_id] || null;
-      const outcomeStatus = resolved ? (outcome === resolved ? "WIN" : "LOSS") : "Pending";
+      const outcomeStatus = resolved ? (outcome === resolved ? "WIN" : "LOSS") : "PENDING";
 
       finalPendingPicks.push({
         market_id,
@@ -1074,7 +1074,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL) continue;
 
     const resolved = data.resolved_outcome || marketResolvedMap[market_id] || null;
-    const outcomeStatus = resolved ? (dominantOutcome === resolved ? "WIN" : "LOSS") : "Pending";
+    const outcomeStatus = resolved ? (dominantOutcome === resolved ? "WIN" : "LOSS") : "PENDING";
 
     finalLivePicks.push({
       market_id,
@@ -1103,7 +1103,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL) continue;
 
     const resolved = data.resolved_outcome || marketResolvedMap[market_id] || null;
-    const outcomeStatus = resolved ? (dominantOutcome === resolved ? "WIN" : "LOSS") : "Pending";
+    const outcomeStatus = resolved ? (dominantOutcome === resolved ? "WIN" : "LOSS") : "PENDING";
 
     data.walletIds.forEach(wallet_id => {
       if (!wallet_id) return;

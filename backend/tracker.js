@@ -424,7 +424,7 @@ async function fetchAndInsertLeaderboardWallets() {
   for (const category of categories) {
     for (const period of periods) {
       try {
-        const url = `https://data-api.polymarket.com/v1/leaderboard?category=${category}&timePeriod=${period}&orderBy=PNL&limit=8`;
+        const url = `https://data-api.polymarket.com/v1/leaderboard?category=${category}&timePeriod=${period}&orderBy=PNL&limit=20`;
         const data = await fetchWithRetry(url, { headers: { "User-Agent": "Mozilla/5.0" } });
 
         if (!Array.isArray(data)) continue;

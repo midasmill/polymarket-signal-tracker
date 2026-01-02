@@ -418,13 +418,13 @@ async function countWalletDailyLosses(walletId) {
    Fetch Leaderboard Wallets (with PnL & volume filters)
 =========================== */
 async function fetchAndInsertLeaderboardWallets() {
-  const categories = ["OVERALL", "SPORTS"];
+  const categories = ["SPORTS"];
   const periods = ["DAY", "WEEK"];
 
   for (const category of categories) {
     for (const period of periods) {
       try {
-        const url = `https://data-api.polymarket.com/v1/leaderboard?category=${category}&timePeriod=${period}&orderBy=PNL&limit=50`;
+        const url = `https://data-api.polymarket.com/v1/leaderboard?category=${category}&timePeriod=${period}&orderBy=PNL&limit=8`;
         const data = await fetchWithRetry(url, { headers: { "User-Agent": "Mozilla/5.0" } });
 
         if (!Array.isArray(data)) continue;
@@ -433,8 +433,11 @@ async function fetchAndInsertLeaderboardWallets() {
           const proxyWallet = entry.proxyWallet;
           if (!proxyWallet) continue;
 
-          // Skip if PnL < 1,000,000 or volume too high
-          if ((entry.pnl || 0) < 1000000 || (entry.vol || 0) >= 2 * (entry.pnl || 0)) continue;
+// Skip if PnL < 88,888 or volume exceeds 2× PnL
+const MIN_PNL = 88,888;
+const MAX_VOL_MULTIPLIER = 2;
+
+if ((entry.pnl || 0) < MIN_PNL || (entry.vol || 0) > MAX_VOL_MULTIPLIER * (entry.pnl || 0)) continue;
 
           // Check if wallet already exists
           const { data: existingWallet, error: checkError } = await supabase

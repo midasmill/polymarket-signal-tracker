@@ -16,14 +16,6 @@ const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || "30000", 10);
 const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "10", 10);
 const FORCE_SEND = process.env.FORCE_SEND === "true";
 
-const CONFIDENCE_THRESHOLDS = {
-  "⭐": 10,
-  "⭐⭐": 20,
-  "⭐⭐⭐": 30,
-  "⭐⭐⭐⭐": 40,
-  "⭐⭐⭐⭐⭐": 50
-};
-
 const RESULT_EMOJIS = { WIN: "✅", LOSS: "❌", Pending: "⚪" };
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) throw new Error("Supabase keys required");
@@ -899,11 +891,19 @@ async function fetchMarketSafe({ event_slug, polymarket_id, market_id }, bypassC
 }
 
 /* ===========================
-   Rebuild Wallet Live Picks & Pending (Patched + Preserve Resolved)
+   Rebuild Wallet Live Picks & Pending (Patched + Preserve Resolved + Confidence Stars)
 =========================== */
 async function rebuildWalletLivePicks(forceRebuild = false) {
   const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "5", 10);
   const marketInfoMap = new Map();
+
+  const CONFIDENCE_THRESHOLDS = {
+    "⭐": 10,
+    "⭐⭐": 20,
+    "⭐⭐⭐": 30,
+    "⭐⭐⭐⭐": 40,
+    "⭐⭐⭐⭐⭐": 50
+  };
 
   function normalizeOutcome(pickedOutcome, market) {
     if (!pickedOutcome) return "UNKNOWN";
@@ -936,6 +936,14 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   function determineOutcomeStatus(pickedOutcome, resolvedOutcome) {
     if (!resolvedOutcome) return "PENDING";
     return pickedOutcome === resolvedOutcome ? "WIN" : "LOSS";
+  }
+
+  function getConfidenceStars(voteCount) {
+    let stars = "⭐"; // default 1 star
+    for (const [s, threshold] of Object.entries(CONFIDENCE_THRESHOLDS)) {
+      if (voteCount >= threshold) stars = s;
+    }
+    return stars;
   }
 
   // --- Fetch all signals ---
@@ -1069,7 +1077,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
         outcome: status,
         resolved_outcome: resolvedOutcome,
         fetched_at: new Date(),
-        confidence: data.walletIds.size
+        confidence: getConfidenceStars(data.walletIds.size) // ⭐ rating
       });
     }
   }
@@ -1102,7 +1110,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       outcome: "PENDING",
       resolved_outcome: null,
       fetched_at: new Date(),
-      confidence: 1
+      confidence: "⭐"
     });
   }
 

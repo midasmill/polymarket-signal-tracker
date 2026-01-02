@@ -928,7 +928,10 @@ async function forceResolvePendingMarkets() {
 }
 
 /* ===========================
-   Rebuild Wallet Live Picks & Pending (Always include picks meeting threshold)
+   Rebuild Wallet Live Picks & Pending
+   - wallet_live_picks: dominant picks meeting MIN_WALLETS_FOR_SIGNAL
+   - wallet_live_pending: all unresolved picks, regardless of wallet count
+   - Uses event_start_at from signals as gameStartTime
 =========================== */
 async function rebuildWalletLivePicks(forceRebuild = false) {
   const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "10", 10);
@@ -973,7 +976,6 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     console.error("❌ Failed fetching signals:", error.message);
     return;
   }
-
   if (!signals?.length) {
     console.log("✅ No signals found");
     return;
@@ -1066,8 +1068,6 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     const info = marketInfoMap.get(market_id);
 
     for (const [outcome, data] of Object.entries(outcomes)) {
-      if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL) continue; // skip below threshold
-
       const resolvedOutcome = info?.resolved_outcome || null;
 
       const row = {
@@ -1090,14 +1090,19 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
         fetched_at: new Date()
       };
 
-      finalLive.push(row); // Always push to wallet_live_picks
+      // ✅ Live picks: only if wallet count >= threshold
+      if (data.walletIds.size >= MIN_WALLETS_FOR_SIGNAL) {
+        finalLive.push(row);
+      }
 
+      // ✅ Pending picks: all unresolved picks, ignore threshold
       if (!resolvedOutcome) {
-        finalPending.push(row); // Also track pending separately
+        finalPending.push(row);
       }
     }
   }
 
+  // --- Insert into tables ---
   await safeInsert("wallet_live_picks", finalLive, { upsertColumns: ["market_id", "picked_outcome"] });
   await safeInsert("wallet_live_pending", finalPending);
 

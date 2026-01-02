@@ -836,6 +836,7 @@ async function fetchMarketSafe({ event_slug, polymarket_id, market_id }, bypassC
 
     const market = await res.json();
 
+    // auto-detect winner for closed markets if missing
     if (!market.outcome && market.closed && market.outcomePrices && market.outcomes) {
       try {
         let prices = market.outcomePrices;
@@ -860,7 +861,6 @@ async function fetchMarketSafe({ event_slug, polymarket_id, market_id }, bypassC
    Rebuild Wallet Live Picks & Pending (with Normalization Logs)
 =========================== */
 async function rebuildWalletLivePicks(forceRebuild = false) {
-  const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "10", 10);
   const invalidMarketSlugs = new Map();
 
   function determineSide(pickedOutcome, marketName, eventSlug) {
@@ -985,17 +985,17 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   }
   await safeInsert("wallet_live_pending", finalPendingPicks);
 
-  // 5️⃣ Build wallet_live_picks (dominant picks)
+  // 5️⃣ Build wallet_live_picks (dominant outcome, no threshold filter)
   const finalLivePicks = [];
   for (const [market_id, entry] of marketNetPickMap.entries()) {
     const sortedOutcomes = Object.entries(entry.outcomes).sort((a, b) => b[1].walletIds.size - a[1].walletIds.size);
     if (!sortedOutcomes.length) continue;
 
-    const [dominantOutcome, data] = sortedOutcomes[0];
-    if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL) continue;
-
+    const [dominantOutcome, data] = sortedOutcomes[0]; // highest votes
     const resolved = data.resolved_outcome || marketResolvedMap[market_id] || null;
     const outcomeStatus = resolved ? (dominantOutcome === resolved ? "WIN" : "LOSS") : "PENDING";
+
+    console.log(`🏆 Dominant pick for ${entry.event_slug}: "${dominantOutcome}" with ${data.walletIds.size} wallets`);
 
     finalLivePicks.push({
       market_id,
@@ -1012,42 +1012,6 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   }
   await safeInsert("wallet_live_picks", finalLivePicks);
 
-  // 6️⃣ Upsert signals table with normalized outcomes
-  const signalsToUpsert = [];
-  for (const [market_id, entry] of marketNetPickMap.entries()) {
-    const sortedOutcomes = Object.entries(entry.outcomes).sort((a, b) => b[1].walletIds.size - a[1].walletIds.size);
-    if (!sortedOutcomes.length) continue;
-
-    const [dominantOutcome, data] = sortedOutcomes[0];
-    if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL) continue;
-
-    const resolved = data.resolved_outcome || marketResolvedMap[market_id] || null;
-    const outcomeStatus = resolved ? (dominantOutcome === resolved ? "WIN" : "LOSS") : "PENDING";
-
-    data.walletIds.forEach(wallet_id => {
-      if (!wallet_id) return;
-      const side = determineSide(dominantOutcome, entry.market_name, entry.event_slug);
-
-      signalsToUpsert.push({
-        wallet_id,
-        market_id,
-        polymarket_id: entry.polymarket_id || null,
-        market_name: entry.market_name,
-        event_slug: entry.event_slug,
-        picked_outcome: dominantOutcome,
-        pnl: data.totalPnl,
-        resolved_outcome: resolved || null,
-        outcome: outcomeStatus,
-        signal: dominantOutcome,
-        side,
-        tx_hash: null,
-        win_rate: null
-      });
-    });
-  }
-  await safeInsert("signals", signalsToUpsert);
-
-  invalidMarketSlugs.clear();
   console.log(`✅ Wallet live picks, pending, and signals rebuilt successfully`);
 }
 

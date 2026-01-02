@@ -805,7 +805,7 @@ async function trackWallet(wallet, forceRebuild = false) {
 }
 
 /* ===========================
-   Safe Insert / Upsert Helper
+   Safe Insert / Upsert Helper (Verbose)
 =========================== */
 async function safeInsert(table, rows, options = {}) {
   if (!rows || !rows.length) return;
@@ -817,7 +817,10 @@ async function safeInsert(table, rows, options = {}) {
     .upsert(rows, { onConflict: upsertColumns.length ? upsertColumns : undefined });
 
   if (error) {
-    console.error(`❌ safeInsert failed for table ${table}:`, error.message);
+    console.error(`❌ safeInsert failed for table ${table}:`);
+    console.error("Full error object:", JSON.stringify(error, null, 2));
+  } else {
+    console.log(`✅ Inserted/Upserted ${rows.length} rows into ${table}`);
   }
 }
 
@@ -1004,11 +1007,11 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
         market_name: market?.question || sig.market_name || null,
         event_slug: market?.slug || sig.event_slug || null,
         resolved_outcome: sig.resolved_outcome || market?.outcome || null,
-        polymarket_id: market?.id || sig.polymarket_id,
+        polymarket_id: sig.polymarket_id ? Number(sig.polymarket_id) : null,
         market_url: market?.slug ? `https://polymarket.com/markets/${market.slug}` : null,
         outcomes: market?.outcomes || [],
         sportsMarketType: market?.sportsMarketType || null,
-        gameStartTime: sig.event_start_at || null // use signal's event_start_at
+        gameStartTime: sig.event_start_at || null
       });
     }
 
@@ -1042,7 +1045,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     if (!marketNetPickMap.has(market_id)) marketNetPickMap.set(market_id, {});
     const outcomes = marketNetPickMap.get(market_id);
     if (!outcomes[dominantOutcome]) outcomes[dominantOutcome] = { walletIds: new Set(), totalPnl: 0 };
-    outcomes[dominantOutcome].walletIds.add(wallet_id);
+    outcomes[dominantOutcome].walletIds.add(Number(wallet_id));
     outcomes[dominantOutcome].totalPnl += walletMarketMap.get(key)[dominantOutcome];
   }
 
@@ -1087,18 +1090,18 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
         vote_counts: JSON.stringify(
           Array.from(data.walletIds).reduce((acc, id) => ({ ...acc, [id]: 1 }), {})
         ),
-        pnl: data.totalPnl,
+        pnl: Number(data.totalPnl),
         outcome: determineOutcomeStatus(outcome, resolvedOutcome),
         resolved_outcome: resolvedOutcome,
         fetched_at: new Date()
       };
 
-      // ✅ Live picks: only if wallet count >= threshold
+      // --- Live picks: dominant picks meeting threshold ---
       if (data.walletIds.size >= MIN_WALLETS_FOR_SIGNAL) {
         finalLive.push(row);
       }
 
-      // ✅ Pending picks: all unresolved picks, ignore threshold
+      // --- Pending picks: all unresolved picks ---
       if (!resolvedOutcome) {
         finalPending.push(row);
       }
@@ -1113,6 +1116,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     `✅ Wallet live picks and pending rebuilt successfully: ${finalLive.length} picks total, ${finalPending.length} pending`
   );
 }
+
 
 /* ===========================
    Fetch Wallet Activity (DATA-API, Robust)

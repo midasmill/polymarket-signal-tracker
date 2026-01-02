@@ -145,7 +145,7 @@ async function autoResolvePendingSignals() {
 
   for (const sig of pendingSignals) {
     try {
-      const market = await fetchMarket(sig.event_slug);
+      const market = await fetchMarketSafe(sig.event_slug);
       if (!market || !market.outcome) continue;
 
       const winningOutcome = market.outcome;
@@ -329,7 +329,7 @@ async function resolveMarkets() {
   // 3️⃣ Resolve each event
   for (const [eventSlug, sigs] of Object.entries(signalsByEvent)) {
     try {
-      const market = await fetchMarket(eventSlug);
+      const market = await fetchMarketSafe(eventSlug);
       if (!market || !market.outcome) continue;
 
       const winningOutcome = market.outcome;
@@ -424,7 +424,7 @@ async function forceResolvePendingMarkets() {
 
   for (const slug of eventSlugs) {
     // Fetch fresh market data, ignore cache
-    const market = await fetchMarket(slug, true);
+    const market = await fetchMarketSafe(slug, true);
     if (!market || !market.outcome) continue;
 
     const winningOutcome = market.outcome;

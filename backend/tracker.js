@@ -556,8 +556,8 @@ async function trackWallet(wallet, forceRebuild = false) {
   const proxyWallet = wallet.polymarket_proxy_wallet;
   if (!proxyWallet) return;
 
-  // Auto-unpause if win_rate >= 50
-  if (wallet.paused && wallet.win_rate >= 50) {
+  // Auto-unpause if win_rate >= 0
+  if (wallet.paused && wallet.win_rate >= 0) {
     await supabase
       .from("wallets")
       .update({ paused: false })

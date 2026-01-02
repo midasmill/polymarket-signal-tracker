@@ -556,8 +556,8 @@ async function trackWallet(wallet, forceRebuild = false) {
   const proxyWallet = wallet.polymarket_proxy_wallet;
   if (!proxyWallet) return;
 
-  // Auto-unpause if win_rate >= 0
-  if (wallet.paused && wallet.win_rate >= 0) {
+  // Auto-unpause if win_rate >= 50
+  if (wallet.paused && wallet.win_rate >= 50) {
     await supabase
       .from("wallets")
       .update({ paused: false })
@@ -1306,7 +1306,7 @@ async function getWalletNetPick(walletId, eventSlug) {
    Auto-pauses wallet if daily loss % exceeds threshold
 =========================== */
 async function updateWalletMetricsJS() {
-  const DAILY_LOSS_PERCENT_LIMIT = 0.88; // 88% losses triggers pause
+  const DAILY_LOSS_PERCENT_LIMIT = 0.5; // 50% losses triggers pause
 
   const { data: wallets } = await supabase.from("wallets").select("*");
   if (!wallets?.length) return;

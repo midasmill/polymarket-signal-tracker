@@ -891,7 +891,8 @@ async function fetchMarketSafe({ event_slug, polymarket_id, market_id }, bypassC
 }
 
 /* ===========================
-   Rebuild Wallet Live Picks & Pending (Patched + Preserve Resolved + Confidence Stars)
+   Rebuild Wallet Live Picks & Pending
+   (Patched: Preserve resolved + numeric confidence for DB)
 =========================== */
 async function rebuildWalletLivePicks(forceRebuild = false) {
   const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "5", 10);
@@ -939,7 +940,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   }
 
   function getConfidenceStars(voteCount) {
-    let stars = "⭐"; // default 1 star
+    let stars = "⭐";
     for (const [s, threshold] of Object.entries(CONFIDENCE_THRESHOLDS)) {
       if (voteCount >= threshold) stars = s;
     }
@@ -1054,7 +1055,6 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       let resolvedOutcome = info?.resolved_outcome || null;
       let status = determineOutcomeStatus(outcome, resolvedOutcome);
 
-      // Preserve existing resolved outcome from DB
       if (existingMap.has(key)) {
         resolvedOutcome = existingMap.get(key).resolved_outcome || resolvedOutcome;
         status = determineOutcomeStatus(outcome, resolvedOutcome);
@@ -1077,7 +1077,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
         outcome: status,
         resolved_outcome: resolvedOutcome,
         fetched_at: new Date(),
-        confidence: getConfidenceStars(data.walletIds.size) // ⭐ rating
+        confidence: data.walletIds.size // numeric value only
       });
     }
   }
@@ -1098,7 +1098,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       wallet_id: sig.wallet_id,
       market_name: info?.market_name || "UNKNOWN",
       event_slug: info?.event_slug || "UNKNOWN",
-      polymarket_id: info?.polymarket_id,
+      polymarket_id: sig.polymarket_id,
       market_url: info?.market_url,
       gameStartTime: info?.gameStartTime,
       picked_outcome: normalized || "UNKNOWN",
@@ -1110,7 +1110,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       outcome: "PENDING",
       resolved_outcome: null,
       fetched_at: new Date(),
-      confidence: "⭐"
+      confidence: 1 // numeric only
     });
   }
 

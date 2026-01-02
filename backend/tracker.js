@@ -667,6 +667,7 @@ async function trackWallet(wallet, forceRebuild = false) {
       win_rate: wallet.win_rate,
       created_at: new Date(),
       event_start_at: null,
+      gameStartTime: market?.gameStartTime || null, 
       tx_hash: Array.from(data.tx_hashes)[0] || `${wallet.id}-${Date.now()}`
     });
   }
@@ -1105,7 +1106,7 @@ async function fetchWalletPositions(proxyWallet, retries = 3, delayMs = 2000) {
         side: item.side || "BUY",
         cashPnl: Number(item.usdcSize ?? item.size ?? 0),
         resolvedOutcome: item.resolvedOutcome || null, // if available
-        outcomeTimestamp: item.outcomeTimestamp || null
+        outcomeTimestamp: item.outcomeTimestamp || null,
       }));
 
     } catch (err) {

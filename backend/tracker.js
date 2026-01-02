@@ -419,7 +419,7 @@ async function countWalletDailyLosses(walletId) {
 =========================== */
 async function fetchAndInsertLeaderboardWallets() {
   const categories = ["SPORTS"];
-  const periods = ["DAY", "WEEK", "MONTH"];
+  const periods = ["DAY", "WEEK", "MONTH", "ALL"];
 
   for (const category of categories) {
     for (const period of periods) {

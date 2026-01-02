@@ -872,15 +872,6 @@ async function forceResolvePendingMarkets() {
       const winningOutcome = market.outcome;
 
       // 3️⃣ Update all signals for this event
-      const { error: updateError } = await supabase
-        .from("signals")
-        .update({
-          outcome: supabase
-            .from("signals") // workaround: we cannot use supabase.raw(), so we update in JS below
-        })
-        .eq("event_slug", slug);
-
-      // Because supabase.raw() isn't supported in JS client, we update manually:
       for (const sig of pendingSignals.filter(s => s.event_slug === slug)) {
         const newOutcome = sig.picked_outcome === winningOutcome ? "WIN" : "LOSS";
         await supabase
@@ -908,6 +899,7 @@ async function forceResolvePendingMarkets() {
 
   console.log(`🚀 Force-resolve complete for ${eventSlugs.length} market(s)`);
 }
+
 
 /* ===========================
    Rebuild Wallet Live Picks & Pending

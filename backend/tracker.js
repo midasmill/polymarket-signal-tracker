@@ -936,7 +936,7 @@ async function forceResolvePendingMarkets() {
 /* ===========================
    Rebuild Wallet Live Picks & Pending
    - wallet_live_picks: dominant picks meeting MIN_WALLETS_FOR_SIGNAL
-   - wallet_live_pending: all unresolved picks, regardless of wallet count
+   - wallet_live_pending: all unresolved picks from signals
    - Uses event_start_at from signals as gameStartTime
 =========================== */
 async function rebuildWalletLivePicks(forceRebuild = false) {
@@ -1100,11 +1100,34 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       if (data.walletIds.size >= MIN_WALLETS_FOR_SIGNAL) {
         finalLive.push(row);
       }
+    }
+  }
 
-      // --- Pending picks: all unresolved picks ---
-      if (!resolvedOutcome) {
-        finalPending.push(row);
-      }
+  // --- Build pending picks separately from signals ---
+  for (const sig of signals) {
+    if (!sig.wallet_id || !sig.market_id) continue;
+
+    const info = marketInfoMap.get(sig.market_id);
+    const normalized = normalizeOutcome(sig.picked_outcome, info);
+
+    if (!sig.resolved_outcome) {
+      finalPending.push({
+        market_id: sig.market_id,
+        market_name: info?.market_name,
+        event_slug: info?.event_slug,
+        polymarket_id: info?.polymarket_id,
+        market_url: info?.market_url,
+        gameStartTime: info?.gameStartTime,
+        picked_outcome: normalized,
+        side: determineSide(normalized, info),
+        wallets: [sig.wallet_id],
+        vote_count: 1,
+        vote_counts: JSON.stringify({ [sig.wallet_id]: 1 }),
+        pnl: Number(sig.pnl || 0),
+        outcome: "PENDING",
+        resolved_outcome: null,
+        fetched_at: new Date()
+      });
     }
   }
 
@@ -1116,7 +1139,6 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     `✅ Wallet live picks and pending rebuilt successfully: ${finalLive.length} picks total, ${finalPending.length} pending`
   );
 }
-
 
 /* ===========================
    Fetch Wallet Activity (DATA-API, Robust)

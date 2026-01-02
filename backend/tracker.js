@@ -231,75 +231,6 @@ async function autoResolvePendingSignals() {
 }
 
 /* ===========================
-   Universal Market Cache & Fetch (Includes Closed + Resolved)
-=========================== */
-const marketCache = new Map(); // ✅ Stores all markets by event_slug, polymarket_id, or market_id
-
-/**
- * Fetch a market safely with caching and auto-resolve
- * @param {object} params - { event_slug, polymarket_id, market_id }
- * @param {boolean} bypassCache - skip cache
- */
-async function fetchMarketSafe({ event_slug, polymarket_id, market_id }, bypassCache = false) {
-  if (!event_slug && !polymarket_id && !market_id) return null;
-
-  const cacheKey = event_slug || polymarket_id || market_id;
-  if (!bypassCache && marketCache.has(cacheKey)) {
-    return marketCache.get(cacheKey);
-  }
-
-  try {
-    let url = "";
-    if (event_slug) url = `https://gamma-api.polymarket.com/markets/slug/${event_slug}`;
-    else if (polymarket_id) url = `https://gamma-api.polymarket.com/markets/${polymarket_id}`;
-    else if (market_id) url = `https://gamma-api.polymarket.com/markets/${market_id}`;
-
-    const res = await fetch(url, {
-      headers: {
-        "User-Agent": "Polymarket-Tracker/1.0",
-        Accept: "application/json",
-      },
-    });
-
-    if (res.status === 404) {
-      console.warn(`⚠️ Market not found: ${cacheKey}`);
-      return null;
-    }
-    if (!res.ok) {
-      console.error(`❌ Failed to fetch market ${cacheKey}: HTTP ${res.status}`);
-      return null;
-    }
-
-    const market = await res.json();
-
-    // Auto-resolve outcome if closed but not set
-    if (!market.outcome && market.closed && market.outcomePrices && market.outcomes) {
-      try {
-        let prices = market.outcomePrices;
-        let outcomes = market.outcomes;
-        if (typeof prices === "string") prices = JSON.parse(prices);
-        if (typeof outcomes === "string") outcomes = JSON.parse(outcomes);
-        if (!Array.isArray(prices) && typeof prices === "object") prices = Object.values(prices);
-        const winnerIndex = prices.findIndex(p => Number(p) === 1);
-        if (winnerIndex !== -1) market.outcome = outcomes[winnerIndex];
-      } catch (err) {
-        console.error(`❌ Failed to parse outcomes for ${cacheKey}:`, err.message);
-      }
-    }
-
-    // Save to cache under all possible keys
-    if (event_slug) marketCache.set(event_slug, market);
-    if (polymarket_id) marketCache.set(polymarket_id, market);
-    if (market_id) marketCache.set(market_id, market);
-
-    return market;
-  } catch (err) {
-    console.error(`❌ Failed to fetch market ${cacheKey}:`, err.message);
-    return null;
-  }
-}
-
-/* ===========================
    Resolve Markets (FINAL — Safe & Deterministic)
    - Updates signals outcomes
    - Updates wallet_live_picks outcomes ONLY if row already exists
@@ -885,23 +816,17 @@ async function trackWallet(wallet, forceRebuild = false) {
 
 /* ===========================
    Rebuild Wallet Live Picks & Pending
-   (All Picks + Pending + Dominant Picks)
-   ✅ Normalized outcomes (YES/NO → team names if needed)
-   ✅ Side always BUY/SELL
-   ✅ Vote count correct
-   ✅ Outcome shows PENDING/WIN/LOSS
+   (Normalized outcomes, YES/NO handled, Side BUY/SELL)
 =========================== */
 
 const invalidMarketSlugs = new Map();
 
+// ✅ Determine side for signals
 function determineSide(pickedOutcome, marketName, eventSlug) {
   if (!pickedOutcome) return "BUY";
 
-  // If market is true YES/NO or OVER/UNDER
-  if (pickedOutcome.toUpperCase() === "YES" || pickedOutcome.toUpperCase() === "NO" ||
-      pickedOutcome.toUpperCase() === "OVER" || pickedOutcome.toUpperCase() === "UNDER") {
-    return "BUY";
-  }
+  const upper = pickedOutcome.toUpperCase();
+  if (upper === "YES" || upper === "NO" || upper === "OVER" || upper === "UNDER") return "BUY";
 
   const teams =
     marketName?.split(" vs. ").map(s => s.trim()) ||
@@ -912,31 +837,30 @@ function determineSide(pickedOutcome, marketName, eventSlug) {
   return "BUY";
 }
 
+// ✅ Normalize picked outcome to actual market outcome
 function normalizeOutcome(pickedOutcome, market) {
   if (!pickedOutcome) return "UNKNOWN";
   if (!market?.outcomes?.length) return pickedOutcome;
 
   const upper = pickedOutcome.toUpperCase();
-
-  // Keep YES/NO or OVER/UNDER if the market is truly binary
   const normalizedOutcomes = market.outcomes.map(o => o.toUpperCase());
-  if (
-    (normalizedOutcomes.includes("YES") && normalizedOutcomes.includes("NO")) ||
-    (normalizedOutcomes.includes("OVER") && normalizedOutcomes.includes("UNDER"))
-  ) {
-    return pickedOutcome.toUpperCase();
+
+  // Keep YES/NO or OVER/UNDER if market truly binary YES/NO
+  if ((normalizedOutcomes.includes("YES") && normalizedOutcomes.includes("NO")) ||
+      (normalizedOutcomes.includes("OVER") && normalizedOutcomes.includes("UNDER"))) {
+    return upper;
   }
 
-  // Binary market with team names
+  // Binary team market
   if (market.outcomes.length === 2) {
     if (upper === "YES" || upper === "OVER") return market.outcomes[0];
     if (upper === "NO" || upper === "UNDER") return market.outcomes[1];
   }
 
-  // Multi-outcome fallback
   return pickedOutcome;
 }
 
+// ✅ Safe insert helper
 async function safeInsert(table, rows) {
   if (!rows.length) return [];
   const { data, error } = await supabase.from(table).insert(rows);
@@ -944,14 +868,17 @@ async function safeInsert(table, rows) {
   return data || [];
 }
 
+// ==========================
+// Main rebuild function
+// ==========================
 async function rebuildWalletLivePicks(forceRebuild = false) {
   const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "10", 10);
 
-  // 1️⃣ Fetch wallets
+  // 1️⃣ Fetch active wallets
   const { data: wallets } = await supabase.from("wallets").select("id").eq("paused", false);
   if (!wallets?.length) return;
 
-  // 2️⃣ Fetch raw signals
+  // 2️⃣ Fetch signals
   const { data: signals, error: sigError } = await supabase
     .from("signals")
     .select("wallet_id, market_id, polymarket_id, market_name, event_slug, picked_outcome, pnl, resolved_outcome");
@@ -980,7 +907,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     if (sig.resolved_outcome) entry.resolved_outcome = sig.resolved_outcome;
   }
 
-  // 4️⃣ Determine wallet final pick with normalization
+  // 4️⃣ Normalize wallet picks
   const walletFinalPicks = [];
   for (const data of walletNetPickMap.values()) {
     const market = await fetchMarketSafe({
@@ -1033,7 +960,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       outcomeData.resolved_outcome = pick.resolved_outcome;
   }
 
-  // 6️⃣ Resolve markets
+  // 6️⃣ Resolve markets safely (fetchMarketSafe already handles YES/NO)
   const marketResolvedMap = {};
   await Promise.all([...marketNetPickMap.entries()].map(async ([marketId, entry]) => {
     try {
@@ -1053,7 +980,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     }
   }));
 
-  // 7️⃣ Build wallet_live_pending
+  // 7️⃣ wallet_live_pending
   const finalPendingPicks = [];
   for (const [market_id, entry] of marketNetPickMap.entries()) {
     for (const [outcome, data] of Object.entries(entry.outcomes)) {
@@ -1076,7 +1003,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   }
   await safeInsert("wallet_live_pending", finalPendingPicks);
 
-  // 8️⃣ Build wallet_live_picks (dominant picks)
+  // 8️⃣ wallet_live_picks (dominant picks)
   const finalLivePicks = [];
   for (const [market_id, entry] of marketNetPickMap.entries()) {
     const sortedOutcomes = Object.entries(entry.outcomes).sort(
@@ -1143,7 +1070,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   await safeInsert("signals", signalsToUpsert);
 
   invalidMarketSlugs.clear();
-  console.log(`✅ Wallet live picks, pending, and signals rebuilt with normalized outcomes and consistent sides`);
+  console.log(`✅ Wallet live picks, pending, and signals rebuilt (YES/NO and team markets normalized)`);
 }
 
 /* ===========================

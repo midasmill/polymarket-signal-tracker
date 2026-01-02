@@ -899,66 +899,7 @@ async function fetchMarketSafe({ event_slug, polymarket_id, market_id }, bypassC
 }
 
 /* ===========================
-   Force Resolve Pending Markets
-=========================== */
-async function forceResolvePendingMarkets() {
-  // 1️⃣ Fetch all signals where outcome is Pending (case-insensitive)
-  const { data: pendingSignals, error } = await supabase
-    .from("signals")
-    .select("*")
-    .ilike("outcome", "pending");
-
-  if (error) {
-    console.error("❌ Failed fetching pending signals:", error.message);
-    return;
-  }
-
-  if (!pendingSignals?.length) {
-    console.log("✅ No pending signals to resolve");
-    return;
-  }
-
-  const eventSlugs = [...new Set(pendingSignals.map(s => s.event_slug).filter(Boolean))];
-
-  for (const slug of eventSlugs) {
-    try {
-      // 2️⃣ Fetch latest market data
-      const market = await fetchMarketSafe({ event_slug: slug }, true);
-      if (!market || !market.outcome) continue;
-
-      const winningOutcome = market.outcome;
-
-      // 3️⃣ Update all signals for this event
-      for (const sig of pendingSignals.filter(s => s.event_slug === slug)) {
-        const newOutcome = sig.picked_outcome === winningOutcome ? "WIN" : "LOSS";
-        await supabase
-          .from("signals")
-          .update({
-            outcome: newOutcome,
-            resolved_outcome: winningOutcome,
-            outcome_at: new Date()
-          })
-          .eq("id", sig.id);
-      }
-
-      console.log(`✅ Resolved market ${slug} with outcome: ${winningOutcome}`);
-    } catch (err) {
-      console.error(`❌ Error resolving event ${slug}:`, err.message);
-    }
-  }
-
-  // 4️⃣ Rebuild wallet live picks and pending
-  try {
-    await rebuildWalletLivePicks(true);
-  } catch (err) {
-    console.error("❌ Failed rebuilding wallet live picks:", err.message);
-  }
-
-  console.log(`🚀 Force-resolve complete for ${eventSlugs.length} market(s)`);
-}
-
-/* ===========================
-   Rebuild Wallet Live Picks & Pending (Patched)
+   Rebuild Wallet Live Picks & Pending (Patched + Preserve Resolved)
 =========================== */
 async function rebuildWalletLivePicks(forceRebuild = false) {
   const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "5", 10);
@@ -1085,6 +1026,14 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     }
   }
 
+  // --- Fetch existing picks to preserve resolved outcomes ---
+  const { data: existingPicks } = await supabase.from("wallet_live_picks").select("*");
+  const existingMap = new Map();
+  for (const pick of existingPicks || []) {
+    const key = `${pick.market_id}_${pick.picked_outcome}`;
+    existingMap.set(key, pick);
+  }
+
   // --- Build final live picks ---
   const finalLive = [];
   for (const [market_id, outcomes] of marketNetPickMap.entries()) {
@@ -1092,6 +1041,16 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 
     for (const [outcome, data] of Object.entries(outcomes)) {
       if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL) continue;
+
+      const key = `${market_id}_${outcome}`;
+      let resolvedOutcome = info?.resolved_outcome || null;
+      let status = determineOutcomeStatus(outcome, resolvedOutcome);
+
+      // Preserve existing resolved outcome from DB
+      if (existingMap.has(key)) {
+        resolvedOutcome = existingMap.get(key).resolved_outcome || resolvedOutcome;
+        status = determineOutcomeStatus(outcome, resolvedOutcome);
+      }
 
       finalLive.push({
         market_id,
@@ -1107,8 +1066,8 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
         vote_count: data.walletIds.size,
         vote_counts: Object.fromEntries(Array.from(data.walletIds).map(id => [id, 1])),
         pnl: Number(data.totalPnl),
-        outcome: determineOutcomeStatus(outcome, info?.resolved_outcome),
-        resolved_outcome: info?.resolved_outcome || null,
+        outcome: status,
+        resolved_outcome: resolvedOutcome,
         fetched_at: new Date(),
         confidence: data.walletIds.size
       });
@@ -1153,6 +1112,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 
   console.log(`✅ Wallet live picks and pending rebuilt: ${finalLive.length} live picks, ${finalPending.length} pending`);
 }
+
 
 /* ===========================
    Fetch Wallet Activity (DATA-API, Robust)
@@ -1413,6 +1373,7 @@ async function updateWalletMetricsJS() {
 
 /* ===========================
    Send Signals to Telegram + Notes
+   (Patched: Skip already sent, preserve resolved outcomes)
 =========================== */
 async function processAndSendSignals() {
   const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "5", 10);
@@ -1448,11 +1409,12 @@ Confidence: ${confidenceEmoji}`;
       await sendTelegram(text, false);
       await updateNotes("midas-sports", pick, confidenceEmoji);
 
+      // Patch: only update last_confidence_sent & signal_sent_at; preserve resolved outcome
       await supabase
         .from("wallet_live_picks")
         .update({
           last_confidence_sent: new Date(),
-          signal_sent_at: new Date()
+          signal_sent_at: pick.signal_sent_at || new Date(), // do not overwrite if already set
         })
         .eq("market_id", pick.market_id)
         .eq("picked_outcome", pick.picked_outcome);
@@ -1464,8 +1426,10 @@ Confidence: ${confidenceEmoji}`;
   }
 }
 
+
 /* ===========================
    Send Results to Telegram + Notes
+   (Patched: Skip duplicates, preserve outcome/resolved_outcome)
 =========================== */
 async function processAndSendResults() {
   const { data: resolvedPicks, error } = await supabase
@@ -1480,7 +1444,10 @@ async function processAndSendResults() {
     if (!pick.signal_sent_at) continue; // only picks that were sent as signal
     if (pick.result_sent_at) continue; // only send once
 
-    const outcome = pick.outcome || (pick.picked_outcome === pick.resolved_outcome ? "WIN" : "LOSS");
+    // Patch: Use resolved outcome as authoritative
+    const resolvedOutcome = pick.resolved_outcome;
+    const outcome = pick.outcome || (pick.picked_outcome === resolvedOutcome ? "WIN" : "LOSS");
+
     const confidenceEmoji = getConfidenceEmoji(pick.confidence || pick.vote_count);
     const outcomeEmoji = outcome === "WIN" ? "✅" : "❌";
 
@@ -1501,9 +1468,13 @@ Outcome: ${outcome} ${outcomeEmoji}`;
       await sendTelegram(text, false);
       await updateNotesWithResult("midas-sports", pick, confidenceEmoji);
 
+      // Patch: Only set outcome and result_sent_at; preserve resolved_outcome
       await supabase
         .from("wallet_live_picks")
-        .update({ result_sent_at: new Date(), outcome })
+        .update({
+          outcome,
+          result_sent_at: new Date()
+        })
         .eq("id", pick.id);
 
       console.log(`✅ Sent RESULT for market ${pick.market_id} (${pick.picked_outcome})`);
@@ -1513,6 +1484,62 @@ Outcome: ${outcome} ${outcomeEmoji}`;
   }
 }
 
+/* ===========================
+   Force Resolve Pending Markets
+=========================== */
+async function forceResolvePendingMarkets() {
+  const { data: pendingSignals, error } = await supabase
+    .from("signals")
+    .select("*")
+    .ilike("outcome", "pending");
+
+  if (error) {
+    console.error("❌ Failed fetching pending signals:", error.message);
+    return;
+  }
+
+  if (!pendingSignals?.length) {
+    console.log("✅ No pending signals to resolve");
+    return;
+  }
+
+  const eventSlugs = [...new Set(pendingSignals.map(s => s.event_slug).filter(Boolean))];
+
+  for (const slug of eventSlugs) {
+    try {
+      const market = await fetchMarketSafe({ event_slug: slug }, true);
+      if (!market || !market.outcome) continue;
+
+      const winningOutcome = market.outcome;
+
+      // Update signals
+      for (const sig of pendingSignals.filter(s => s.event_slug === slug)) {
+        const newOutcome = sig.picked_outcome === winningOutcome ? "WIN" : "LOSS";
+        await supabase
+          .from("signals")
+          .update({
+            outcome: newOutcome,
+            resolved_outcome: winningOutcome,
+            outcome_at: new Date()
+          })
+          .eq("id", sig.id);
+      }
+
+      console.log(`✅ Resolved market ${slug} with outcome: ${winningOutcome}`);
+    } catch (err) {
+      console.error(`❌ Error resolving event ${slug}:`, err.message);
+    }
+  }
+
+  // Rebuild picks after force resolve
+  try {
+    await rebuildWalletLivePicks(true);
+  } catch (err) {
+    console.error("❌ Failed rebuilding wallet live picks:", err.message);
+  }
+
+  console.log(`🚀 Force-resolve complete for ${eventSlugs.length} market(s)`);
+}
 
 /* ===========================
    Tracker Loop
@@ -1558,7 +1585,7 @@ async function trackerLoop() {
       console.error("❌ Failed in forceResolvePendingMarkets:", err);
     }
 
-    // 4️⃣ Rebuild wallet live picks and pending
+    // 4️⃣ Rebuild wallet live picks and pending (preserves resolved)
     try {
       await rebuildWalletLivePicks(forceRebuildSignals);
     } catch (err) {
@@ -1606,7 +1633,6 @@ async function trackerLoop() {
 async function main() {
   console.log("🚀 POLYMARKET TRACKER LIVE 🚀");
 
-  // 1️⃣ Initial fetch leaderboard & wallet tracking
   try {
     await fetchAndInsertLeaderboardWallets(safeInsert);
   } catch (err) {
@@ -1615,29 +1641,23 @@ async function main() {
 
   await trackerLoop();
 
-  // 2️⃣ Continuous polling
+  // Continuous polling
   setInterval(trackerLoop, POLL_INTERVAL);
 
-// 3️⃣ Daily cron for leaderboard refresh + live picks rebuild
-cron.schedule("0 7 * * *", async () => {
-  console.log("📅 Daily cron running...");
-  try {
-    // Step 1: Refresh leaderboard wallets
-    await fetchAndInsertLeaderboardWallets(safeInsert);
+  // Daily cron: leaderboard refresh + rebuild picks
+  cron.schedule("0 7 * * *", async () => {
+    console.log("📅 Daily cron running...");
+    try {
+      await fetchAndInsertLeaderboardWallets(safeInsert);
+      await trackerLoop();
+      await rebuildWalletLivePicks(true); // force rebuild preserves resolved outcomes
+    } catch (err) {
+      console.error("❌ Daily cron failed:", err);
+    }
+  }, { timezone: TIMEZONE });
 
-    // Step 2: Run tracker loop for all wallets
-    await trackerLoop();
-
-    // Step 3: Rebuild live picks and pending safely
-    await safeRebuildLivePicks(true); // force rebuild ensures all picks are recalculated
-  } catch (err) {
-    console.error("❌ Daily cron failed:", err);
-  }
-}, { timezone: TIMEZONE });
-
-  // 4️⃣ Heartbeat log
+  // Heartbeat
   setInterval(() => console.log(`[HEARTBEAT] Tracker alive @ ${new Date().toISOString()}`), 60_000);
 }
 
 main();
-

@@ -1017,28 +1017,40 @@ async function forceResolvePendingMarkets() {
 
   const eventSlugs = [...new Set(pendingSignals.map(s => s.event_slug).filter(Boolean))];
 
+  let totalUpdated = 0;
+
   for (const slug of eventSlugs) {
     // Fetch fresh market data, ignore cache
-    const market = await fetchMarketSafe(slug, true);
+    const market = await fetchMarketSafe({ event_slug: slug }, true);
     if (!market || !market.outcome) continue;
 
     const winningOutcome = market.outcome;
 
-    // 2️⃣ Update all signals for this event
-    await supabase
-      .from("signals")
-      .update({
-        outcome: supabase.raw("CASE WHEN picked_outcome = ? THEN 'WIN' ELSE 'LOSS' END", [winningOutcome]),
-        resolved_outcome: winningOutcome,
-        outcome_at: new Date()
-      })
-      .eq("event_slug", slug);
+    // 2️⃣ Update signals manually per row
+    for (const sig of pendingSignals.filter(s => s.event_slug === slug)) {
+      const result = sig.picked_outcome === winningOutcome ? "WIN" : "LOSS";
 
-    // 3️⃣ Rebuild wallet_live_picks and pending with updated resolved outcomes
+      const { error } = await supabase
+        .from("signals")
+        .update({
+          outcome: result,
+          resolved_outcome: winningOutcome,
+          outcome_at: new Date()
+        })
+        .eq("id", sig.id);
+
+      if (error) {
+        console.error(`❌ Failed updating signal ${sig.id}:`, error.message);
+      } else {
+        totalUpdated++;
+      }
+    }
+
+    // 3️⃣ Rebuild wallet_live_picks and wallet_live_pending for all markets
     await rebuildWalletLivePicks(true);
   }
 
-  console.log(`✅ Force-resolved ${eventSlugs.length} pending markets`);
+  console.log(`✅ Force-resolved ${totalUpdated} pending signals across ${eventSlugs.length} events`);
 }
 
 /* ===========================

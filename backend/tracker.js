@@ -556,8 +556,8 @@ async function trackWallet(wallet, forceRebuild = false) {
   const proxyWallet = wallet.polymarket_proxy_wallet;
   if (!proxyWallet) return;
 
-  // Auto-unpause if win_rate >= 80
-  if (wallet.paused && wallet.win_rate >= 80) {
+  // Auto-unpause if win_rate >= 50
+  if (wallet.paused && wallet.win_rate >= 50) {
     await supabase
       .from("wallets")
       .update({ paused: false })
@@ -1256,25 +1256,33 @@ async function getWalletNetPick(walletId, eventSlug) {
 
 /* ===========================
    Wallet Metrics Update
-   Counts losses per event using net pick only
-   Auto-pauses wallet if DAILY_LOSS_LIMIT is exceeded
+   Auto-pauses wallet if daily loss % exceeds threshold
 =========================== */
 async function updateWalletMetricsJS() {
-  const DAILY_LOSS_LIMIT = 3;
+  const DAILY_LOSS_PERCENT_LIMIT = 0.5; // 50% losses triggers pause
 
   const { data: wallets } = await supabase.from("wallets").select("*");
   if (!wallets?.length) return;
 
+  const now = new Date();
+  const startOfDay = new Date(now);
+  startOfDay.setHours(0, 0, 0, 0);
+  const endOfDay = new Date(now);
+  endOfDay.setHours(23, 59, 59, 999);
+
   for (const wallet of wallets) {
+    // --- Fetch today's resolved signals for this wallet ---
     const { data: resolvedSignals } = await supabase
       .from("signals")
       .select("event_slug, picked_outcome, outcome")
       .eq("wallet_id", wallet.id)
+      .gte("outcome_at", startOfDay.toISOString())
+      .lte("outcome_at", endOfDay.toISOString())
       .in("outcome", ["WIN", "LOSS"]);
 
     if (!resolvedSignals?.length) continue;
 
-    // Group signals by event
+    // --- Group by event and compute net pick outcome ---
     const eventsMap = new Map();
     for (const sig of resolvedSignals) {
       if (!sig.event_slug) continue;
@@ -1282,7 +1290,8 @@ async function updateWalletMetricsJS() {
       eventsMap.get(sig.event_slug).push(sig);
     }
 
-    let wins = 0, losses = 0;
+    let losses = 0;
+    let total = 0;
 
     for (const [eventSlug, signalsForEvent] of eventsMap.entries()) {
       // Get wallet net pick for this event
@@ -1294,17 +1303,17 @@ async function updateWalletMetricsJS() {
       const sig = signalsForEvent.find(s => s.picked_outcome === netPick);
       if (!sig) continue;
 
-      if (sig.outcome === "WIN") wins++;
+      total++;
       if (sig.outcome === "LOSS") losses++;
     }
 
-    const total = wins + losses;
-    const winRate = total > 0 ? Math.round((wins / total) * 100) : 0;
+    if (total === 0) continue;
 
-    // Count daily losses safely
-    const dailyLosses = await countWalletDailyLosses(wallet.id);
+    const lossPercent = losses / total;
+    const winRate = Math.round(((total - losses) / total) * 100);
 
-    const shouldPause = dailyLosses >= DAILY_LOSS_LIMIT;
+    // --- Auto-pause wallet if loss % exceeds threshold ---
+    const shouldPause = lossPercent >= DAILY_LOSS_PERCENT_LIMIT;
 
     await supabase
       .from("wallets")

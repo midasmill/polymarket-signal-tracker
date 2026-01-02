@@ -891,6 +891,35 @@ async function fetchMarketSafe({ event_slug, polymarket_id, market_id }, bypassC
 }
 
 /* ===========================
+   Confidence thresholds (Top-level)
+=========================== */
+const CONFIDENCE_THRESHOLDS = {
+  "⭐": 10,
+  "⭐⭐": 20,
+  "⭐⭐⭐": 30,
+  "⭐⭐⭐⭐": 40,
+  "⭐⭐⭐⭐⭐": 50
+};
+
+/* ===========================
+   Convert vote count to numeric confidence (for DB)
+=========================== */
+function getConfidenceNumber(voteCount) {
+  return voteCount; // store raw vote_count as numeric confidence
+}
+
+/* ===========================
+   Convert vote count to star emoji (for Telegram/notes)
+=========================== */
+function getConfidenceEmoji(voteCount) {
+  let stars = "⭐";
+  for (const [s, threshold] of Object.entries(CONFIDENCE_THRESHOLDS)) {
+    if (voteCount >= threshold) stars = s;
+  }
+  return stars;
+}
+
+/* ===========================
    Rebuild Wallet Live Picks & Pending
    (Patched: Preserve resolved + numeric confidence for DB)
 =========================== */
@@ -898,20 +927,11 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "5", 10);
   const marketInfoMap = new Map();
 
-  const CONFIDENCE_THRESHOLDS = {
-    "⭐": 10,
-    "⭐⭐": 20,
-    "⭐⭐⭐": 30,
-    "⭐⭐⭐⭐": 40,
-    "⭐⭐⭐⭐⭐": 50
-  };
-
   function normalizeOutcome(pickedOutcome, market) {
     if (!pickedOutcome) return "UNKNOWN";
     const trimmed = pickedOutcome.trim();
     const upper = trimmed.toUpperCase();
 
-    // Moneyline normalization
     if (market?.outcomes?.length === 2 && market.sportsMarketType === "moneyline") {
       const [team0, team1] = market.outcomes;
       if (upper === "YES" || upper === "OVER") return team0;
@@ -937,14 +957,6 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   function determineOutcomeStatus(pickedOutcome, resolvedOutcome) {
     if (!resolvedOutcome) return "PENDING";
     return pickedOutcome === resolvedOutcome ? "WIN" : "LOSS";
-  }
-
-  function getConfidenceStars(voteCount) {
-    let stars = "⭐";
-    for (const [s, threshold] of Object.entries(CONFIDENCE_THRESHOLDS)) {
-      if (voteCount >= threshold) stars = s;
-    }
-    return stars;
   }
 
   // --- Fetch all signals ---
@@ -1077,7 +1089,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
         outcome: status,
         resolved_outcome: resolvedOutcome,
         fetched_at: new Date(),
-        confidence: data.walletIds.size // numeric value only
+        confidence: getConfidenceNumber(data.walletIds.size) // numeric for DB
       });
     }
   }
@@ -1110,7 +1122,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       outcome: "PENDING",
       resolved_outcome: null,
       fetched_at: new Date(),
-      confidence: 1 // numeric only
+      confidence: getConfidenceNumber(1) // numeric only
     });
   }
 

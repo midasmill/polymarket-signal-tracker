@@ -543,7 +543,8 @@ async function resolveMarketIdFromSlug(eventSlug) {
 
     marketCache.set(eventSlug, resolved);
     return resolved;
-  } catch {
+  } catch (err) {
+    console.error(`❌ Failed resolving market for slug ${eventSlug}:`, err);
     return null;
   }
 }
@@ -573,6 +574,7 @@ async function trackWallet(wallet, forceRebuild = false) {
 
   // 3️⃣ Aggregate PnL per wallet/event/outcome
   const walletEventMap = new Map();
+
   for (const pos of positions) {
     const eventSlug = pos.eventSlug || pos.slug;
     if (!eventSlug) continue;
@@ -580,7 +582,7 @@ async function trackWallet(wallet, forceRebuild = false) {
     const effectivePnl = pos.cashPnl ?? 0;
     if (!forceRebuild && effectivePnl < 1000 && !pos.resolvedOutcome) continue;
 
-    // Determine picked outcome safely
+    // Determine picked outcome
     let pickedOutcome;
     const sideValue = (pos.side || "BUY").toUpperCase();
     if (pos.title?.includes(" vs. ")) {
@@ -603,7 +605,7 @@ async function trackWallet(wallet, forceRebuild = false) {
     const syntheticTx = [proxyWallet, pos.asset || "", pos.timestamp || "", effectivePnl, Date.now()].join("-");
     if (!forceRebuild && existingTxs.has(syntheticTx)) continue;
 
-    // ✅ Resolve numeric market_id
+    // Resolve market info
     const marketInfo = await resolveMarketIdFromSlug(eventSlug);
 
     const key = `${wallet.id}||${eventSlug}`;
@@ -613,11 +615,21 @@ async function trackWallet(wallet, forceRebuild = false) {
         market_id: marketInfo?.market_id || null,
         polymarket_id: marketInfo?.polymarket_id || null,
         market_name: marketInfo?.market?.question || pos.title || null,
+        market: marketInfo?.market || null,   // ✅ store full market
         event_slug: eventSlug,
         resolved_outcome: pos.resolvedOutcome ?? null,
         outcome_at: pos.outcomeTimestamp ?? null,
         tx_hashes: new Set()
       });
+    } else if (marketInfo?.market) {
+      // Upgrade existing entry if market not set yet
+      const entry = walletEventMap.get(key);
+      if (!entry.market) {
+        entry.market = marketInfo.market;
+        entry.market_id = marketInfo.market_id;
+        entry.polymarket_id = marketInfo.polymarket_id;
+        entry.market_name = marketInfo.market.question || entry.market_name;
+      }
     }
 
     const entry = walletEventMap.get(key);
@@ -651,32 +663,39 @@ async function trackWallet(wallet, forceRebuild = false) {
       outcome = data.resolved_outcome === picked_outcome ? "WIN" : "LOSS";
     }
 
-netSignals.push({
-  wallet_id,
-  market_id: data.market_id,
-  polymarket_id: data.polymarket_id,
-  market_name: data.market_name || "UNKNOWN",
-  event_slug: data.event_slug,
+    // Determine event_start_at (use gameStartTime, fallback to events[0].startTime)
+    let eventStartAt = null;
+    if (data.market?.gameStartTime) {
+      eventStartAt = new Date(data.market.gameStartTime);
+    } else if (data.market?.events?.[0]?.startTime) {
+      eventStartAt = new Date(data.market.events[0].startTime);
+    }
 
-  picked_outcome,
-  signal: picked_outcome,
-  side: side || "BUY",
+    netSignals.push({
+      wallet_id,
+      market_id: data.market_id,
+      polymarket_id: data.polymarket_id,
+      market_name: data.market_name || "UNKNOWN",
+      event_slug: data.event_slug,
 
-  pnl,
-  amount: Math.abs(pnl) || null,
+      picked_outcome,
+      signal: picked_outcome,
+      side: side || "BUY",
 
-  outcome,
-  resolved_outcome: data.resolved_outcome ?? null,
-  outcome_at: data.outcome_at ?? null,
+      pnl,
+      amount: Math.abs(pnl) || null,
 
-  win_rate: wallet.win_rate,
-  created_at: new Date(),
+      outcome,
+      resolved_outcome: data.resolved_outcome ?? null,
+      outcome_at: data.outcome_at ?? null,
 
-  event_start_at: data.market?.gameStartTime ?? null, // ✅ SINGLE SOURCE
+      win_rate: wallet.win_rate,
+      created_at: new Date(),
 
-  tx_hash: Array.from(data.tx_hashes)[0]
-});
+      event_start_at: eventStartAt,   // ✅ guaranteed populated
 
+      tx_hash: Array.from(data.tx_hashes)[0]
+    });
   }
 
   if (!netSignals.length) return;
@@ -691,7 +710,7 @@ netSignals.push({
       .neq("picked_outcome", sig.picked_outcome);
   }
 
-  // 6️⃣ Deduplicate before upsert to avoid tx_hash conflicts
+  // 6️⃣ Deduplicate before upsert
   const seenSignals = new Set();
   const dedupedSignals = netSignals.filter(s => {
     const key = `${s.wallet_id}||${s.event_slug}||${s.picked_outcome}||${s.tx_hash}`;

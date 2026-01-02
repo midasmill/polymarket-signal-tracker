@@ -434,7 +434,7 @@ async function fetchAndInsertLeaderboardWallets() {
           if (!proxyWallet) continue;
 
 // Skip if PnL < 88,888 or volume exceeds 2× PnL
-const MIN_PNL = 88,888;
+const MIN_PNL = 88888;
 const MAX_VOL_MULTIPLIER = 2;
 
 if ((entry.pnl || 0) < MIN_PNL || (entry.vol || 0) > MAX_VOL_MULTIPLIER * (entry.pnl || 0)) continue;

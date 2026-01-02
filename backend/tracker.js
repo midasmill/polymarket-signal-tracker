@@ -927,12 +927,11 @@ async function forceResolvePendingMarkets() {
   console.log(`🚀 Force-resolve complete for ${eventSlugs.length} market(s)`);
 }
 
-
 /* ===========================
    Rebuild Wallet Live Picks & Pending
-   - Dominant by wallet count
-   - wallet_live_pending updates resolved outcomes dynamically
-   - wallet_live_picks contains all resolved markets
+   - Uses event_start_at from signals
+   - Dominant outcome by wallet count
+   - wallet_live_pending for unresolved, wallet_live_picks for resolved
 =========================== */
 async function rebuildWalletLivePicks(forceRebuild = false) {
   const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "10", 10);
@@ -982,11 +981,15 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     if (!sig.wallet_id || !sig.market_id) continue;
 
     if (!marketInfoMap.has(sig.market_id)) {
-      const market = await fetchMarketSafe({
-        polymarket_id: sig.polymarket_id,
-        market_id: sig.market_id,
-        event_slug: sig.event_slug
-      });
+      // Use signal values first, fallback to market fetch only if needed
+      let market = null;
+      try {
+        market = await fetchMarketSafe({
+          polymarket_id: sig.polymarket_id,
+          market_id: sig.market_id,
+          event_slug: sig.event_slug
+        });
+      } catch {}
 
       marketInfoMap.set(sig.market_id, {
         market_name: market?.question || sig.market_name || null,
@@ -996,7 +999,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
         market_url: market?.slug ? `https://polymarket.com/markets/${market.slug}` : null,
         outcomes: market?.outcomes || [],
         sportsMarketType: market?.sportsMarketType || null,
-        gameStartTime: market?.gameStartTime || null // ✅ add gameStartTime here
+        gameStartTime: sig.event_start_at || null // ✅ use signal's event_start_at
       });
     }
 
@@ -1067,7 +1070,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
         event_slug: info?.event_slug,
         polymarket_id: info?.polymarket_id,
         market_url: info?.market_url,
-        gameStartTime: info?.gameStartTime, // ✅ include gameStartTime here
+        gameStartTime: info?.gameStartTime, // ✅ signal's event_start_at
         picked_outcome: outcome,
         side: determineSide(outcome, info),
         wallets: Array.from(data.walletIds),
@@ -1082,9 +1085,9 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       };
 
       if (resolvedOutcome) {
-        finalLive.push(row); // resolved → live
+        finalLive.push(row);
       } else {
-        finalPending.push(row); // unresolved → pending
+        finalPending.push(row);
       }
     }
   }
@@ -1092,7 +1095,9 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   await safeInsert("wallet_live_pending", finalPending);
   await safeInsert("wallet_live_picks", finalLive, { upsertColumns: ["market_id", "picked_outcome"] });
 
-  console.log("✅ Wallet live picks and pending rebuilt successfully (WIN/LOSS updated)");
+  console.log(
+    `✅ Wallet live picks and pending rebuilt successfully: ${finalLive.length} live, ${finalPending.length} pending`
+  );
 }
 
 /* ===========================
@@ -1295,7 +1300,7 @@ async function updateWalletMetricsJS() {
 }
 
 /* ===========================
-   Signal Processing + Telegram Sending (Updated with gameStartTime)
+   Signal Processing + Telegram Sending (Updated with event_start_at)
 =========================== */
 async function processAndSendSignals() {
   // 1️⃣ Fetch all live picks
@@ -1322,9 +1327,9 @@ async function processAndSendSignals() {
 
     const confidenceEmoji = getConfidenceEmoji(pick.vote_count);
 
-    // Include gameStartTime if available
-    const gameTimeText = pick.gameStartTime
-      ? `\nGame Start: ${new Date(pick.gameStartTime).toLocaleString()}`
+    // Use event_start_at (or fallback to gameStartTime if needed)
+    const gameTimeText = pick.event_start_at || pick.gameStartTime
+      ? `\nGame Start: ${new Date(pick.event_start_at || pick.gameStartTime).toLocaleString()}`
       : "";
 
     const text = `⚡️ NEW MARKET PREDICTION
@@ -1360,7 +1365,7 @@ Confidence: ${confidenceEmoji}`;
 }
 
 /* ===========================
-   Result Processing + Telegram + Notes (Updated with gameStartTime)
+   Result Processing + Telegram + Notes (Updated with event_start_at)
 =========================== */
 async function processAndSendResults() {
   const { data: resolvedPicks, error } = await supabase
@@ -1388,9 +1393,9 @@ async function processAndSendResults() {
     const confidenceEmoji = getConfidenceEmoji(pick.vote_count);
     const outcomeEmoji = outcome === "WIN" ? "✅" : "❌";
 
-    // Include gameStartTime if available
-    const gameTimeText = pick.gameStartTime
-      ? `\nGame Start: ${new Date(pick.gameStartTime).toLocaleString()}`
+    // Use event_start_at (fallback to gameStartTime if needed)
+    const gameTimeText = pick.event_start_at || pick.gameStartTime
+      ? `\nGame Start: ${new Date(pick.event_start_at || pick.gameStartTime).toLocaleString()}`
       : "";
 
     const text = `⚡️ RESULT FOR MARKET PREDICTION

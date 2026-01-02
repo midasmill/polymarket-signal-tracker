@@ -809,6 +809,15 @@ for (const [key, data] of walletEventMap.entries()) {
 
   // 9️⃣ Auto-resolve pending signals
   await autoResolvePendingSignals();
+
+   // --- Insert or upsert signals first ---
+await safeInsert("signals", dedupedSignals, {
+  upsertColumns: ["wallet_id", "event_slug", "picked_outcome"]
+});
+
+// --- Then rebuild live picks/pending safely ---
+await safeRebuildLivePicks();
+
 }
 
 /* ===========================
@@ -1193,6 +1202,25 @@ async function fetchWalletPositions(proxyWallet, retries = 3, delayMs = 2000) {
     }
   }
 }
+
+// --- Debounced rebuild helper to avoid overlapping runs ---
+let rebuildLock = false;
+
+async function safeRebuildLivePicks(forceRebuild = false) {
+  if (rebuildLock) return; // skip if a rebuild is already running
+  rebuildLock = true;
+
+  try {
+    console.log("🔄 Rebuilding wallet_live_picks and wallet_live_pending...");
+    await rebuildWalletLivePicks(forceRebuild);
+    console.log("✅ Rebuild complete.");
+  } catch (err) {
+    console.error("❌ Error during rebuild:", err.message);
+  } finally {
+    rebuildLock = false;
+  }
+}
+
 
 /* ===========================
    Notes Update Helper (with link + event start)
@@ -1587,16 +1615,22 @@ async function main() {
   // 2️⃣ Continuous polling
   setInterval(trackerLoop, POLL_INTERVAL);
 
-  // 3️⃣ Daily cron for leaderboard refresh
-  cron.schedule("0 7 * * *", async () => {
-    console.log("📅 Daily cron running...");
-    try {
-      await fetchAndInsertLeaderboardWallets(safeInsert);
-      await trackerLoop();
-    } catch (err) {
-      console.error("❌ Daily cron failed:", err);
-    }
-  }, { timezone: TIMEZONE });
+// 3️⃣ Daily cron for leaderboard refresh + live picks rebuild
+cron.schedule("0 7 * * *", async () => {
+  console.log("📅 Daily cron running...");
+  try {
+    // Step 1: Refresh leaderboard wallets
+    await fetchAndInsertLeaderboardWallets(safeInsert);
+
+    // Step 2: Run tracker loop for all wallets
+    await trackerLoop();
+
+    // Step 3: Rebuild live picks and pending safely
+    await safeRebuildLivePicks(true); // force rebuild ensures all picks are recalculated
+  } catch (err) {
+    console.error("❌ Daily cron failed:", err);
+  }
+}, { timezone: TIMEZONE });
 
   // 4️⃣ Heartbeat log
   setInterval(() => console.log(`[HEARTBEAT] Tracker alive @ ${new Date().toISOString()}`), 60_000);

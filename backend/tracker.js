@@ -805,22 +805,30 @@ async function trackWallet(wallet, forceRebuild = false) {
 }
 
 /* ===========================
-   Safe Insert / Upsert Helper (Verbose)
+   Safe Insert / Upsert Helper (Verbose + Robust)
 =========================== */
 async function safeInsert(table, rows, options = {}) {
   if (!rows || !rows.length) return;
 
   const { upsertColumns = [] } = options;
 
-  const { error } = await supabase
-    .from(table)
-    .upsert(rows, { onConflict: upsertColumns.length ? upsertColumns : undefined });
+  try {
+    const { error } = await supabase
+      .from(table)
+      .upsert(rows, {
+        onConflict: upsertColumns.length ? upsertColumns : undefined,
+        // Optional: return nothing to avoid large responses
+        returning: "minimal",
+      });
 
-  if (error) {
-    console.error(`❌ safeInsert failed for table ${table}:`);
-    console.error("Full error object:", JSON.stringify(error, null, 2));
-  } else {
-    console.log(`✅ Inserted/Upserted ${rows.length} rows into ${table}`);
+    if (error) {
+      console.error(`❌ safeInsert failed for table ${table}:`);
+      console.error("Full error object:", JSON.stringify(error, null, 2));
+    } else {
+      console.log(`✅ Inserted/Upserted ${rows.length} rows into ${table}`);
+    }
+  } catch (err) {
+    console.error(`❌ Exception in safeInsert for table ${table}:`, err.message);
   }
 }
 

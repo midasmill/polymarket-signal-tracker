@@ -640,65 +640,73 @@ async function trackWallet(wallet, forceRebuild = false) {
     if (pos.resolvedOutcome) entry.resolved_outcome = pos.resolvedOutcome;
   }
 
-  // 4️⃣ Compute net pick per wallet/event
-  const netSignals = [];
-  for (const [key, data] of walletEventMap.entries()) {
-    const sorted = Object.entries(data.picks).sort((a, b) => b[1] - a[1]);
-    if (!sorted.length) continue;
+// 4️⃣ Compute net pick per wallet/event safely
+const netSignals = [];
+for (const [key, data] of walletEventMap.entries()) {
+  const sorted = Object.entries(data.picks).sort((a, b) => b[1] - a[1]);
+  if (!sorted.length) continue;
 
-    const wallet_id = parseInt(key.split("||")[0]);
-    const picked_outcome = sorted[0][0];
-    const pnl = sorted[0][1];
+  const wallet_id = parseInt(key.split("||")[0]);
+  const picked_outcome = sorted[0][0];
+  const pnl = sorted[0][1];
 
-    // Determine side safely
-    let side;
-    if (/YES|NO|OVER|UNDER/i.test(picked_outcome)) {
-      side = picked_outcome.toUpperCase();
-    } else {
-      const teams = data.market_name?.split(" vs. ").map(s => s.trim());
-      side = teams?.[0] === picked_outcome ? "BUY" : "SELL";
-    }
-
-    // Compute outcome as Pending/WIN/LOSS
-    let outcome = "Pending";
-    if (data.resolved_outcome) {
-      outcome = data.resolved_outcome === picked_outcome ? "WIN" : "LOSS";
-    }
-
-    // Determine event_start_at (use gameStartTime, fallback to events[0].startTime)
-    let eventStartAt = null;
-    if (data.market?.gameStartTime) {
-      eventStartAt = new Date(data.market.gameStartTime);
-    } else if (data.market?.events?.[0]?.startTime) {
-      eventStartAt = new Date(data.market.events[0].startTime);
-    }
-
-    netSignals.push({
-      wallet_id,
-      market_id: data.market_id,
-      polymarket_id: data.polymarket_id,
-      market_name: data.market_name || "UNKNOWN",
-      event_slug: data.event_slug,
-
-      picked_outcome,
-      signal: picked_outcome,
-      side: side || "BUY",
-
-      pnl,
-      amount: Math.abs(pnl) || null,
-
-      outcome,
-      resolved_outcome: data.resolved_outcome ?? null,
-      outcome_at: data.outcome_at ?? null,
-
-      win_rate: wallet.win_rate,
-      created_at: new Date(),
-
-      event_start_at: eventStartAt,   // ✅ guaranteed populated
-
-      tx_hash: Array.from(data.tx_hashes)[0]
-    });
+  // Determine side safely
+  let side;
+  if (/YES|NO|OVER|UNDER/i.test(picked_outcome)) {
+    side = picked_outcome.toUpperCase();
+  } else {
+    const teams = data.market_name?.split(" vs. ").map(s => s.trim());
+    side = teams?.[0] === picked_outcome ? "BUY" : "SELL";
   }
+
+  // Compute outcome as Pending/WIN/LOSS
+  let outcome = "Pending";
+  if (data.resolved_outcome) {
+    outcome = data.resolved_outcome === picked_outcome ? "WIN" : "LOSS";
+  }
+
+  // Determine event_start_at (use gameStartTime, fallback to events[0].startTime)
+  let eventStartAt = null;
+  if (data.market?.gameStartTime) {
+    eventStartAt = new Date(data.market.gameStartTime);
+  } else if (data.market?.events?.[0]?.startTime) {
+    eventStartAt = new Date(data.market.events[0].startTime);
+  }
+
+  // ✅ Skip signals with missing market_id
+  if (!data.market_id) {
+    console.warn(
+      `⚠️ Skipping signal for wallet=${wallet_id}, eventSlug=${data.event_slug}, picked_outcome=${picked_outcome}: missing market_id`
+    );
+    continue;
+  }
+
+  // Add safe signal to array
+  netSignals.push({
+    wallet_id,
+    market_id: data.market_id,
+    polymarket_id: data.polymarket_id,
+    market_name: data.market_name || "UNKNOWN",
+    event_slug: data.event_slug,
+
+    picked_outcome,
+    signal: picked_outcome,
+    side: side || "BUY",
+
+    pnl,
+    amount: Math.abs(pnl) || null,
+
+    outcome,
+    resolved_outcome: data.resolved_outcome ?? null,
+    outcome_at: data.outcome_at ?? null,
+
+    win_rate: wallet.win_rate,
+    created_at: new Date(),
+
+    event_start_at: eventStartAt,
+    tx_hash: Array.from(data.tx_hashes)[0]
+  });
+}
 
   if (!netSignals.length) return;
 

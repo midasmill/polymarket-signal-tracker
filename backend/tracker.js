@@ -11,16 +11,43 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = "-4911183253";
 const TIMEZONE = process.env.TIMEZONE || "America/New_York";
-
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || "30000", 10);
 const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "10", 10);
 const FORCE_SEND = process.env.FORCE_SEND === "true";
-
 const RESULT_EMOJIS = { WIN: "✅", LOSS: "❌", Pending: "⚪" };
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) throw new Error("Supabase keys required");
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+/* ===========================
+   Confidence thresholds (Top-level)
+=========================== */
+const CONFIDENCE_THRESHOLDS = {
+  "⭐": 10,
+  "⭐⭐": 20,
+  "⭐⭐⭐": 30,
+  "⭐⭐⭐⭐": 40,
+  "⭐⭐⭐⭐⭐": 50
+};
+
+/* ===========================
+   Convert vote count to numeric confidence (for DB)
+=========================== */
+function getConfidenceNumber(voteCount) {
+  return voteCount; // store raw vote_count as numeric confidence
+}
+
+/* ===========================
+   Convert vote count to star emoji (for Telegram/notes)
+=========================== */
+function getConfidenceEmoji(voteCount) {
+  let stars = "⭐";
+  for (const [s, threshold] of Object.entries(CONFIDENCE_THRESHOLDS)) {
+    if (voteCount >= threshold) stars = s;
+  }
+  return stars;
+}
 
 /* ===========================
    🔥 START HTTP SERVER IMMEDIATELY
@@ -888,35 +915,6 @@ async function fetchMarketSafe({ event_slug, polymarket_id, market_id }, bypassC
     console.error("Market fetch error:", err.message);
     return null;
   }
-}
-
-/* ===========================
-   Confidence thresholds (Top-level)
-=========================== */
-const CONFIDENCE_THRESHOLDS = {
-  "⭐": 10,
-  "⭐⭐": 20,
-  "⭐⭐⭐": 30,
-  "⭐⭐⭐⭐": 40,
-  "⭐⭐⭐⭐⭐": 50
-};
-
-/* ===========================
-   Convert vote count to numeric confidence (for DB)
-=========================== */
-function getConfidenceNumber(voteCount) {
-  return voteCount; // store raw vote_count as numeric confidence
-}
-
-/* ===========================
-   Convert vote count to star emoji (for Telegram/notes)
-=========================== */
-function getConfidenceEmoji(voteCount) {
-  let stars = "⭐";
-  for (const [s, threshold] of Object.entries(CONFIDENCE_THRESHOLDS)) {
-    if (voteCount >= threshold) stars = s;
-  }
-  return stars;
 }
 
 /* ===========================

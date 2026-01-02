@@ -127,12 +127,6 @@ async function fetchWithRetry(url, options = {}, retries = 3, delay = 1000) {
   }
 }
 
-function getConfidenceEmoji(count) {
-  const entries = Object.entries(CONFIDENCE_THRESHOLDS).sort(([, a], [, b]) => b - a);
-  for (const [emoji, threshold] of entries) if (count >= threshold) return emoji;
-  return "";
-}
-
 async function autoResolvePendingSignals() {
   // 1️⃣ Fetch all pending signals
   const { data: pendingSignals, error: fetchError } = await supabase

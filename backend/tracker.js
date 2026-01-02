@@ -886,26 +886,24 @@ async function trackWallet(wallet, forceRebuild = false) {
 /* ===========================
    Rebuild Wallet Live Picks & Pending
    (All Picks + Pending + Dominant Picks)
-   ✅ Includes YES/NO normalization
+   ✅ Normalized outcomes (YES/NO → team names)
+   ✅ Side always BUY/SELL
+   ✅ Vote count correct
+   ✅ Outcome shows Pending/WIN/LOSS
 =========================== */
 
-const invalidMarketSlugs = new Map(); // slug => reason
+const invalidMarketSlugs = new Map();
 
 function determineSide(pickedOutcome, marketName, eventSlug) {
   if (!pickedOutcome) return "BUY";
-  if (/YES|NO|OVER|UNDER/i.test(pickedOutcome)) return pickedOutcome.toUpperCase();
   const teams =
     marketName?.split(" vs. ").map(s => s.trim()) ||
     eventSlug?.split(" vs. ").map(s => s.trim()) ||
     [];
-  if (teams.length === 2) return teams[0] === pickedOutcome ? "BUY" : "SELL";
+  if (teams.length === 2) return pickedOutcome === teams[0] ? "BUY" : "SELL";
   return "BUY";
 }
 
-/**
- * Normalize a picked outcome to the actual market outcome
- * Handles YES/NO, OVER/UNDER for binary markets
- */
 function normalizeOutcome(pickedOutcome, market) {
   if (!pickedOutcome) return "UNKNOWN";
   if (!market?.outcomes?.length) return pickedOutcome;
@@ -915,13 +913,13 @@ function normalizeOutcome(pickedOutcome, market) {
 
   const upper = pickedOutcome.toUpperCase();
 
-  // Binary markets (2 outcomes)
+  // Binary markets
   if (market.outcomes.length === 2) {
     if (upper === "YES" || upper === "OVER") return market.outcomes[0];
     if (upper === "NO" || upper === "UNDER") return market.outcomes[1];
   }
 
-  // For multi-outcome markets, just return the original
+  // Multi-outcome markets: fallback to original
   return pickedOutcome;
 }
 
@@ -935,17 +933,17 @@ async function safeInsert(table, rows) {
 async function rebuildWalletLivePicks(forceRebuild = false) {
   const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "10", 10);
 
-  /* 1️⃣ Fetch wallets */
+  // 1️⃣ Fetch wallets
   const { data: wallets } = await supabase.from("wallets").select("id");
   if (!wallets?.length) return;
 
-  /* 2️⃣ Fetch all raw signals */
+  // 2️⃣ Fetch raw signals
   const { data: signals, error: sigError } = await supabase
     .from("signals")
     .select("wallet_id, market_id, polymarket_id, market_name, event_slug, picked_outcome, pnl, resolved_outcome");
   if (sigError || !signals?.length) return;
 
-  /* 3️⃣ Aggregate wallet picks per event */
+  // 3️⃣ Aggregate wallet picks per event
   const walletNetPickMap = new Map();
   for (const sig of signals) {
     if (!sig.wallet_id || !sig.market_id || !sig.event_slug) continue;
@@ -968,10 +966,9 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     if (sig.resolved_outcome) entry.resolved_outcome = sig.resolved_outcome;
   }
 
-  /* 4️⃣ Determine wallet final pick with normalization */
+  // 4️⃣ Determine wallet final pick with normalization
   const walletFinalPicks = [];
   for (const data of walletNetPickMap.values()) {
-    // Fetch market for normalization
     const market = await fetchMarketSafe({
       polymarket_id: data.polymarket_id,
       event_slug: data.event_slug,
@@ -986,16 +983,16 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       polymarket_id: data.polymarket_id,
       event_slug: data.event_slug,
       market_name: data.market_name,
-      picked_outcome: normalizeOutcome(sorted[0][0], market), // 🔹 normalize here
+      picked_outcome: normalizeOutcome(sorted[0][0], market),
       pnl: sorted[0][1],
       resolved_outcome: data.resolved_outcome,
       walletIds: data.walletIds,
-      marketObj: market // keep market for later
+      marketObj: market
     });
   }
   if (!walletFinalPicks.length) return;
 
-  /* 5️⃣ Aggregate per market */
+  // 5️⃣ Aggregate per market
   const marketNetPickMap = new Map();
   for (const pick of walletFinalPicks) {
     if (!marketNetPickMap.has(pick.market_id)) {
@@ -1022,7 +1019,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       outcomeData.resolved_outcome = pick.resolved_outcome;
   }
 
-  /* 6️⃣ Resolve markets using fetchMarketSafe */
+  // 6️⃣ Resolve markets
   const marketResolvedMap = {};
   await Promise.all([...marketNetPickMap.entries()].map(async ([marketId, entry]) => {
     try {
@@ -1031,10 +1028,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
         event_slug: entry.event_slug,
         market_id: entry.market_id
       });
-
-      if (market?.resolved_outcome) {
-        marketResolvedMap[marketId] = market.resolved_outcome;
-      }
+      if (market?.resolved_outcome) marketResolvedMap[marketId] = market.resolved_outcome;
     } catch (err) {
       invalidMarketSlugs.set(entry.event_slug, err.message);
       await safeInsert("skipped_markets", {
@@ -1045,12 +1039,12 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     }
   }));
 
-  /* 7️⃣ Build wallet_live_pending */
+  // 7️⃣ Build wallet_live_pending
   const finalPendingPicks = [];
   for (const [market_id, entry] of marketNetPickMap.entries()) {
     for (const [outcome, data] of Object.entries(entry.outcomes)) {
       const resolved = data.resolved_outcome || marketResolvedMap[market_id] || null;
-      const outcomeStatus = resolved ? (outcome === resolved ? "WIN" : "LOSS") : "PENDING";
+      const outcomeStatus = resolved ? (outcome === resolved ? "WIN" : "LOSS") : "Pending";
 
       finalPendingPicks.push({
         market_id,
@@ -1068,7 +1062,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   }
   await safeInsert("wallet_live_pending", finalPendingPicks);
 
-  /* 8️⃣ Build wallet_live_picks (dominant picks) */
+  // 8️⃣ Build wallet_live_picks (dominant picks)
   const finalLivePicks = [];
   for (const [market_id, entry] of marketNetPickMap.entries()) {
     const sortedOutcomes = Object.entries(entry.outcomes).sort(
@@ -1080,7 +1074,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL) continue;
 
     const resolved = data.resolved_outcome || marketResolvedMap[market_id] || null;
-    const outcomeStatus = resolved ? (dominantOutcome === resolved ? "WIN" : "LOSS") : "PENDING";
+    const outcomeStatus = resolved ? (dominantOutcome === resolved ? "WIN" : "LOSS") : "Pending";
 
     finalLivePicks.push({
       market_id,
@@ -1097,7 +1091,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   }
   await safeInsert("wallet_live_picks", finalLivePicks);
 
-  /* 9️⃣ Build signals */
+  // 9️⃣ Build signals
   const signalsToUpsert = [];
   for (const [market_id, entry] of marketNetPickMap.entries()) {
     const sortedOutcomes = Object.entries(entry.outcomes).sort(
@@ -1109,7 +1103,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL) continue;
 
     const resolved = data.resolved_outcome || marketResolvedMap[market_id] || null;
-    const outcomeStatus = resolved ? (dominantOutcome === resolved ? "WIN" : "LOSS") : "PENDING";
+    const outcomeStatus = resolved ? (dominantOutcome === resolved ? "WIN" : "LOSS") : "Pending";
 
     data.walletIds.forEach(wallet_id => {
       if (!wallet_id) return;
@@ -1135,8 +1129,9 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   await safeInsert("signals", signalsToUpsert);
 
   invalidMarketSlugs.clear();
-  console.log(`✅ Wallet live picks, pending, and signals rebuilt with polymarket_id mapping and outcome normalization`);
+  console.log(`✅ Wallet live picks, pending, and signals rebuilt with normalized outcomes and consistent sides`);
 }
+
 
 /* ===========================
    Fetch Wallet Activity (DATA-API, Robust)

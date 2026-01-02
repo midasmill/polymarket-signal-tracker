@@ -888,10 +888,10 @@ async function safeInsert(table, rows, { upsertColumns = [], ignoreDuplicates = 
 async function rebuildWalletLivePicks(forceRebuild = false) {
   const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "10", 10);
 
-  const marketCache = new Map();
-  const marketInfoMap = new Map();
+  const marketCache = new Map(); // Cache market data by market_id
+  const marketInfoMap = new Map(); // Store normalized info for each market
 
-  // --- Normalize outcome for sports, YES/NO, OVER/UNDER ---
+  // --- Normalize outcome for sports markets and YES/NO, OVER/UNDER ---
   function normalizeOutcome(pickedOutcome, market) {
     if (!pickedOutcome) return "UNKNOWN";
     const trimmed = pickedOutcome.trim();
@@ -917,7 +917,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     return outcome === team0 ? "BUY" : "SELL";
   }
 
-  // --- Determine outcome status: WIN/LOSS/PENDING ---
+  // --- Determine outcome status: WIN / LOSS / PENDING ---
   function determineOutcomeStatus(pickedOutcome, resolvedOutcome) {
     if (!resolvedOutcome) return "PENDING";
     return pickedOutcome === resolvedOutcome ? "WIN" : "LOSS";
@@ -964,7 +964,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     walletEntry[normalized] = (walletEntry[normalized] || 0) + Number(sig.pnl || 0);
   }
 
-  // --- Determine wallet dominant outcome (highest PnL) ---
+  // --- Determine wallet dominant outcome ---
   const walletDominantMap = new Map();
   for (const [key, outcomeMap] of walletMarketMap.entries()) {
     let dominantOutcome = null;
@@ -978,7 +978,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     walletDominantMap.set(key, dominantOutcome);
   }
 
-  // --- Aggregate by market outcome ---
+  // --- Aggregate wallet counts by market outcome ---
   const marketNetPickMap = new Map();
   for (const [key, dominantOutcome] of walletDominantMap.entries()) {
     const [wallet_id, market_id] = key.split("_");
@@ -989,11 +989,10 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     outcomes[dominantOutcome].totalPnl += walletMarketMap.get(key)[dominantOutcome];
   }
 
-  // --- Final normalization per market ---
+  // --- Normalize outcomes for YES/NO, OVER/UNDER across markets ---
   for (const [market_id, outcomes] of marketNetPickMap.entries()) {
     const info = marketInfoMap.get(market_id);
     if (info?.outcomes?.length === 2) {
-      const [team0, team1] = info.outcomes;
       const keys = Object.keys(outcomes);
       for (const key of keys) {
         const normalizedKey = normalizeOutcome(key, { outcomes: info.outcomes, sportsMarketType: "moneyline" });
@@ -1007,7 +1006,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     }
   }
 
-  // --- Build wallet_live_pending ---
+  // --- Build wallet_live_pending (all picks) ---
   const finalPending = [];
   for (const [market_id, outcomes] of marketNetPickMap.entries()) {
     const info = marketInfoMap.get(market_id);
@@ -1034,7 +1033,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   }
   await safeInsert("wallet_live_pending", finalPending);
 
-  // --- Build wallet_live_picks ---
+  // --- Build wallet_live_picks (dominant by wallet count) ---
   const finalLive = [];
   for (const [market_id, outcomes] of marketNetPickMap.entries()) {
     const sorted = Object.entries(outcomes).sort((a, b) => b[1].walletIds.size - a[1].walletIds.size);
@@ -1045,7 +1044,6 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 
     const info = marketInfoMap.get(market_id);
     const market = marketCache.get(market_id);
-    console.log(`🏆 Market ${market_id}: Dominant pick "${dominantOutcome}" with ${data.walletIds.size} wallets`);
 
     finalLive.push({
       market_id,
@@ -1064,10 +1062,9 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       fetched_at: new Date()
     });
   }
-
   await safeInsert("wallet_live_picks", finalLive, { upsertColumns: ["market_id", "picked_outcome"] });
 
-  console.log("✅ Wallet live picks and pending rebuilt successfully (dominant by wallet count, normalized, WIN/LOSS)");
+  console.log("✅ Wallet live picks and pending rebuilt successfully (dominant by wallet count, WIN/LOSS updated)");
 }
 
 /* ===========================

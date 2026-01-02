@@ -815,6 +815,11 @@ async function fetchMarketSafe({ event_slug, polymarket_id, market_id }, bypassC
 
     const market = await res.json();
 
+    // --- Normalize gameStartTime ---
+    // Many APIs use eventTime, startTime, or similar
+    market.gameStartTime =
+      market.gameStartTime || market.eventTime || market.startTime || null;
+
     // Auto-detect winner for closed markets if missing
     if (!market.outcome && market.closed && market.outcomePrices && market.outcomes) {
       try {
@@ -971,7 +976,8 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
         polymarket_id: market?.id || sig.polymarket_id,
         market_url: market?.slug ? `https://polymarket.com/markets/${market.slug}` : null,
         outcomes: market?.outcomes || [],
-        sportsMarketType: market?.sportsMarketType || null
+        sportsMarketType: market?.sportsMarketType || null,
+        gameStartTime: market?.gameStartTime || null // ✅ add gameStartTime here
       });
     }
 
@@ -1042,11 +1048,14 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
         event_slug: info?.event_slug,
         polymarket_id: info?.polymarket_id,
         market_url: info?.market_url,
+        gameStartTime: info?.gameStartTime, // ✅ include gameStartTime here
         picked_outcome: outcome,
         side: determineSide(outcome, info),
         wallets: Array.from(data.walletIds),
         vote_count: data.walletIds.size,
-        vote_counts: JSON.stringify(Array.from(data.walletIds).reduce((acc, id) => ({ ...acc, [id]: 1 }), {})),
+        vote_counts: JSON.stringify(
+          Array.from(data.walletIds).reduce((acc, id) => ({ ...acc, [id]: 1 }), {})
+        ),
         pnl: data.totalPnl,
         outcome: determineOutcomeStatus(outcome, resolvedOutcome),
         resolved_outcome: resolvedOutcome,
@@ -1118,7 +1127,6 @@ async function fetchWalletPositions(proxyWallet, retries = 3, delayMs = 2000) {
     }
   }
 }
-
 
 /* ===========================
    Notes Update Helper (with proper line breaks)
@@ -1268,7 +1276,7 @@ async function updateWalletMetricsJS() {
 }
 
 /* ===========================
-   Signal Processing + Telegram Sending (Fixed)
+   Signal Processing + Telegram Sending (Updated with gameStartTime)
 =========================== */
 async function processAndSendSignals() {
   // 1️⃣ Fetch all live picks
@@ -1295,8 +1303,13 @@ async function processAndSendSignals() {
 
     const confidenceEmoji = getConfidenceEmoji(pick.vote_count);
 
+    // Include gameStartTime if available
+    const gameTimeText = pick.gameStartTime
+      ? `\nGame Start: ${new Date(pick.gameStartTime).toLocaleString()}`
+      : "";
+
     const text = `⚡️ NEW MARKET PREDICTION
-Market Event: ${pick.market_name || pick.event_slug}
+Market Event: ${pick.market_name || pick.event_slug}${gameTimeText}
 Prediction: ${pick.picked_outcome || "UNKNOWN"}
 Confidence: ${confidenceEmoji}`;
 
@@ -1328,13 +1341,13 @@ Confidence: ${confidenceEmoji}`;
 }
 
 /* ===========================
-   Result Processing + Telegram + Notes
+   Result Processing + Telegram + Notes (Updated with gameStartTime)
 =========================== */
 async function processAndSendResults() {
   const { data: resolvedPicks, error } = await supabase
     .from("wallet_live_picks")
     .select("*")
-    .not("resolved_outcome", "is", null); // <- changed from .in("outcome", ...)
+    .not("resolved_outcome", "is", null);
 
   if (error) {
     console.error("❌ Failed fetching resolved picks:", error.message);
@@ -1350,15 +1363,19 @@ async function processAndSendResults() {
     // ✅ Prevent duplicate result alerts
     if (pick.result_sent_at) continue;
 
-    // Determine outcome safely
     const outcome = pick.outcome || 
       (pick.picked_outcome === pick.resolved_outcome ? "WIN" : "LOSS");
 
     const confidenceEmoji = getConfidenceEmoji(pick.vote_count);
     const outcomeEmoji = outcome === "WIN" ? "✅" : "❌";
 
+    // Include gameStartTime if available
+    const gameTimeText = pick.gameStartTime
+      ? `\nGame Start: ${new Date(pick.gameStartTime).toLocaleString()}`
+      : "";
+
     const text = `⚡️ RESULT FOR MARKET PREDICTION
-Market Event: ${pick.market_name || pick.event_slug}
+Market Event: ${pick.market_name || pick.event_slug}${gameTimeText}
 Prediction: ${pick.picked_outcome || "UNKNOWN"}
 Confidence: ${confidenceEmoji}
 Outcome: ${outcome} ${outcomeEmoji}`;
@@ -1369,7 +1386,7 @@ Outcome: ${outcome} ${outcomeEmoji}`;
 
       await supabase
         .from("wallet_live_picks")
-        .update({ result_sent_at: new Date(), outcome }) // also update outcome if missing
+        .update({ result_sent_at: new Date(), outcome })
         .eq("id", pick.id);
 
       console.log(

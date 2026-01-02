@@ -886,21 +886,29 @@ async function trackWallet(wallet, forceRebuild = false) {
 /* ===========================
    Rebuild Wallet Live Picks & Pending
    (All Picks + Pending + Dominant Picks)
-   ✅ Normalized outcomes (YES/NO → team names)
+   ✅ Normalized outcomes (YES/NO → team names if needed)
    ✅ Side always BUY/SELL
    ✅ Vote count correct
-   ✅ Outcome shows Pending/WIN/LOSS
+   ✅ Outcome shows PENDING/WIN/LOSS
 =========================== */
 
 const invalidMarketSlugs = new Map();
 
 function determineSide(pickedOutcome, marketName, eventSlug) {
   if (!pickedOutcome) return "BUY";
+
+  // If market is true YES/NO or OVER/UNDER
+  if (pickedOutcome.toUpperCase() === "YES" || pickedOutcome.toUpperCase() === "NO" ||
+      pickedOutcome.toUpperCase() === "OVER" || pickedOutcome.toUpperCase() === "UNDER") {
+    return "BUY";
+  }
+
   const teams =
     marketName?.split(" vs. ").map(s => s.trim()) ||
     eventSlug?.split(" vs. ").map(s => s.trim()) ||
     [];
   if (teams.length === 2) return pickedOutcome === teams[0] ? "BUY" : "SELL";
+
   return "BUY";
 }
 
@@ -908,18 +916,24 @@ function normalizeOutcome(pickedOutcome, market) {
   if (!pickedOutcome) return "UNKNOWN";
   if (!market?.outcomes?.length) return pickedOutcome;
 
-  // Already a valid outcome name
-  if (market.outcomes.includes(pickedOutcome)) return pickedOutcome;
-
   const upper = pickedOutcome.toUpperCase();
 
-  // Binary markets
+  // Keep YES/NO or OVER/UNDER if the market is truly binary
+  const normalizedOutcomes = market.outcomes.map(o => o.toUpperCase());
+  if (
+    (normalizedOutcomes.includes("YES") && normalizedOutcomes.includes("NO")) ||
+    (normalizedOutcomes.includes("OVER") && normalizedOutcomes.includes("UNDER"))
+  ) {
+    return pickedOutcome.toUpperCase();
+  }
+
+  // Binary market with team names
   if (market.outcomes.length === 2) {
     if (upper === "YES" || upper === "OVER") return market.outcomes[0];
     if (upper === "NO" || upper === "UNDER") return market.outcomes[1];
   }
 
-  // Multi-outcome markets: fallback to original
+  // Multi-outcome fallback
   return pickedOutcome;
 }
 
@@ -934,7 +948,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "10", 10);
 
   // 1️⃣ Fetch wallets
-  const { data: wallets } = await supabase.from("wallets").select("id");
+  const { data: wallets } = await supabase.from("wallets").select("id").eq("paused", false);
   if (!wallets?.length) return;
 
   // 2️⃣ Fetch raw signals
@@ -1131,7 +1145,6 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   invalidMarketSlugs.clear();
   console.log(`✅ Wallet live picks, pending, and signals rebuilt with normalized outcomes and consistent sides`);
 }
-
 
 /* ===========================
    Fetch Wallet Activity (DATA-API, Robust)

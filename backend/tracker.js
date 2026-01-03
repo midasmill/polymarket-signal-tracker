@@ -993,6 +993,7 @@ function determineSide(outcome, market) {
 async function rebuildWalletLivePicks(forceRebuild = false) {
   const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "5", 10);
   const marketInfoMap = new Map();
+  const marketNetPickMap = new Map(); // ✅ declare this before use
 
   // --- Fetch all signals ---
   const { data: signals, error } = await supabase.from("signals").select("*");
@@ -1041,25 +1042,26 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     walletEntry[normalized] = (walletEntry[normalized] || 0) + Number(sig.pnl || 0);
   }
 
-// --- Aggregate wallet counts per outcome for side_counts ---
-for (const [wallet_id, outcomeMap] of walletMarketMap.entries()) {
-  const [wallet, market_id] = wallet_id.split("_");
-  if (!marketNetPickMap.has(market_id)) marketNetPickMap.set(market_id, {});
-  const outcomes = marketNetPickMap.get(market_id);
+  // --- Aggregate wallet counts per market & outcome (side_counts for all sides) ---
+  for (const [walletKey, outcomeMap] of walletMarketMap.entries()) {
+    const [wallet_id, market_id] = walletKey.split("_");
+    if (!marketNetPickMap.has(market_id)) marketNetPickMap.set(market_id, {});
+    const outcomes = marketNetPickMap.get(market_id);
 
-  for (const [outcome, pnl] of Object.entries(outcomeMap)) {
-    if (!outcomes[outcome]) {
-      outcomes[outcome] = { walletIds: new Set(), totalPnl: 0, sideCounts: {} };
-    }
-    outcomes[outcome].walletIds.add(Number(wallet));
-    outcomes[outcome].totalPnl += pnl;
+    for (const [outcome, pnl] of Object.entries(outcomeMap)) {
+      if (!outcomes[outcome]) {
+        outcomes[outcome] = { walletIds: new Set(), totalPnl: 0, sideCounts: {} };
+      }
+      outcomes[outcome].walletIds.add(Number(wallet_id));
+      outcomes[outcome].totalPnl += pnl;
 
-    // **New:** count all picks per side
-    for (const [pickSide] of Object.entries(outcomeMap)) {
-      outcomes[outcome].sideCounts[pickSide] = (outcomes[outcome].sideCounts[pickSide] || 0) + 1;
+      // Count all picks per side (so side_counts shows both teams)
+      for (const sideOutcome of Object.keys(outcomeMap)) {
+        outcomes[outcome].sideCounts[sideOutcome] =
+          (outcomes[outcome].sideCounts[sideOutcome] || 0) + 1;
+      }
     }
   }
-}
 
   // --- Normalize YES/NO keys for moneyline ---
   for (const [market_id, outcomes] of marketNetPickMap.entries()) {

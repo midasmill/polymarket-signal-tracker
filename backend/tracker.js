@@ -921,24 +921,66 @@ if (Array.isArray(market.events) && market.events.length) {
 }
 
 /* ===========================
+   Helpers (top-level)
+=========================== */
+function getResolvedOutcomeFromMarket(market) {
+  if (!market?.events?.length) return null;
+  const event = market.events[0];
+  if (!event.ended || !event.score) return null;
+  const [score0, score1] = event.score.split("-").map(Number);
+  if (!market.outcomes?.length || market.outcomes.length !== 2) return null;
+  return score0 > score1 ? String(market.outcomes[0]) : String(market.outcomes[1]);
+}
+
+function cleanResolvedOutcome(raw) {
+  if (!raw) return null;
+  let outcome = raw;
+
+  if (typeof raw === "string" && raw.trim().startsWith("[")) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) outcome = parsed[0];
+    } catch {}
+  }
+
+  return String(outcome).trim();
+}
+
+function normalizeOutcome(pickedOutcome, market) {
+  if (!pickedOutcome) return null;
+  const raw = Array.isArray(pickedOutcome) ? pickedOutcome[0] : pickedOutcome;
+  const trimmed = String(raw).trim();
+  const upper = trimmed.toUpperCase();
+
+  if (market?.outcomes?.length === 2 && market.sportsMarketType === "moneyline") {
+    const [team0, team1] = market.outcomes;
+    if (upper === "YES" || upper === "OVER") return team0;
+    if (upper === "NO" || upper === "UNDER") return team1;
+    if (team0.toUpperCase() === upper) return team0;
+    if (team1.toUpperCase() === upper) return team1;
+  }
+
+  return Array.isArray(market?.outcomes)
+    ? market.outcomes.find(o => o.toUpperCase() === upper) || trimmed
+    : trimmed;
+}
+
+function determineSide(outcome, market) {
+  if (!market?.outcomes?.length) return "BUY";
+  return outcome === market.outcomes[0] ? "BUY" : "SELL";
+}
+
+function determineOutcomeStatus(pickedOutcome, resolvedOutcome) {
+  if (!resolvedOutcome) return "PENDING";
+  return pickedOutcome === resolvedOutcome ? "WIN" : "LOSS";
+}
+
+/* ===========================
    Rebuild Wallet Live Picks & Pending
-   (Resolved outcome & side_counts fully fixed)
 =========================== */
 async function rebuildWalletLivePicks(forceRebuild = false) {
   const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "5", 10);
   const marketInfoMap = new Map();
-
-  // --- Determine BUY / SELL side ---
-  function determineSide(outcome, market) {
-    if (!market?.outcomes?.length) return "BUY";
-    return outcome === market.outcomes[0] ? "BUY" : "SELL";
-  }
-
-  // --- Determine outcome status ---
-  function determineOutcomeStatus(pickedOutcome, resolvedOutcome) {
-    if (!resolvedOutcome) return "PENDING";
-    return pickedOutcome === resolvedOutcome ? "WIN" : "LOSS";
-  }
 
   // --- Fetch all signals ---
   const { data: signals, error } = await supabase.from("signals").select("*");
@@ -1028,7 +1070,6 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
           if (!outcomes[normalizedKey]) outcomes[normalizedKey] = { walletIds: new Set(), totalPnl: 0, sideCounts: {} };
           outcomes[key].walletIds.forEach(w => outcomes[normalizedKey].walletIds.add(w));
           outcomes[normalizedKey].totalPnl += outcomes[key].totalPnl;
-          // Merge sideCounts
           for (const [side, count] of Object.entries(outcomes[key].sideCounts)) {
             outcomes[normalizedKey].sideCounts[side] = (outcomes[normalizedKey].sideCounts[side] || 0) + count;
           }
@@ -1094,87 +1135,14 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 }
 
 /* ===========================
-   Resolved Outcome from Market
-=========================== */
-function getResolvedOutcomeFromMarket(market) {
-  if (!market?.events?.length) return null;
-  const event = market.events[0];
-  if (!event.ended || !event.score) return null;
-
-  const [score0, score1] = event.score.split("-").map(Number);
-  if (!market.outcomes?.length || market.outcomes.length !== 2) return null;
-
-  return score0 > score1 ? String(market.outcomes[0]) : String(market.outcomes[1]);
-}
-
-/* ===========================
-   Helper: clean resolved outcome
-=========================== */
-function cleanResolvedOutcome(raw) {
-  if (!raw) return null;
-  let outcome = raw;
-
-  // parse JSON arrays like ["Team A"] or '["Team A"]'
-  if (typeof raw === "string" && raw.trim().startsWith("[")) {
-    try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) outcome = parsed[0];
-    } catch (e) {
-      // fallback: keep raw string
-    }
-  }
-
-  // ensure string and trim
-  return String(outcome).trim();
-}
-
-/* ===========================
    Batch Normalize Wallet Live Picks
-   (Constraint-safe, resolved outcome fixed)
 =========================== */
 async function normalizeExistingPicksBatch(batchSize = 100) {
-  const { data: picks, error } = await supabase
-    .from("wallet_live_picks")
-    .select("*");
-
-  if (error) {
-    console.error("❌ Failed fetching wallet_live_picks:", error.message);
-    return;
-  }
-
-  if (!picks?.length) {
-    console.log("✅ No picks to normalize");
-    return;
-  }
+  const { data: picks, error } = await supabase.from("wallet_live_picks").select("*");
+  if (error) return console.error("❌ Failed fetching wallet_live_picks:", error.message);
+  if (!picks?.length) return console.log("✅ No picks to normalize");
 
   console.log(`🔹 Normalizing ${picks.length} picks in batches of ${batchSize}...`);
-
-  // --- Outcome normalization helper ---
-  function normalizeOutcome(pickedOutcome, market) {
-    if (!pickedOutcome) return null;
-
-    const raw = Array.isArray(pickedOutcome) ? pickedOutcome[0] : pickedOutcome;
-    const trimmed = String(raw).trim();
-    const upper = trimmed.toUpperCase();
-
-    if (market?.outcomes?.length === 2 && market.sportsMarketType === "moneyline") {
-      const [team0, team1] = market.outcomes;
-      if (upper === "YES" || upper === "OVER") return team0;
-      if (upper === "NO" || upper === "UNDER") return team1;
-      if (team0.toUpperCase() === upper) return team0;
-      if (team1.toUpperCase() === upper) return team1;
-    }
-
-    return Array.isArray(market?.outcomes)
-      ? market.outcomes.find(o => o.toUpperCase() === upper) || trimmed
-      : trimmed;
-  }
-
-  // --- Determine outcome status ---
-  function determineOutcomeStatus(pickedOutcome, resolvedOutcome) {
-    if (!resolvedOutcome) return "PENDING";
-    return pickedOutcome === resolvedOutcome ? "WIN" : "LOSS";
-  }
 
   for (let i = 0; i < picks.length; i += batchSize) {
     const chunk = picks.slice(i, i + batchSize);
@@ -1184,14 +1152,11 @@ async function normalizeExistingPicksBatch(batchSize = 100) {
         market_id: pick.market_id,
         event_slug: pick.event_slug
       });
-
       if (!market) continue;
 
-      // --- Normalize picked outcome ---
       const normalized = normalizeOutcome(pick.picked_outcome, market);
-      if (!normalized) continue; // skip unknown
+      if (!normalized) continue;
 
-      // --- Resolve canonical outcome ---
       const resolvedCanonical =
         cleanResolvedOutcome(pick.resolved_outcome) ||
         cleanResolvedOutcome(market.resolved_outcome) ||
@@ -1199,13 +1164,11 @@ async function normalizeExistingPicksBatch(batchSize = 100) {
         null;
 
       const status = determineOutcomeStatus(normalized, resolvedCanonical);
-
       const side =
         market?.outcomes?.length === 2
           ? normalized === market.outcomes[0] ? "BUY" : "SELL"
           : null;
 
-      // --- UPDATE pick safely ---
       try {
         const { error: updateError } = await supabase
           .from("wallet_live_picks")
@@ -1219,9 +1182,7 @@ async function normalizeExistingPicksBatch(batchSize = 100) {
           })
           .eq("id", pick.id);
 
-        if (updateError) {
-          console.error(`❌ Failed updating pick ${pick.id}:`, updateError);
-        }
+        if (updateError) console.error(`❌ Failed updating pick ${pick.id}:`, updateError);
       } catch (e) {
         console.error(`⚠️ Exception updating pick ${pick.id}:`, e.message);
       }
@@ -1233,7 +1194,7 @@ async function normalizeExistingPicksBatch(batchSize = 100) {
   console.log("✅ All wallet_live_picks normalized successfully.");
 }
 
-// Run the batch normalization once
+// Run batch normalization once
 normalizeExistingPicksBatch().catch(console.error);
 
 /* ===========================

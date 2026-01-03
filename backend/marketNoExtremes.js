@@ -1,33 +1,34 @@
 /* ===========================
    Market NO Extremes Scanner
-   DEBUG-READY VERSION
+   PRODUCTION-READY
 =========================== */
 
 import fetch from "node-fetch";
 
 /**
- * Run the Market NO Extremes scanner with full logging
+ * Run the Market NO Extremes scanner
  * @param {import("@supabase/supabase-js").SupabaseClient} supabase
+ * @param {function} sendToNotes - function to send formatted notes
  */
-export async function runMarketNoExtremes(supabase) {
-  console.log("🟢 Market NO Extremes scanner loaded");
+export async function runMarketNoExtremes(supabase, sendToNotes) {
+  console.log("🟢 Market NO Extremes scanner started");
 
   try {
-    console.log("🔥 Scanner starting...");
-
     // ------------------------------
     // SETTINGS
     // ------------------------------
-    const NO_MAX = 0.999;       // DEBUG: allow high NO to see results
-    const HOURS_MAX = 48;       // DEBUG: allow markets ending in next 48h
-    const HOURS_MIN = 0.1;      // exclude already ended
-    const MIN_VOLUME = 100000;  // only overhyped markets
+    const NO_MAX = 0.10;      // NO ≤ 10%
+    const HOURS_MAX = 6;      // ending within next 6 hours
+    const HOURS_MIN = 0;      // exclude already ended
+    const MIN_VOLUME = 100000;   // overhyped threshold
     const MIN_LIQUIDITY = 50000;
+
+    const now = Date.now();
 
     // ------------------------------
     // FETCH markets from Polymarket Gamma API
     // ------------------------------
-    const url = `https://gamma-api.polymarket.com/markets?closed=false&volume_num_min=${MIN_VOLUME}&liquidity_num_min=${MIN_LIQUIDITY}&limit=100`;
+    const url = `https://gamma-api.polymarket.com/markets?closed=false&volume_num_min=${MIN_VOLUME}&liquidity_num_min=${MIN_LIQUIDITY}&limit=200`;
     console.log("🌐 Fetching markets from:", url);
 
     const res = await fetch(url);
@@ -37,73 +38,44 @@ export async function runMarketNoExtremes(supabase) {
     }
 
     const markets = await res.json();
-
     if (!markets || !markets.length) {
       console.log("⚠️ No markets returned from API");
       return;
     }
 
-    console.log(`🔹 Fetched ${markets.length} markets from API`);
+    console.log(`🔹 Fetched ${markets.length} markets`);
 
     // ------------------------------
     // FILTER markets
     // ------------------------------
-    const now = Date.now();
     const filtered = markets.filter(m => {
-      if (!m.active) {
-        console.log(m.slug, "skipped: inactive");
-        return false;
-      }
+      if (!m.active) return false;
 
-      // Parse outcomePrices
-      let prices = [];
+      let prices;
       try {
         prices = JSON.parse(m.outcomePrices || "[]");
       } catch {
-        console.log(m.slug, "skipped: failed to parse outcomePrices");
         return false;
       }
 
-      if (!prices[1]) {
-        console.log(m.slug, "skipped: missing NO price");
-        return false;
-      }
-
-      const yesPrice = Number(prices[0]);
+      if (!prices[1]) return false; // ensure NO exists
       const noPrice = Number(prices[1]);
       const hoursLeft = (new Date(m.endDate).getTime() - now) / 36e5;
 
-      if (Number.isNaN(noPrice)) {
-        console.log(m.slug, "skipped: NO price is NaN");
-        return false;
-      }
-      if (noPrice > NO_MAX) {
-        console.log(m.slug, `skipped: NO too high (${noPrice})`);
-        return false;
-      }
-      if (hoursLeft > HOURS_MAX || hoursLeft <= HOURS_MIN) {
-        console.log(m.slug, `skipped: hoursLeft filter (${hoursLeft.toFixed(1)}h)`);
-        return false;
-      }
-
-      console.log("✅ Market passed filter:", m.slug, "| NO:", noPrice, "| hoursLeft:", hoursLeft.toFixed(1));
-      return true;
+      return noPrice <= NO_MAX && hoursLeft <= HOURS_MAX && hoursLeft > HOURS_MIN;
     });
 
     console.log(`🔹 ${filtered.length} markets passed filters`);
 
-    if (!filtered.length) {
-      console.log("⚠️ No markets to insert into Supabase");
-      return;
-    }
+    if (!filtered.length) return;
 
     // ------------------------------
     // INSERT into Supabase
     // ------------------------------
-    for (const m of filtered) {
+    const insertPromises = filtered.map(async (m, index) => {
       const prices = JSON.parse(m.outcomePrices);
-      const yesPrice = Number(prices[0]);
       const noPrice = Number(prices[1]);
+      const yesPrice = Number(prices[0]);
       const hoursLeft = (new Date(m.endDate).getTime() - now) / 36e5;
 
       const insertData = {
@@ -122,10 +94,27 @@ export async function runMarketNoExtremes(supabase) {
         .insert([insertData]);
 
       if (error) console.error("❌ Insert error for", m.slug, error);
-      else console.log("🟢 Inserted into Supabase:", m.slug);
+      else console.log(`🟢 Inserted: ${m.slug}`);
+
+      return { index: index + 1, market: m, noPrice, hoursLeft };
+    });
+
+    const results = await Promise.all(insertPromises);
+
+    // ------------------------------
+    // SEND formatted summary to Notes
+    // ------------------------------
+    if (sendToNotes) {
+      const summary = results.map(r => {
+        const link = `https://polymarket.com/market/${r.market.slug}`;
+        return `${r.index}. [${r.market.question}](${link})\n• NO: ${(r.noPrice * 100).toFixed(1)}%\n• Ends in: ${r.hoursLeft.toFixed(1)}h`;
+      }).join("\n\n");
+
+      console.log("📝 Sending summary to Notes...");
+      await sendToNotes(summary, "polymarket-millionaires");
     }
 
-    console.log("🔥 Scanner finished");
+    console.log("🔥 Market NO Extremes scanner finished");
   } catch (err) {
     console.error("🔥 Scanner error:", err);
   }

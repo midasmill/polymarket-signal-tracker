@@ -1,6 +1,6 @@
 /* ===========================
    Market NO Extremes Scanner
-   PRODUCTION-READY
+   DEBUG + PRODUCTION (NO ≤ 10%)
 =========================== */
 
 import fetch from "node-fetch";
@@ -17,10 +17,8 @@ export async function runMarketNoExtremes(supabase, sendToNotes) {
     // ------------------------------
     // SETTINGS
     // ------------------------------
-    const NO_MAX = 0.10;      // NO ≤ 10%
-    const HOURS_MAX = 6;      // ending within next 6 hours
-    const HOURS_MIN = 0;      // exclude already ended
-    const MIN_VOLUME = 100000;   // overhyped threshold
+    const NO_MAX = 0.10;       // NO ≤ 10%
+    const MIN_VOLUME = 100000; // overhyped threshold
     const MIN_LIQUIDITY = 50000;
 
     const now = Date.now();
@@ -46,26 +44,30 @@ export async function runMarketNoExtremes(supabase, sendToNotes) {
     console.log(`🔹 Fetched ${markets.length} markets`);
 
     // ------------------------------
-    // FILTER markets
+    // DEBUG: log every market's NO price
+    // ------------------------------
+    markets.forEach(m => {
+      let prices = [];
+      try { prices = JSON.parse(m.outcomePrices || "[]"); } catch {}
+      const noPrice = prices[1] ? Number(prices[1]) : null;
+      console.log(`${m.slug} → NO: ${noPrice}`);
+    });
+
+    // ------------------------------
+    // FILTER markets (NO ≤ 10%)
     // ------------------------------
     const filtered = markets.filter(m => {
       if (!m.active) return false;
 
-      let prices;
-      try {
-        prices = JSON.parse(m.outcomePrices || "[]");
-      } catch {
-        return false;
-      }
-
+      let prices = [];
+      try { prices = JSON.parse(m.outcomePrices || "[]"); } catch {}
       if (!prices[1]) return false; // ensure NO exists
       const noPrice = Number(prices[1]);
-      const hoursLeft = (new Date(m.endDate).getTime() - now) / 36e5;
 
-      return noPrice <= NO_MAX && hoursLeft <= HOURS_MAX && hoursLeft > HOURS_MIN;
+      return noPrice <= NO_MAX;
     });
 
-    console.log(`🔹 ${filtered.length} markets passed filters`);
+    console.log(`🔹 ${filtered.length} markets passed NO ≤ 10% filter`);
 
     if (!filtered.length) return;
 
@@ -76,7 +78,6 @@ export async function runMarketNoExtremes(supabase, sendToNotes) {
       const prices = JSON.parse(m.outcomePrices);
       const noPrice = Number(prices[1]);
       const yesPrice = Number(prices[0]);
-      const hoursLeft = (new Date(m.endDate).getTime() - now) / 36e5;
 
       const insertData = {
         polymarket_id: m.id,
@@ -86,7 +87,6 @@ export async function runMarketNoExtremes(supabase, sendToNotes) {
         no_price: noPrice,
         yes_price: yesPrice,
         end_at: m.endDate,
-        hours_to_resolution: hoursLeft,
       };
 
       const { error } = await supabase
@@ -96,7 +96,7 @@ export async function runMarketNoExtremes(supabase, sendToNotes) {
       if (error) console.error("❌ Insert error for", m.slug, error);
       else console.log(`🟢 Inserted: ${m.slug}`);
 
-      return { index: index + 1, market: m, noPrice, hoursLeft };
+      return { index: index + 1, market: m, noPrice };
     });
 
     const results = await Promise.all(insertPromises);
@@ -107,7 +107,7 @@ export async function runMarketNoExtremes(supabase, sendToNotes) {
     if (sendToNotes) {
       const summary = results.map(r => {
         const link = `https://polymarket.com/market/${r.market.slug}`;
-        return `${r.index}. [${r.market.question}](${link})\n• NO: ${(r.noPrice * 100).toFixed(1)}%\n• Ends in: ${r.hoursLeft.toFixed(1)}h`;
+        return `${r.index}. [${r.market.question}](${link})\n• NO: ${(r.noPrice * 100).toFixed(1)}%`;
       }).join("\n\n");
 
       console.log("📝 Sending summary to Notes...");

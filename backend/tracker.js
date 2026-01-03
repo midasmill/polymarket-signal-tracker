@@ -5,7 +5,7 @@ import http from "http";
 import { runMarketNoExtremes } from "./marketNoExtremes.js";
 
 // ADD-ON FEATURE (non-blocking)
-runMarketNoExtremes();
+runMarketNoExtremes(supabase);
 
 
 /* ===========================

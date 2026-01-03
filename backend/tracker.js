@@ -922,7 +922,7 @@ if (Array.isArray(market.events) && market.events.length) {
 
 /* ===========================
    Rebuild Wallet Live Picks & Pending
-   (Resolved outcome handling fully fixed)
+   (Resolved outcome & side_counts fully fixed)
 =========================== */
 async function rebuildWalletLivePicks(forceRebuild = false) {
   const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "5", 10);
@@ -933,29 +933,21 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     if (!market?.events?.length) return null;
     const event = market.events[0];
     if (!event.ended || !event.score) return null;
-
     const [score0, score1] = event.score.split("-").map(Number);
     if (!market.outcomes?.length || market.outcomes.length !== 2) return null;
-
     return score0 > score1 ? String(market.outcomes[0]) : String(market.outcomes[1]);
   }
 
   // --- Helper: ensure resolved outcome is string ---
   function cleanResolvedOutcome(raw) {
     if (!raw) return null;
-
     let outcome = raw;
-
-    // parse JSON arrays like ["Team A"]
     if (typeof raw === "string" && raw.trim().startsWith("[")) {
       try {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed)) outcome = parsed[0];
-      } catch (e) {
-        // fallback: keep raw
-      }
+      } catch (e) {}
     }
-
     return String(outcome).trim();
   }
 
@@ -1052,33 +1044,37 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     walletDominantMap.set(key, dominantOutcome);
   }
 
-  // --- Aggregate wallet counts per market & outcome ---
+  // --- Aggregate wallet counts per market & outcome (all sides counted) ---
   const marketNetPickMap = new Map();
-  for (const [key, dominantOutcome] of walletDominantMap.entries()) {
+  for (const [key, outcomeMap] of walletMarketMap.entries()) {
     const [wallet_id, market_id] = key.split("_");
     if (!marketNetPickMap.has(market_id)) marketNetPickMap.set(market_id, {});
     const outcomes = marketNetPickMap.get(market_id);
 
-    if (!outcomes[dominantOutcome]) {
-      outcomes[dominantOutcome] = { walletIds: new Set(), totalPnl: 0, sideCounts: {} };
+    for (const [outcome, pnl] of Object.entries(outcomeMap)) {
+      if (!outcomes[outcome]) {
+        outcomes[outcome] = { walletIds: new Set(), totalPnl: 0, sideCounts: {} };
+      }
+      outcomes[outcome].walletIds.add(Number(wallet_id));
+      outcomes[outcome].totalPnl += pnl;
+      outcomes[outcome].sideCounts[outcome] = (outcomes[outcome].sideCounts[outcome] || 0) + 1;
     }
-
-    outcomes[dominantOutcome].walletIds.add(Number(wallet_id));
-    outcomes[dominantOutcome].totalPnl += walletMarketMap.get(key)[dominantOutcome];
-    outcomes[dominantOutcome].sideCounts[dominantOutcome] =
-      (outcomes[dominantOutcome].sideCounts[dominantOutcome] || 0) + 1;
   }
 
-  // --- Normalize YES/NO keys for moneyline ---
+  // --- Normalize YES/NO keys for moneyline & merge sideCounts ---
   for (const [market_id, outcomes] of marketNetPickMap.entries()) {
     const info = marketInfoMap.get(market_id);
     if (info?.outcomes?.length === 2) {
       for (const key of Object.keys(outcomes)) {
         const normalizedKey = normalizeOutcome(key, { outcomes: info.outcomes, sportsMarketType: "moneyline" });
         if (normalizedKey !== key) {
-          if (!outcomes[normalizedKey]) outcomes[normalizedKey] = { walletIds: new Set(), totalPnl: 0 };
+          if (!outcomes[normalizedKey]) outcomes[normalizedKey] = { walletIds: new Set(), totalPnl: 0, sideCounts: {} };
           outcomes[key].walletIds.forEach(w => outcomes[normalizedKey].walletIds.add(w));
           outcomes[normalizedKey].totalPnl += outcomes[key].totalPnl;
+          // Merge sideCounts
+          for (const [side, count] of Object.entries(outcomes[key].sideCounts)) {
+            outcomes[normalizedKey].sideCounts[side] = (outcomes[normalizedKey].sideCounts[side] || 0) + count;
+          }
           delete outcomes[key];
         }
       }
@@ -1130,7 +1126,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     }
   }
 
-  // --- Upsert live picks ---
+  // --- Upsert live picks safely ---
   await safeInsert(
     "wallet_live_picks",
     finalLive,
@@ -1173,6 +1169,41 @@ function cleanResolvedOutcome(raw) {
 }
 
 /* ===========================
+   Resolved Outcome from Market
+=========================== */
+function getResolvedOutcomeFromMarket(market) {
+  if (!market?.events?.length) return null;
+  const event = market.events[0];
+  if (!event.ended || !event.score) return null;
+
+  const [score0, score1] = event.score.split("-").map(Number);
+  if (!market.outcomes?.length || market.outcomes.length !== 2) return null;
+
+  return score0 > score1 ? String(market.outcomes[0]) : String(market.outcomes[1]);
+}
+
+/* ===========================
+   Helper: clean resolved outcome
+=========================== */
+function cleanResolvedOutcome(raw) {
+  if (!raw) return null;
+  let outcome = raw;
+
+  // parse JSON arrays like ["Team A"] or '["Team A"]'
+  if (typeof raw === "string" && raw.trim().startsWith("[")) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) outcome = parsed[0];
+    } catch (e) {
+      // fallback: keep raw string
+    }
+  }
+
+  // ensure string and trim
+  return String(outcome).trim();
+}
+
+/* ===========================
    Batch Normalize Wallet Live Picks
    (Constraint-safe, resolved outcome fixed)
 =========================== */
@@ -1195,8 +1226,10 @@ async function normalizeExistingPicksBatch(batchSize = 100) {
 
   // --- Outcome normalization helper ---
   function normalizeOutcome(pickedOutcome, market) {
-    if (!pickedOutcome) return null; // keep unresolved as null
-    const trimmed = String(pickedOutcome).trim();
+    if (!pickedOutcome) return null;
+
+    const raw = Array.isArray(pickedOutcome) ? pickedOutcome[0] : pickedOutcome;
+    const trimmed = String(raw).trim();
     const upper = trimmed.toUpperCase();
 
     if (market?.outcomes?.length === 2 && market.sportsMarketType === "moneyline") {
@@ -1233,10 +1266,12 @@ async function normalizeExistingPicksBatch(batchSize = 100) {
       const normalized = normalizeOutcome(pick.picked_outcome, market);
       if (!normalized) continue; // skip unknown
 
-      // --- Resolve outcome ---
-      const resolvedCanonical = pick.resolved_outcome
-        ? cleanResolvedOutcome(pick.resolved_outcome)
-        : cleanResolvedOutcome(market.outcome) || null; // keep null if unresolved
+      // --- Resolve canonical outcome ---
+      const resolvedCanonical =
+        cleanResolvedOutcome(pick.resolved_outcome) ||
+        cleanResolvedOutcome(market.resolved_outcome) ||
+        cleanResolvedOutcome(getResolvedOutcomeFromMarket(market)) ||
+        null;
 
       const status = determineOutcomeStatus(normalized, resolvedCanonical);
 
@@ -1245,21 +1280,25 @@ async function normalizeExistingPicksBatch(batchSize = 100) {
           ? normalized === market.outcomes[0] ? "BUY" : "SELL"
           : null;
 
-      // --- UPDATE pick (constraint-safe) ---
-      const { error: updateError } = await supabase
-        .from("wallet_live_picks")
-        .update({
-          picked_outcome: normalized,
-          outcome: status,
-          side,
-          resolved_outcome: resolvedCanonical,
-          market_type: market?.sportsMarketType || "UNKNOWN",
-          score: market?.score || null
-        })
-        .eq("id", pick.id);
+      // --- UPDATE pick safely ---
+      try {
+        const { error: updateError } = await supabase
+          .from("wallet_live_picks")
+          .update({
+            picked_outcome: normalized,
+            outcome: status,
+            side,
+            resolved_outcome: resolvedCanonical,
+            market_type: market?.sportsMarketType || "UNKNOWN",
+            score: market?.score || null
+          })
+          .eq("id", pick.id);
 
-      if (updateError) {
-        console.error(`❌ Failed updating pick ${pick.id}:`, updateError);
+        if (updateError) {
+          console.error(`❌ Failed updating pick ${pick.id}:`, updateError);
+        }
+      } catch (e) {
+        console.error(`⚠️ Exception updating pick ${pick.id}:`, e.message);
       }
     }
 

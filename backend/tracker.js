@@ -1116,24 +1116,56 @@ await safeInsert(
   { upsertColumns: ["market_id", "picked_outcome"] }
 );
 
-// --- Rebuild pending picks (DELETE → INSERT, no upsert) ---
+// --- Rebuild pending picks safely ---
 await supabase
   .from("wallet_live_pending")
   .delete()
-  .neq("id", 0);
+  .neq("id", 0); // clear old pending picks
 
-if (finalPending.length) {
-  const { error } = await supabase
-    .from("wallet_live_pending")
-    .insert(finalPending);
+// Deduplicate pending picks by unique constraint: wallet_id + market_id + picked_outcome
+const uniquePending = [];
+const pendingKeys = new Set();
 
-  if (error) {
-    console.error("❌ Failed inserting wallet_live_pending:", error);
-  }
+for (const sig of signals.filter(s => s.wallet_id && s.market_id && !s.resolved_outcome)) {
+  const info = marketInfoMap.get(sig.market_id);
+  const normalized = normalizeOutcome(sig.picked_outcome, info);
+  const key = `${sig.wallet_id}_${sig.market_id}_${normalized}`; // matches unique constraint
+  if (pendingKeys.has(key)) continue; // skip duplicates
+  pendingKeys.add(key);
+
+  uniquePending.push({
+    market_id: sig.market_id,
+    wallet_id: sig.wallet_id,
+    market_name: info?.market_name || "UNKNOWN",
+    event_slug: info?.event_slug || "UNKNOWN",
+    polymarket_id: sig.polymarket_id,
+    market_url: info?.market_url,
+    gameStartTime: info?.gameStartTime,
+    picked_outcome: normalized,
+    side: determineSide(normalized, info),
+    wallets: [sig.wallet_id],
+    vote_count: 1,
+    vote_counts: { [sig.wallet_id]: 1 },
+    pnl: Number(sig.pnl || 0),
+    outcome: "PENDING",
+    resolved_outcome: null,
+    fetched_at: new Date(),
+    confidence: getConfidenceNumber(1),
+    market_type: info?.sportsMarketType || "UNKNOWN"
+  });
+}
+
+// Insert deduplicated pending picks using safeInsert (avoids Postgres conflicts)
+if (uniquePending.length) {
+  await safeInsert(
+    "wallet_live_pending",
+    uniquePending,
+    { upsertColumns: ["wallet_id", "market_id", "picked_outcome"] } // <- must match your table's unique constraint
+  );
 }
 
 console.log(
-  `✅ Rebuilt wallet picks: ${finalLive.length} live, ${finalPending.length} pending`
+  `✅ Rebuilt wallet picks: ${finalLive.length} live, ${uniquePending.length} pending`
 );
 } 
 

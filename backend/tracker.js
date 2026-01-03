@@ -1059,6 +1059,7 @@ for (const [wallet_id, outcomeMap] of walletMarketMap.entries()) {
       outcomes[outcome].sideCounts[pickSide] = (outcomes[outcome].sideCounts[pickSide] || 0) + 1;
     }
   }
+}
 
   // --- Normalize YES/NO keys for moneyline ---
   for (const [market_id, outcomes] of marketNetPickMap.entries()) {

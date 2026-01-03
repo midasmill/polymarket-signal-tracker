@@ -1386,6 +1386,96 @@ Outcome: ${pick.outcome} ${outcomeEmoji}
 }
 
 /* ===========================
+   Wallet Metrics Update (Optimized)
+   Rolling 3-day win rate
+   Auto-pause / Auto-unpause
+   Single query for all wallets
+=========================== */
+async function updateWalletMetricsRolling3DOptimized() {
+  const ROLLING_DAYS = 3;
+  const WIN_RATE_THRESHOLD = 50;
+  const MIN_TOTAL_PICKS = 3;
+
+  // --- Compute rolling window dates ---
+  const now = new Date();
+  const startDate = new Date(now);
+  startDate.setDate(now.getDate() - (ROLLING_DAYS - 1));
+  startDate.setHours(0, 0, 0, 0);
+  const endDate = new Date(now);
+  endDate.setHours(23, 59, 59, 999);
+
+  // --- Fetch all wallets ---
+  const { data: wallets } = await supabase.from("wallets").select("*");
+  if (!wallets?.length) return;
+
+  const walletIds = wallets.map(w => w.id);
+
+  // --- Fetch all resolved signals for all wallets in 3-day window ---
+  const { data: signals } = await supabase
+    .from("signals")
+    .select("wallet_id, event_slug, picked_outcome, outcome")
+    .in("wallet_id", walletIds)
+    .gte("outcome_at", startDate.toISOString())
+    .lte("outcome_at", endDate.toISOString())
+    .in("outcome", ["WIN", "LOSS"]);
+
+  if (!signals?.length) return; // no resolved signals in 3-day window
+
+  // --- Group signals by wallet → event ---
+  const walletEventsMap = new Map(); // wallet_id → Map(event_slug → [signals])
+  for (const sig of signals) {
+    if (!walletEventsMap.has(sig.wallet_id)) walletEventsMap.set(sig.wallet_id, new Map());
+    const eventsMap = walletEventsMap.get(sig.wallet_id);
+    if (!eventsMap.has(sig.event_slug)) eventsMap.set(sig.event_slug, []);
+    eventsMap.get(sig.event_slug).push(sig);
+  }
+
+  // --- Process each wallet ---
+  for (const wallet of wallets) {
+    const eventsMap = walletEventsMap.get(wallet.id);
+    if (!eventsMap) continue; // no signals for this wallet
+
+    let totalPicks = 0;
+    let totalWins = 0;
+
+    for (const [eventSlug, signalsForEvent] of eventsMap.entries()) {
+      const netPick = await getWalletNetPick(wallet.id, eventSlug);
+      if (!netPick) continue; // skip hedged/unresolved
+
+      const sig = signalsForEvent.find(s => s.picked_outcome === netPick);
+      if (!sig) continue;
+
+      totalPicks++;
+      if (sig.outcome === "WIN") totalWins++;
+    }
+
+    if (totalPicks < MIN_TOTAL_PICKS) continue; // skip low-activity wallets
+
+    const winRate3d = Math.round((totalWins / totalPicks) * 100);
+
+    // --- Determine pause/unpause ---
+    let paused;
+    if (winRate3d < WIN_RATE_THRESHOLD) {
+      paused = true;
+    } else if (wallet.paused && winRate3d >= WIN_RATE_THRESHOLD) {
+      paused = false; // auto-unpause
+    } else {
+      paused = wallet.paused; // no change
+    }
+
+    // --- Update wallet ---
+    await supabase
+      .from("wallets")
+      .update({
+        win_rate: winRate3d,
+        paused,
+        last_checked: new Date()
+      })
+      .eq("id", wallet.id);
+  }
+}
+
+/* ===========================
    Returns the wallet's NET picked_outcome for an event
    based on total $ amount per side.
    Hedged events (<5% difference) return null safely.
@@ -1409,78 +1499,6 @@ async function getWalletNetPick(walletId, eventSlug) {
   }
 
   return topOutcome;
-}
-
-/* ===========================
-   Wallet Metrics Update
-   Auto-pauses wallet if daily loss % exceeds threshold
-=========================== */
-async function updateWalletMetricsJS() {
-  const DAILY_LOSS_PERCENT_LIMIT = 0.5; // 50% losses triggers pause
-
-  const { data: wallets } = await supabase.from("wallets").select("*");
-  if (!wallets?.length) return;
-
-  const now = new Date();
-  const startOfDay = new Date(now);
-  startOfDay.setHours(0, 0, 0, 0);
-  const endOfDay = new Date(now);
-  endOfDay.setHours(23, 59, 59, 999);
-
-  for (const wallet of wallets) {
-    // --- Fetch today's resolved signals for this wallet ---
-    const { data: resolvedSignals } = await supabase
-      .from("signals")
-      .select("event_slug, picked_outcome, outcome")
-      .eq("wallet_id", wallet.id)
-      .gte("outcome_at", startOfDay.toISOString())
-      .lte("outcome_at", endOfDay.toISOString())
-      .in("outcome", ["WIN", "LOSS"]);
-
-    if (!resolvedSignals?.length) continue;
-
-    // --- Group by event and compute net pick outcome ---
-    const eventsMap = new Map();
-    for (const sig of resolvedSignals) {
-      if (!sig.event_slug) continue;
-      if (!eventsMap.has(sig.event_slug)) eventsMap.set(sig.event_slug, []);
-      eventsMap.get(sig.event_slug).push(sig);
-    }
-
-    let losses = 0;
-    let total = 0;
-
-    for (const [eventSlug, signalsForEvent] of eventsMap.entries()) {
-      // Get wallet net pick for this event
-      const netPick = await getWalletNetPick(wallet.id, eventSlug);
-
-      // Skip hedged events or unresolved net pick
-      if (!netPick) continue;
-
-      const sig = signalsForEvent.find(s => s.picked_outcome === netPick);
-      if (!sig) continue;
-
-      total++;
-      if (sig.outcome === "LOSS") losses++;
-    }
-
-    if (total === 0) continue;
-
-    const lossPercent = losses / total;
-    const winRate = Math.round(((total - losses) / total) * 100);
-
-    // --- Auto-pause wallet if loss % exceeds threshold ---
-    const shouldPause = lossPercent >= DAILY_LOSS_PERCENT_LIMIT;
-
-    await supabase
-      .from("wallets")
-      .update({
-        win_rate: winRate,
-        paused: shouldPause ? true : wallet.paused,
-        last_checked: new Date()
-      })
-      .eq("id", wallet.id);
-  }
 }
 
 /* ===========================

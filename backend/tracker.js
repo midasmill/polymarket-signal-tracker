@@ -33,10 +33,11 @@ const CONFIDENCE_THRESHOLDS = {
 };
 
 function getConfidenceEmoji(confidence) {
-  for (const { threshold, emoji } of CONFIDENCE_STARS) {
-    if (confidence >= threshold) return emoji;
-  }
-  return "⭐";
+  if (confidence < CONFIDENCE_THRESHOLDS["⭐⭐"]) return "⭐";
+  if (confidence < CONFIDENCE_THRESHOLDS["⭐⭐⭐"]) return "⭐⭐";
+  if (confidence < CONFIDENCE_THRESHOLDS["⭐⭐⭐⭐"]) return "⭐⭐⭐";
+  if (confidence < CONFIDENCE_THRESHOLDS["⭐⭐⭐⭐⭐"]) return "⭐⭐⭐⭐";
+  return "⭐⭐⭐⭐⭐";
 }
 
 function resolveNumericConfidence(pick) {

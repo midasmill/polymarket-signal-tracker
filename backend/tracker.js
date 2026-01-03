@@ -1059,9 +1059,9 @@ outcomes[dominantOutcome].sideCounts[side] = (outcomes[dominantOutcome].sideCoun
       if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL) continue;
 
       const key = `${market_id}_${outcome}`;
-      const resolvedOutcome = info?.resolved_outcome || (existingMap.get(key)?.resolved_outcome || null);
-      const canonicalOutcome = normalizeOutcome(outcome, info); // <- ensure canonical
-      const status = determineOutcomeStatus(canonicalOutcome, resolvedOutcome);
+const canonicalOutcome = normalizeOutcome(outcome, info); // canonical pick
+const resolvedCanonical = normalizeOutcome(info?.resolved_outcome || (existingMap.get(key)?.resolved_outcome || null), info); // canonical resolved
+const status = determineOutcomeStatus(canonicalOutcome, resolvedCanonical);
 
       finalLive.push({
         market_id,
@@ -1072,14 +1072,14 @@ outcomes[dominantOutcome].sideCounts[side] = (outcomes[dominantOutcome].sideCoun
         market_url: info?.market_url,
         gameStartTime: info?.gameStartTime,
         picked_outcome: canonicalOutcome, // <- store canonical
+resolved_outcome: resolvedCanonical,
+outcome: status,
         side: determineSide(canonicalOutcome, info),
         wallets: Array.from(data.walletIds),
         vote_count: data.walletIds.size,
         vote_counts: Object.fromEntries(Array.from(data.walletIds).map(id => [id, 1])),
            side_counts: data.sideCounts || {}, // <-- add this
         pnl: Number(data.totalPnl),
-        outcome: status,
-        resolved_outcome: resolvedOutcome,
            score: info?.score || null, // <- add this
         fetched_at: new Date(),
         confidence: getConfidenceNumber(data.walletIds.size),

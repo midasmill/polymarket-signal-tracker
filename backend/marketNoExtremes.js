@@ -9,73 +9,89 @@ import fetch from "node-fetch";
 const GAMMA_API = "https://gamma-api.polymarket.com/markets";
 const NOTES_SLUG = "polymarket-millionaires";
 
-const NO_MAX = 0.10;
-const HOURS_MAX = 6;
-const HOURS_MIN = 0.10;
-const FETCH_LIMIT = 500;
+const NO_MAX = 0.10;       // NO <= 10%
+const HOURS_MAX = 6;       // Ends in less than 6 hours
+const HOURS_MIN = 0.1;     // Filter out already ending markets
+const FETCH_LIMIT = 500;   // Max markets per fetch
 
-const MIN_VOLUME = 100_000;
-const MIN_LIQUIDITY = 50_000;
+const MIN_VOLUME = 100_000;   // Overhyped filter
+const MIN_LIQUIDITY = 50_000; // Overhyped filter
 
-/* ---------------- Fetch active markets ---------------- */
-async function fetchActiveMarkets() {
-  const res = await fetch(`${GAMMA_API}?active=true&limit=${FETCH_LIMIT}`);
+// ---------------- Fetch markets ----------------
+export async function fetchActiveMarkets() {
+  const url = `${GAMMA_API}?closed=false&volume_num_min=${MIN_VOLUME}&liquidity_num_min=${MIN_LIQUIDITY}&limit=${FETCH_LIMIT}`;
+  const res = await fetch(url);
   if (!res.ok) throw new Error(`Gamma API failed: ${res.status}`);
   return res.json();
 }
 
-/* ---------------- Filter NO @ 0–10% + <6h + overhyped ---------------- */
-function filterNoExtremes(markets) {
+// ---------------- Filter NO extremes ----------------
+export function filterNoExtremes(markets) {
   const now = Date.now();
+
   return markets.filter(m => {
-    if (!m.active || !m.endDate) return false;
-    const hours = (new Date(m.endDate).getTime() - now) / 36e5;
-    if (hours <= HOURS_MIN || hours > HOURS_MAX) return false;
-    const no = Number(m.outcomes?.[1]?.price);
-    if (Number.isNaN(no) || no > NO_MAX) return false;
-    if ((m.volume || 0) < MIN_VOLUME) return false;
-    if ((m.liquidity || 0) < MIN_LIQUIDITY) return false;
+    if (!m.active || !m.endDate || !m.outcomePrices) return false;
+
+    // NO is second outcome
+    const noPrice = Number(m.outcomePrices[1]);
+    if (Number.isNaN(noPrice) || noPrice > NO_MAX) return false;
+
+    // Ends in <6 hours
+    const hoursLeft = (new Date(m.endDate).getTime() - now) / 36e5;
+    if (hoursLeft > HOURS_MAX || hoursLeft <= HOURS_MIN) return false;
+
+    // Extra overhyped checks
+    if ((m.volumeNum || 0) < MIN_VOLUME) return false;
+    if ((m.liquidityNum || 0) < MIN_LIQUIDITY) return false;
+
     return true;
   });
 }
 
-/* ---------------- Insert snapshot rows ---------------- */
-async function insertNoExtremes(markets, supabase) {
+// ---------------- Insert snapshot rows ----------------
+export async function insertNoExtremes(markets, supabase) {
   if (!markets.length) return;
+
   const rows = markets.map(m => ({
     polymarket_id: m.id,
-    market_id: m.marketId,
+    market_id: m.marketId || m.id,
     condition_id: m.conditionId,
     event_slug: m.slug,
     question: m.question,
-    market_name: m.title,
-    market_type: m.marketType,
-    category: m.category,
+    market_name: m.title || m.question,
+    market_type: m.marketType || null,
+    category: m.category || null,
     event_start_at: m.startDate,
     market_end_at: m.endDate,
     hours_to_resolution: (new Date(m.endDate) - Date.now()) / 36e5,
-    yes_price: m.outcomes?.[0]?.price,
-    no_price: m.outcomes?.[1]?.price,
-    volume: m.volume,
-    liquidity: m.liquidity,
-    open_interest: m.openInterest,
+    yes_price: m.outcomePrices[0],
+    no_price: m.outcomePrices[1],
+    volume: m.volumeNum,
+    liquidity: m.liquidityNum,
+    open_interest: m.openInterest || 0,
     is_active: true
   }));
+
   await supabase.from("market_no_extremes").insert(rows);
 }
 
-/* ---------------- Publish top markets to Notes table ---------------- */
-async function publishNoExtremesToNotes(markets, supabase) {
+// ---------------- Publish top markets to Notes ----------------
+export async function publishNoExtremesToNotes(markets, supabase) {
   if (!markets.length) return;
 
   const body = markets
-    .sort((a, b) => a.outcomes[1].price - b.outcomes[1].price)
+    .sort((a, b) => {
+      const noDiff = a.outcomePrices[1] - b.outcomePrices[1];
+      if (noDiff !== 0) return noDiff;            // lowest NO first
+      return (b.volumeNum || 0) - (a.volumeNum || 0); // then highest volume
+    })
     .slice(0, 10)
-    .map((m, i) =>
-      `${i + 1}. [${m.title || m.question}](https://polymarket.com/market/${m.slug})\n` +
-      `• NO: ${(m.outcomes[1].price * 100).toFixed(1)}%\n` +
-      `• Ends in: ${((new Date(m.endDate) - Date.now()) / 36e5).toFixed(1)}h`
-    )
+    .map((m, i) => {
+      const hoursLeft = ((new Date(m.endDate) - Date.now()) / 36e5).toFixed(1);
+      return `${i + 1}. [${m.title || m.question}](https://polymarket.com/market/${m.slug})\n` +
+             `• NO: ${(m.outcomePrices[1] * 100).toFixed(1)}%\n` +
+             `• Ends in: ${hoursLeft}h`;
+    })
     .join("\n\n");
 
   await supabase.from("notes").insert([{
@@ -86,7 +102,7 @@ async function publishNoExtremesToNotes(markets, supabase) {
   }]);
 }
 
-/* ---------------- Public entry point ---------------- */
+// ---------------- Public entry point ----------------
 export async function runMarketNoExtremes(supabase) {
   try {
     const markets = await fetchActiveMarkets();

@@ -1343,10 +1343,11 @@ async function updateNotes(slug, pick, confidenceEmoji) {
   // Markdown link
   const eventLink = eventUrl ? `[${eventName}](${eventUrl})` : eventName;
 
-const eventTime = formatEventTime(
-  market.gameStartTime,
-  inferTimezone(market)
-);
+  // --- Fix Event Time ---
+  const normalizedTime = (pick.gameStartTime || pick.event_start_at || null)
+    ? (pick.gameStartTime || pick.event_start_at).replace(" ", "T").replace(/\+00$/, "Z")
+    : null;
+  const eventTime = formatEventTime(normalizedTime, inferTimezone(pick));
 
   const text = `
 ⚡️ **NEW MARKET PREDICTION**  
@@ -1391,10 +1392,11 @@ async function updateNotesWithResult(slug, pick, confidenceEmoji) {
 
   const eventLink = eventUrl ? `[${eventName}](${eventUrl})` : eventName;
 
-const eventTime = formatEventTime(
-  market.gameStartTime,
-  inferTimezone(market)
-);
+  // --- Fix Event Time ---
+  const normalizedTime = (pick.gameStartTime || pick.event_start_at || null)
+    ? (pick.gameStartTime || pick.event_start_at).replace(" ", "T").replace(/\+00$/, "Z")
+    : null;
+  const eventTime = formatEventTime(normalizedTime, inferTimezone(pick));
 
   const resultText = `
 ⚡️ **RESULT FOR MARKET PREDICTION**  
@@ -1418,11 +1420,10 @@ Outcome: ${pick.outcome} ${outcomeEmoji}
   const escapedEvent = eventName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const escapedOutcome = (pick.picked_outcome || "UNKNOWN").replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-const regex = new RegExp(
-  `⚡️ \\*\\*NEW MARKET PREDICTION\\*\\*[\\s\\S]*?Market Event: .*${escapedEvent}.*?Prediction:\\s*${escapedOutcome}[\\s\\S]*?(?=(\\n\\n⚡️|$))`,
-  "g"
-);
-
+  const regex = new RegExp(
+    `⚡️ \\*\\*NEW MARKET PREDICTION\\*\\*[\\s\\S]*?Market Event: .*${escapedEvent}.*?Prediction:\\s*${escapedOutcome}[\\s\\S]*?(?=(\\n\\n⚡️|$))`,
+    "g"
+  );
 
   if (regex.test(newContent)) {
     newContent = newContent.replace(regex, resultText);

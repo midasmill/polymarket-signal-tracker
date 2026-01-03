@@ -1,6 +1,6 @@
 /* ===========================
    Market NO Extremes Scanner
-   ADD-ON MODULE (SAFE, DEBUG READY)
+   ADD-ON MODULE (CORRECTED)
 =========================== */
 
 import fetch from "node-fetch";
@@ -16,10 +16,10 @@ export async function runMarketNoExtremes(supabase) {
     // ------------------------------
     // SETTINGS (adjust for testing)
     // ------------------------------
-    const NO_MAX = 0.999;       // TEST: catch even high-NO markets
+    const NO_MAX = 0.999;       // TEST: include high NO prices for now
     const HOURS_MAX = 48;       // TEST: include markets ending within 48h
     const HOURS_MIN = 0.1;      // exclude already ended
-    const MIN_VOLUME = 100000;  // filter overhyped
+    const MIN_VOLUME = 100000;  // overhyped filter
     const MIN_LIQUIDITY = 50000;
 
     // ------------------------------
@@ -39,24 +39,36 @@ export async function runMarketNoExtremes(supabase) {
     // ------------------------------
     const now = Date.now();
     const filtered = markets.filter(m => {
-      const noPrice = Number(m.outcomePrices?.[1]);
-      const yesPrice = Number(m.outcomePrices?.[0]);
-      const hoursLeft = (new Date(m.endDate).getTime() - now) / 36e5;
+      if (!m.active) return false;
 
-      // Log every market for debugging
-      console.log(
-        m.slug,
-        "NO:", noPrice,
-        "YES:", yesPrice,
-        "hoursLeft:", hoursLeft.toFixed(1)
-      );
-
-      if (!m.active) {
-        console.log(m.slug, "skipped: inactive");
+      // Parse outcomePrices string
+      let prices = [];
+      try {
+        prices = JSON.parse(m.outcomePrices || "[]");
+      } catch (e) {
+        console.log(m.slug, "skipped: failed to parse outcomePrices");
         return false;
       }
+
+      if (!prices[1]) {
+        console.log(m.slug, "skipped: missing NO price");
+        return false;
+      }
+
+      const yesPrice = Number(prices[0]);
+      const noPrice = Number(prices[1]);
+      const hoursLeft = (new Date(m.endDate).getTime() - now) / 36e5;
+
+      // Debug logging
+      console.log(
+        m.slug,
+        "| NO:", noPrice,
+        "| YES:", yesPrice,
+        "| hoursLeft:", hoursLeft.toFixed(1)
+      );
+
       if (Number.isNaN(noPrice)) {
-        console.log(m.slug, "skipped: invalid NO price");
+        console.log(m.slug, "skipped: NO price is NaN");
         return false;
       }
       if (noPrice > NO_MAX) {
@@ -64,7 +76,7 @@ export async function runMarketNoExtremes(supabase) {
         return false;
       }
       if (hoursLeft > HOURS_MAX || hoursLeft <= HOURS_MIN) {
-        console.log(m.slug, "skipped: hoursLeft", hoursLeft.toFixed(1));
+        console.log(m.slug, "skipped: hoursLeft filter", hoursLeft.toFixed(1));
         return false;
       }
 
@@ -82,8 +94,9 @@ export async function runMarketNoExtremes(supabase) {
     // INSERT into Supabase table
     // ------------------------------
     for (const m of filtered) {
-      const noPrice = Number(m.outcomePrices[1]);
-      const yesPrice = Number(m.outcomePrices[0]);
+      const prices = JSON.parse(m.outcomePrices);
+      const yesPrice = Number(prices[0]);
+      const noPrice = Number(prices[1]);
       const hoursLeft = (new Date(m.endDate).getTime() - now) / 36e5;
 
       const insertData = {

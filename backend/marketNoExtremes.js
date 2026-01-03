@@ -9,14 +9,15 @@ import fetch from "node-fetch";
  * Run the Market NO Extremes scanner
  * @param {import("@supabase/supabase-js").SupabaseClient} supabase
  * @param {function} sendToNotes - optional, function to send formatted notes
+ * @param {function} sendToTelegram - optional, function to send summary to Telegram
  */
-export async function runMarketNoExtremes(supabase, sendToNotes) {
+export async function runMarketNoExtremes(supabase, sendToNotes, sendToTelegram) {
   console.log("🟢 Market NO Extremes scanner started");
 
   try {
     const NO_MAX = 0.10;       // NO ≤ 10%
     const MIN_VOLUME = 50000;  // Overhyped filter: minimum volume
-    const MIN_LIQUIDITY = 10000; // Overhyped filter: minimum liquidity
+    const MIN_LIQUIDITY = 10000;
     const LIMIT = 500;
 
     const now = Date.now();
@@ -53,28 +54,38 @@ export async function runMarketNoExtremes(supabase, sendToNotes) {
 
       const noPrice = Number(prices[1]);
 
-      // Hours to resolution
       const hoursLeft = m.endDate ? ((new Date(m.endDate) - now) / 1000 / 3600) : -1;
-      if (hoursLeft <= 0) return false; // skip expired markets
+      if (hoursLeft <= 0) return false; // skip expired
 
       return noPrice <= NO_MAX;
     });
 
     console.log(`🔹 ${filtered.length} markets passed NO ≤ 10% filter`);
-
     if (!filtered.length) return;
 
     // ------------------------------
-    // INSERT into Supabase table
+    // INSERT into Supabase table (skip duplicates)
     // ------------------------------
+    const newMarkets = [];
     for (let i = 0; i < filtered.length; i++) {
       const m = filtered[i];
       let prices = [];
       try { prices = JSON.parse(m.outcomePrices || "[]"); } catch {}
       const yesPrice = Number(prices[0] || 0);
       const noPrice = Number(prices[1] || 0);
-
       const hoursLeft = m.endDate ? ((new Date(m.endDate) - now) / 1000 / 3600) : null;
+
+      // Check for duplicates by polymarket_id
+      const { data: existing } = await supabase
+        .from("market_no_extremes")
+        .select("id")
+        .eq("polymarket_id", parseInt(m.id))
+        .limit(1);
+
+      if (existing && existing.length > 0) {
+        console.log(`⚠️ Skipping duplicate: ${m.slug}`);
+        continue;
+      }
 
       const insertData = {
         polymarket_id: parseInt(m.id),
@@ -103,29 +114,38 @@ export async function runMarketNoExtremes(supabase, sendToNotes) {
         .insert([insertData]);
 
       if (error) console.error("❌ Insert error:", error, insertData);
-      else console.log(`🟢 Inserted: ${m.slug}`);
+      else {
+        console.log(`🟢 Inserted: ${m.slug}`);
+        newMarkets.push(m);
+      }
     }
 
     // ------------------------------
-    // FORMAT FOR NOTES PAGE
+    // FORMAT summary for Notes/Telegram (only new markets)
     // ------------------------------
-    if (sendToNotes) {
-      const summary = filtered.map((m, idx) => {
+    if (newMarkets.length && (sendToNotes || sendToTelegram)) {
+      const summary = newMarkets.map((m, idx) => {
         let prices = [];
         try { prices = JSON.parse(m.outcomePrices || "[]"); } catch {}
         const yesPrice = Number(prices[0] || 0);
         const noPrice = Number(prices[1] || 0);
         const hoursLeft = m.endDate ? ((new Date(m.endDate) - now) / 1000 / 3600).toFixed(1) : "?";
 
-        // Use events[0].slug if available, fallback to m.slug
         const marketSlug = m.events?.[0]?.slug || m.slug;
         const link = `https://polymarket.com/market/${marketSlug}`;
 
         return `${idx + 1}. [${m.question}](${link})\n• YES: ${(yesPrice*100).toFixed(1)}% | NO: ${(noPrice*100).toFixed(1)}%\n• Ends in: ${hoursLeft}h`;
       }).join("\n\n");
 
-      console.log("📝 Sending summary to Notes...");
-      await sendToNotes(summary, "polymarket-millionaires");
+      if (sendToNotes) {
+        console.log("📝 Sending summary to Notes...");
+        await sendToNotes(summary, "polymarket-millionaires");
+      }
+
+      if (sendToTelegram) {
+        console.log("📲 Sending summary to Telegram...");
+        await sendToTelegram(summary);
+      }
     }
 
     console.log("🔥 Market NO Extremes scanner finished");

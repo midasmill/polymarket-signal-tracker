@@ -1017,19 +1017,20 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 
   // --- Aggregate wallet counts per market & outcome ---
   const marketNetPickMap = new Map();
-  for (const [key, dominantOutcome] of walletDominantMap.entries()) {
+for (const [key, dominantOutcome] of walletDominantMap.entries()) {
     const [wallet_id, market_id] = key.split("_");
     if (!marketNetPickMap.has(market_id)) marketNetPickMap.set(market_id, {});
     const outcomes = marketNetPickMap.get(market_id);
     if (!outcomes[dominantOutcome]) outcomes[dominantOutcome] = { walletIds: new Set(), totalPnl: 0 };
+
     outcomes[dominantOutcome].walletIds.add(Number(wallet_id));
     outcomes[dominantOutcome].totalPnl += walletMarketMap.get(key)[dominantOutcome];
 
-     const side = determineSide(dominantOutcome, info);
-if (!outcomes[dominantOutcome].sideCounts) outcomes[dominantOutcome].sideCounts = {};
-outcomes[dominantOutcome].sideCounts[side] = (outcomes[dominantOutcome].sideCounts[side] || 0) + 1;
-
-  }
+    const info = marketInfoMap.get(market_id); // <- add this
+    const side = determineSide(dominantOutcome, info);
+    if (!outcomes[dominantOutcome].sideCounts) outcomes[dominantOutcome].sideCounts = {};
+    outcomes[dominantOutcome].sideCounts[side] = (outcomes[dominantOutcome].sideCounts[side] || 0) + 1;
+}
 
   // --- Normalize YES/NO keys for moneyline ---
   for (const [market_id, outcomes] of marketNetPickMap.entries()) {

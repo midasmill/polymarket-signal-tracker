@@ -1187,22 +1187,29 @@ async function safeRebuildLivePicks(forceRebuild = false) {
   }
 }
 
-
 /* ===========================
    Notes Update Helper (with link + event start)
 =========================== */
 async function updateNotes(slug, pick, confidenceEmoji) {
   const eventName = pick.market_name || pick.event_slug || "UNKNOWN";
-  const eventUrl = pick.market_url ? `(${pick.market_url})` : "";
+
+  // Fix Polymarket URL
+  let eventUrl = pick.market_url || "";
+  if (eventUrl.includes("/markets/")) {
+    eventUrl = eventUrl.replace("/markets/", "/event/");
+  }
+
+  // HTML hyperlink for notes page
+  const eventLink = eventUrl ? `<a href="${eventUrl}" target="_blank">${eventName}</a>` : eventName;
+
   const eventTime = pick.event_start_at || pick.gameStartTime
     ? new Date(pick.event_start_at || pick.gameStartTime).toLocaleString()
     : "N/A";
 
-  // Build the text
-  const text = `⚡️ NEW MARKET PREDICTION
-Market Event: ${eventName} ${eventUrl}
-Event Start: ${eventTime}
-Prediction: ${pick.picked_outcome || "UNKNOWN"}
+  const text = `⚡️ NEW MARKET PREDICTION<br>
+Market Event: ${eventLink}<br>
+Event Start: ${eventTime}<br>
+Prediction: ${pick.picked_outcome || "UNKNOWN"}<br>
 Confidence: ${confidenceEmoji}`;
 
   // Fetch current note content
@@ -1212,11 +1219,9 @@ Confidence: ${confidenceEmoji}`;
     .eq("slug", slug)
     .maybeSingle();
 
-  // Append new note with 2 line breaks
   let newContent = note?.content || "";
-  newContent += newContent ? `\n\n${text}` : text;
+  newContent += newContent ? `<br><br>${text}` : text;
 
-  // Update Supabase
   await supabase
     .from("notes")
     .update({ content: newContent, public: true })
@@ -1224,7 +1229,7 @@ Confidence: ${confidenceEmoji}`;
 }
 
 /* ===========================
-   Notes Update Helper (Result, replace previous prediction, with link + event start)
+   Notes Update Helper (Result, replace previous prediction)
 =========================== */
 async function updateNotesWithResult(slug, pick, confidenceEmoji) {
   const outcomeEmoji =
@@ -1233,16 +1238,24 @@ async function updateNotesWithResult(slug, pick, confidenceEmoji) {
     "";
 
   const eventName = pick.market_name || pick.event_slug || "UNKNOWN";
-  const eventUrl = pick.market_url ? `(${pick.market_url})` : "";
+
+  // Fix Polymarket URL
+  let eventUrl = pick.market_url || "";
+  if (eventUrl.includes("/markets/")) {
+    eventUrl = eventUrl.replace("/markets/", "/event/");
+  }
+
+  const eventLink = eventUrl ? `<a href="${eventUrl}" target="_blank">${eventName}</a>` : eventName;
+
   const eventTime = pick.event_start_at || pick.gameStartTime
     ? new Date(pick.event_start_at || pick.gameStartTime).toLocaleString()
     : "N/A";
 
-  const resultText = `⚡️ RESULT FOR MARKET PREDICTION
-Market Event: ${eventName} ${eventUrl}
-Event Start: ${eventTime}
-Prediction: ${pick.picked_outcome || "UNKNOWN"}
-Confidence: ${confidenceEmoji}
+  const resultText = `⚡️ RESULT FOR MARKET PREDICTION<br>
+Market Event: ${eventLink}<br>
+Event Start: ${eventTime}<br>
+Prediction: ${pick.picked_outcome || "UNKNOWN"}<br>
+Confidence: ${confidenceEmoji}<br>
 Outcome: ${pick.outcome} ${outcomeEmoji}`;
 
   // Fetch current note content
@@ -1259,17 +1272,16 @@ Outcome: ${pick.outcome} ${outcomeEmoji}`;
   const escapedOutcome = (pick.picked_outcome || "UNKNOWN").replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
   const regex = new RegExp(
-    `⚡️ NEW MARKET PREDICTION\\s*Market Event: ${escapedEvent}.*\\s*Prediction: ${escapedOutcome}[\\s\\S]*?(?=(\\n\\n⚡️|$))`,
+    `⚡️ NEW MARKET PREDICTION[\\s\\S]*?Market Event: .*${escapedEvent}.*\\s*Prediction: ${escapedOutcome}[\\s\\S]*?(?=(<br><br>⚡️|$))`,
     "g"
   );
 
   if (regex.test(newContent)) {
     newContent = newContent.replace(regex, resultText);
   } else {
-    newContent += newContent ? `\n\n${resultText}` : resultText;
+    newContent += newContent ? `<br><br>${resultText}` : resultText;
   }
 
-  // Update Supabase
   await supabase
     .from("notes")
     .update({ content: newContent, public: true })
@@ -1376,7 +1388,6 @@ async function updateWalletMetricsJS() {
 
 /* ===========================
    Send Signals to Telegram + Notes
-   (Enhanced: Skip already sent, numeric confidence)
 =========================== */
 async function processAndSendSignals() {
   const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "5", 10);
@@ -1393,18 +1404,25 @@ async function processAndSendSignals() {
   for (const pick of livePicks) {
     if (!pick.wallets || pick.wallets.length === 0) continue;
     if (pick.vote_count < MIN_WALLETS_FOR_SIGNAL) continue;
-    if (pick.signal_sent_at && !FORCE_SEND) continue; // authoritative
+    if (pick.signal_sent_at && !FORCE_SEND) continue;
 
     const numericConfidence = pick.confidence || pick.vote_count;
     const confidenceEmoji = getConfidenceEmoji(numericConfidence);
     const eventName = pick.market_name || pick.event_slug || "UNKNOWN";
-    const eventUrl = pick.market_url || "";
+
+    // Fix link
+    let eventUrl = pick.market_url || "";
+    if (eventUrl.includes("/markets/")) {
+      eventUrl = eventUrl.replace("/markets/", "/event/");
+    }
+
     const eventTime = pick.event_start_at || pick.gameStartTime
       ? new Date(pick.event_start_at || pick.gameStartTime).toLocaleString()
       : "N/A";
 
+    // Telegram Markdown link
     const text = `⚡️ NEW MARKET PREDICTION
-Market Event: ${eventName}${eventUrl ? ` (${eventUrl})` : ""}
+Market Event: [${eventName}](${eventUrl})
 Event Start: ${eventTime}
 Prediction: ${pick.picked_outcome || "UNKNOWN"}
 Confidence: ${confidenceEmoji}`;
@@ -1413,7 +1431,6 @@ Confidence: ${confidenceEmoji}`;
       await sendTelegram(text, false);
       await updateNotes("midas-sports", pick, confidenceEmoji);
 
-      // Upsert last signal timestamp safely
       await supabase
         .from("wallet_live_picks")
         .update({
@@ -1432,7 +1449,6 @@ Confidence: ${confidenceEmoji}`;
 
 /* ===========================
    Send Results to Telegram + Notes
-   (Enhanced: Skip duplicates, numeric confidence)
 =========================== */
 async function processAndSendResults() {
   const { data: resolvedPicks, error } = await supabase
@@ -1444,23 +1460,28 @@ async function processAndSendResults() {
   if (!resolvedPicks?.length) return;
 
   for (const pick of resolvedPicks) {
-    if (!pick.signal_sent_at) continue; // only picks that were sent as signal
-    if (pick.result_sent_at) continue;   // only send once
+    if (!pick.signal_sent_at) continue;
+    if (pick.result_sent_at) continue;
 
     const resolvedOutcome = pick.resolved_outcome;
     const outcome = pick.outcome || (pick.picked_outcome === resolvedOutcome ? "WIN" : "LOSS");
     const numericConfidence = pick.confidence || pick.vote_count;
     const confidenceEmoji = getConfidenceEmoji(numericConfidence);
     const outcomeEmoji = outcome === "WIN" ? "✅" : "❌";
-
     const eventName = pick.market_name || pick.event_slug || "UNKNOWN";
-    const eventUrl = pick.market_url || "";
+
+    // Fix link
+    let eventUrl = pick.market_url || "";
+    if (eventUrl.includes("/markets/")) {
+      eventUrl = eventUrl.replace("/markets/", "/event/");
+    }
+
     const eventTime = pick.event_start_at || pick.gameStartTime
       ? new Date(pick.event_start_at || pick.gameStartTime).toLocaleString()
       : "N/A";
 
     const text = `⚡️ RESULT FOR MARKET PREDICTION
-Market Event: ${eventName}${eventUrl ? ` (${eventUrl})` : ""}
+Market Event: [${eventName}](${eventUrl})
 Event Start: ${eventTime}
 Prediction: ${pick.picked_outcome || "UNKNOWN"}
 Confidence: ${confidenceEmoji}
@@ -1470,7 +1491,6 @@ Outcome: ${outcome} ${outcomeEmoji}`;
       await sendTelegram(text, false);
       await updateNotesWithResult("midas-sports", pick, confidenceEmoji);
 
-      // Only update outcome & result_sent_at, preserve resolved_outcome
       await supabase
         .from("wallet_live_picks")
         .update({

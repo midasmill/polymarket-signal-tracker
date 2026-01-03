@@ -890,6 +890,11 @@ async function fetchMarketSafe({ event_slug, polymarket_id, market_id }, bypassC
     market.gameStartTime =
       market.gameStartTime || market.eventTime || market.startTime || null;
 
+// --- Extract score if available ---
+if (Array.isArray(market.events) && market.events.length) {
+  market.score = market.events[0].score || null;
+}
+
     // Auto-detect winner for closed markets if missing
     if (!market.outcome && market.closed && market.outcomePrices && market.outcomes) {
       try {

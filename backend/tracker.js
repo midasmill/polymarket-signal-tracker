@@ -1403,7 +1403,7 @@ Outcome: ${pick.outcome} ${outcomeEmoji}
    Auto-pause / Auto-unpause
    Single query for all wallets
 =========================== */
-async function updateWalletMetricsJS() {
+async function updateWalletMetricsRolling3DOptimized() {
   const ROLLING_DAYS = 3;
   const WIN_RATE_THRESHOLD = 50;
   const MIN_TOTAL_PICKS = 3;
@@ -1764,9 +1764,9 @@ async function trackerLoop() {
 
     // 8️⃣ Update wallet metrics
     try {
-      await updateWalletMetricsJS();
+      await updateWalletMetricsRolling3DOptimized();
     } catch (err) {
-      console.error("❌ Failed in updateWalletMetricsJS:", err);
+      console.error("❌ Failed in updateWalletMetricsRolling3DOptimized:", err);
     }
 
   } catch (err) {

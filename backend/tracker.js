@@ -1024,6 +1024,11 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     if (!outcomes[dominantOutcome]) outcomes[dominantOutcome] = { walletIds: new Set(), totalPnl: 0 };
     outcomes[dominantOutcome].walletIds.add(Number(wallet_id));
     outcomes[dominantOutcome].totalPnl += walletMarketMap.get(key)[dominantOutcome];
+
+     const side = determineSide(dominantOutcome, info);
+if (!outcomes[dominantOutcome].sideCounts) outcomes[dominantOutcome].sideCounts = {};
+outcomes[dominantOutcome].sideCounts[side] = (outcomes[dominantOutcome].sideCounts[side] || 0) + 1;
+
   }
 
   // --- Normalize YES/NO keys for moneyline ---
@@ -1071,6 +1076,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
         wallets: Array.from(data.walletIds),
         vote_count: data.walletIds.size,
         vote_counts: Object.fromEntries(Array.from(data.walletIds).map(id => [id, 1])),
+           side_counts: data.sideCounts || {}, // <-- add this
         pnl: Number(data.totalPnl),
         outcome: status,
         resolved_outcome: resolvedOutcome,

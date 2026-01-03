@@ -1020,23 +1020,26 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     walletDominantMap.set(key, dominantOutcome);
   }
 
-  // --- Aggregate wallet counts per market & outcome ---
-  const marketNetPickMap = new Map();
-  for (const [key, dominantOutcome] of walletDominantMap.entries()) {
-    const [wallet_id, market_id] = key.split("_");
-    if (!marketNetPickMap.has(market_id)) marketNetPickMap.set(market_id, {});
-    const outcomes = marketNetPickMap.get(market_id);
-    if (!outcomes[dominantOutcome]) outcomes[dominantOutcome] = { walletIds: new Set(), totalPnl: 0 };
+// --- Aggregate wallet counts per market & outcome ---
+const marketNetPickMap = new Map();
+for (const [key, dominantOutcome] of walletDominantMap.entries()) {
+  const [wallet_id, market_id] = key.split("_");
+  if (!marketNetPickMap.has(market_id)) marketNetPickMap.set(market_id, {});
+  const outcomes = marketNetPickMap.get(market_id);
 
-    outcomes[dominantOutcome].walletIds.add(Number(wallet_id));
-    outcomes[dominantOutcome].totalPnl += walletMarketMap.get(key)[dominantOutcome];
-
-    const info = marketInfoMap.get(market_id);
-    const side = determineSide(dominantOutcome, info);
-    if (!outcomes[dominantOutcome].sideCounts) outcomes[dominantOutcome].sideCounts = {};
-    outcomes[dominantOutcome].sideCounts[side] = (outcomes[dominantOutcome].sideCounts[side] || 0) + 1;
+  if (!outcomes[dominantOutcome]) {
+    outcomes[dominantOutcome] = { walletIds: new Set(), totalPnl: 0, sideCounts: {} };
   }
 
+  // Add wallet and pnl
+  outcomes[dominantOutcome].walletIds.add(Number(wallet_id));
+  outcomes[dominantOutcome].totalPnl += walletMarketMap.get(key)[dominantOutcome];
+
+  // Count picks per outcome name (not BUY/SELL)
+  outcomes[dominantOutcome].sideCounts[dominantOutcome] =
+    (outcomes[dominantOutcome].sideCounts[dominantOutcome] || 0) + 1;
+}
+   
   // --- Normalize YES/NO keys for moneyline ---
   for (const [market_id, outcomes] of marketNetPickMap.entries()) {
     const info = marketInfoMap.get(market_id);

@@ -946,12 +946,6 @@ if (market.gameStartTime) {
   market.gameStartTime = null;
 }
 
-// --- Use it later safely ---
-const eventTime = formatEventTime(
-  market.gameStartTime,
-  inferTimezone(market)
-);
-
 
 // --- Extract score if available ---
 if (Array.isArray(market.events) && market.events.length) {
@@ -1342,8 +1336,8 @@ async function updateNotes(slug, pick, confidenceEmoji) {
   const eventLink = eventUrl ? `[${eventName}](${eventUrl})` : eventName;
 
 const eventTime = formatEventTime(
-  pick.gameStartTime || pick.event_start_at,
-  inferTimezone(pick)
+  market.gameStartTime,
+  inferTimezone(market)
 );
 
   const text = `
@@ -1390,8 +1384,8 @@ async function updateNotesWithResult(slug, pick, confidenceEmoji) {
   const eventLink = eventUrl ? `[${eventName}](${eventUrl})` : eventName;
 
 const eventTime = formatEventTime(
-  pick.gameStartTime || pick.event_start_at,
-  inferTimezone(pick)
+  market.gameStartTime,
+  inferTimezone(market)
 );
 
   const resultText = `
@@ -1611,10 +1605,10 @@ async function processAndSendSignals() {
     }
 
     // Event start time
-    const eventTime = formatEventTime(
-      pick.gameStartTime || pick.event_start_at,
-      inferTimezone(pick)
-    );
+const eventTime = formatEventTime(
+  market.gameStartTime,
+  inferTimezone(market)
+);
 
     // Telegram Markdown
     const text = `⚡️ NEW MARKET PREDICTION
@@ -1693,8 +1687,8 @@ async function processAndSendResults() {
 
     // Event start time
 const eventTime = formatEventTime(
-  pick.gameStartTime || pick.event_start_at,
-  inferTimezone(pick)
+  market.gameStartTime,
+  inferTimezone(market)
 );
 
     // Telegram Markdown

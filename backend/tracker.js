@@ -564,6 +564,7 @@ async function resolveMarketIdFromSlug(eventSlug) {
   }
 }
 
+// --- Track Wallet ---
 async function trackWallet(wallet, forceRebuild = false) {
   const proxyWallet = wallet.polymarket_proxy_wallet;
   if (!proxyWallet) return;
@@ -841,13 +842,15 @@ async function safeInsert(table, rows, options = {}) {
 
   const { upsertColumns = [] } = options;
 
+  // default conflict column for "signals" table
+  const defaultConflict = table === "signals" ? ["tx_hash"] : [];
+
   try {
     const { error } = await supabase
       .from(table)
       .upsert(rows, {
-        onConflict: upsertColumns.length ? upsertColumns : undefined,
-        // Optional: return nothing to avoid large responses
-        returning: "minimal",
+        onConflict: upsertColumns.length ? upsertColumns : defaultConflict,
+        returning: "minimal", // avoid large responses
       });
 
     if (error) {
@@ -860,6 +863,7 @@ async function safeInsert(table, rows, options = {}) {
     console.error(`❌ Exception in safeInsert for table ${table}:`, err.message);
   }
 }
+
 
 /* ===========================
    Universal Market Cache & Fetch (Includes Closed + Resolved)

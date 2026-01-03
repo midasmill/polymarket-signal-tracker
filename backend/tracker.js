@@ -2,6 +2,11 @@ import { createClient } from "@supabase/supabase-js";
 import fetch from "node-fetch";
 import cron from "node-cron";
 import http from "http";
+import { runMarketNoExtremes } from "./marketNoExtremes.js";
+
+// ADD-ON FEATURE (non-blocking)
+runMarketNoExtremes();
+
 
 /* ===========================
    ENV & CONFIG

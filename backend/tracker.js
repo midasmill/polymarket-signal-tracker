@@ -2,6 +2,7 @@ import { createClient } from "@supabase/supabase-js";
 import fetch from "node-fetch";
 import cron from "node-cron";
 import http from "http";
+import { runMarketNoExtremes } from "./marketNoExtremes.js";
 
 /* ===========================
    ENV & CONFIG
@@ -70,9 +71,6 @@ process.on("uncaughtException", err => console.error("🔥 Uncaught exception:",
 /* ===========================
    ADD-ON FEATURE (SAFE)
 =========================== */
-import { runMarketNoExtremes } from "./marketNoExtremes.js";
-
-// Now supabase exists — call the function
 runMarketNoExtremes(supabase);
 
 /* ===========================

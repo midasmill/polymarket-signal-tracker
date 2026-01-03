@@ -47,28 +47,36 @@ function resolveNumericConfidence(pick) {
 }
 
 /* ===========================
-   Format Event Time (Configurable TZ) and Infer Timezone
+   Format Event Time (Configurable TZ) 
 =========================== */
 function formatEventTime(utcTime, timezone = "America/New_York") {
   if (!utcTime) return "TBD";
 
-  const date = new Date(utcTime);
-  const parts = new Intl.DateTimeFormat("en-US", {
+  // normalize "2026-01-04 00:30:00+00" → "2026-01-04T00:30:00Z"
+  const normalized = utcTime.replace(" ", "T").replace("+00", "Z");
+  const date = new Date(normalized);
+  if (isNaN(date)) return "TBD";
+
+  const time = date.toLocaleString("en-US", {
     timeZone: timezone,
     weekday: "short",
     month: "short",
     day: "numeric",
     hour: "2-digit",
-    minute: "2-digit",
-    hour12: true,
-    timeZoneName: "short"
-  }).formatToParts(date);
+    minute: "2-digit"
+  });
 
-  const formattedTime = parts.map(p => p.value).join("");
-  return formattedTime;
+  const tz = date
+    .toLocaleTimeString("en-US", { timeZone: timezone, timeZoneName: "short" })
+    .split(" ")
+    .pop();
+
+  return `${time} ${tz}`;
 }
 
-
+/* ===========================
+   Infer Timezone
+=========================== */
 function inferTimezone(pick) {
   if (pick.event_timezone) return pick.event_timezone;
 
@@ -1317,10 +1325,10 @@ async function updateNotes(slug, pick, confidenceEmoji) {
   // Markdown link
   const eventLink = eventUrl ? `[${eventName}](${eventUrl})` : eventName;
 
-const eventTime = pick.event_start_at
-  ? formatEventTime(pick.event_start_at, inferTimezone(pick))
-  : "TBD";
-
+const eventTime = formatEventTime(
+  pick.gameStartTime || pick.event_start_at,
+  inferTimezone(pick)
+);
 
   const text = `
 ⚡️ **NEW MARKET PREDICTION**  
@@ -1365,10 +1373,10 @@ async function updateNotesWithResult(slug, pick, confidenceEmoji) {
 
   const eventLink = eventUrl ? `[${eventName}](${eventUrl})` : eventName;
 
-const eventTime = pick.event_start_at
-  ? formatEventTime(pick.event_start_at, inferTimezone(pick))
-  : "TBD";
-
+const eventTime = formatEventTime(
+  pick.gameStartTime || pick.event_start_at,
+  inferTimezone(pick)
+);
 
   const resultText = `
 ⚡️ **RESULT FOR MARKET PREDICTION**  
@@ -1582,10 +1590,10 @@ async function processAndSendSignals() {
     }
 
     // Event start time
-const eventTime = pick.event_start_at
-  ? formatEventTime(pick.event_start_at, inferTimezone(pick))
-  : "TBD";
-
+const eventTime = formatEventTime(
+  pick.gameStartTime || pick.event_start_at,
+  inferTimezone(pick)
+);
 
     // Telegram Markdown
     const text = `⚡️ NEW MARKET PREDICTION
@@ -1660,10 +1668,10 @@ async function processAndSendResults() {
     }
 
     // Event start time
-const eventTime = pick.event_start_at
-  ? formatEventTime(pick.event_start_at, inferTimezone(pick))
-  : "TBD";
-
+const eventTime = formatEventTime(
+  pick.gameStartTime || pick.event_start_at,
+  inferTimezone(pick)
+);
 
     // Telegram Markdown
     const text = `⚡️ RESULT FOR MARKET PREDICTION

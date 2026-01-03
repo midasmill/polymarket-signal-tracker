@@ -1,27 +1,31 @@
 /* ===========================
-   Market NO Extremes Scanner
+   Market Extremes Scanner
    ADD-ON MODULE (SAFE)
 =========================== */
 
 import fetch from "node-fetch";
 
 /**
- * Run the Market NO Extremes scanner
+ * Run the Market Extremes scanner
  * @param {import("@supabase/supabase-js").SupabaseClient} supabase
  * @param {function} sendToNotes - optional, function to send formatted notes
  */
 export async function runMarketNoExtremes(supabase, sendToNotes) {
-  console.log("🟢 Market NO Extremes scanner started");
+  console.log("🟢 Market Extremes scanner started");
 
   try {
     const NO_MAX = 0.10;       // NO ≤ 10%
-    const MIN_VOLUME = 10000;  // loosened to include smaller markets
-    const MIN_LIQUIDITY = 1000;
+    const YES_MIN = 0.90;      // YES ≥ 90%
+    const MIN_VOLUME = 50000;  // Overhyped filter: minimum volume
+    const MIN_LIQUIDITY = 10000; // Overhyped filter: minimum liquidity
+    const LIMIT = 500;
+
+    const now = Date.now();
 
     // ------------------------------
     // FETCH markets from Polymarket Gamma API
     // ------------------------------
-    const url = `https://gamma-api.polymarket.com/markets?closed=false&volume_num_min=${MIN_VOLUME}&liquidity_num_min=${MIN_LIQUIDITY}&limit=500`;
+    const url = `https://gamma-api.polymarket.com/markets?closed=false&volume_num_min=${MIN_VOLUME}&liquidity_num_min=${MIN_LIQUIDITY}&limit=${LIMIT}`;
     console.log("🌐 Fetching markets from:", url);
 
     const res = await fetch(url);
@@ -39,34 +43,28 @@ export async function runMarketNoExtremes(supabase, sendToNotes) {
     console.log(`🔹 Fetched ${markets.length} markets`);
 
     // ------------------------------
-    // LOG all NO prices for debugging
-    // ------------------------------
-    markets.forEach(m => {
-      let prices = [];
-      try { prices = JSON.parse(m.outcomePrices || "[]"); } catch {}
-      console.log(m.slug, "NO:", prices[1] ? (prices[1]*100).toFixed(1)+"%" : "N/A");
-    });
-
-    // ------------------------------
-    // FILTER markets (NO ≤ 10%)
+    // FILTER markets: YES ≥ 90% OR NO ≤ 10%
     // ------------------------------
     const filtered = markets.filter(m => {
       if (!m.active) return false;
+
       let prices = [];
       try { prices = JSON.parse(m.outcomePrices || "[]"); } catch {}
-      if (!prices[1]) return false;
+      if (!prices[0] || !prices[1]) return false;
+
+      const yesPrice = Number(prices[0]);
       const noPrice = Number(prices[1]);
-      return noPrice <= NO_MAX;
+
+      // Overhyped: already filtered by volume & liquidity in API
+      return yesPrice >= YES_MIN || noPrice <= NO_MAX;
     });
 
-    console.log(`🔹 ${filtered.length} markets passed NO ≤ 10% filter`);
+    console.log(`🔹 ${filtered.length} markets passed extremes filter`);
 
     if (!filtered.length) return;
 
-    const now = Date.now();
-
     // ------------------------------
-    // INSERT into Supabase
+    // INSERT into Supabase table
     // ------------------------------
     for (let i = 0; i < filtered.length; i++) {
       const m = filtered[i];
@@ -93,7 +91,8 @@ export async function runMarketNoExtremes(supabase, sendToNotes) {
         liquidity: m.liquidityNum ? Number(m.liquidityNum) : null,
         open_interest: null,
         is_active: m.active,
-        is_resolved: false
+        is_resolved: false,
+        fetched_at: new Date()
       };
 
       const { error } = await supabase
@@ -105,22 +104,28 @@ export async function runMarketNoExtremes(supabase, sendToNotes) {
     }
 
     // ------------------------------
-    // SEND formatted summary to Notes
+    // FORMAT FOR NOTES PAGE
     // ------------------------------
     if (sendToNotes) {
       const summary = filtered.map((m, idx) => {
         let prices = [];
         try { prices = JSON.parse(m.outcomePrices || "[]"); } catch {}
+        const yesPrice = Number(prices[0] || 0);
         const noPrice = Number(prices[1] || 0);
-        const link = `https://polymarket.com/market/${m.slug}`;
-        return `${idx + 1}. [${m.question}](${link})\n• NO: ${(noPrice * 100).toFixed(1)}%`;
+        const hoursLeft = m.endDate ? ((new Date(m.endDate) - now) / 1000 / 3600).toFixed(1) : "?";
+
+        // Use events[0].slug if available, fallback to m.slug
+        const marketSlug = m.events?.[0]?.slug || m.slug;
+        const link = `https://polymarket.com/market/${marketSlug}`;
+
+        return `${idx + 1}. [${m.question}](${link})\n• YES: ${(yesPrice*100).toFixed(1)}% | NO: ${(noPrice*100).toFixed(1)}%\n• Ends in: ${hoursLeft}h`;
       }).join("\n\n");
 
       console.log("📝 Sending summary to Notes...");
       await sendToNotes(summary, "polymarket-millionaires");
     }
 
-    console.log("🔥 Market NO Extremes scanner finished");
+    console.log("🔥 Market Extremes scanner finished");
 
   } catch (err) {
     console.error("🔥 Scanner error:", err);

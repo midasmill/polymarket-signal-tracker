@@ -32,22 +32,50 @@ const CONFIDENCE_THRESHOLDS = {
   "⭐⭐⭐⭐⭐": 45
 };
 
-/* ===========================
-   Convert vote count to numeric confidence
-=========================== */
-function getConfidenceNumber(voteCount) {
-  return Number(voteCount || 1); // fallback 1
+function getConfidenceEmoji(confidence) {
+  for (const { threshold, emoji } of CONFIDENCE_STARS) {
+    if (confidence >= threshold) return emoji;
+  }
+  return "⭐";
+}
+
+function resolveNumericConfidence(pick) {
+  return Number.isFinite(pick.confidence) && pick.confidence > 0
+    ? pick.confidence
+    : pick.vote_count;
 }
 
 /* ===========================
-   Convert numeric confidence to star emoji
+   Format Event Time (Configurable TZ) and Infer Timezone
 =========================== */
-function getConfidenceEmoji(confidence) {
-  if (!confidence || confidence < 10) return "⭐";
-  if (confidence < 20) return "⭐⭐";
-  if (confidence < 30) return "⭐⭐⭐";
-  if (confidence < 40) return "⭐⭐⭐⭐";
-  return "⭐⭐⭐⭐⭐";
+function formatEventTime(utcTime, timezone = "America/New_York") {
+  if (!utcTime) return "TBD";
+
+  const date = new Date(utcTime);
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+    timeZoneName: "short"
+  }).formatToParts(date);
+
+  const formattedTime = parts.map(p => p.value).join("");
+  return formattedTime;
+}
+
+
+function inferTimezone(pick) {
+  if (pick.event_timezone) return pick.event_timezone;
+
+  if (pick.league === "NBA" || pick.league === "NFL") {
+    return "America/New_York";
+  }
+
+  return "UTC";
 }
 
 /* ===========================
@@ -997,7 +1025,6 @@ function determineSide(outcome, market) {
    Rebuild Wallet Live Picks
 =========================== */
 async function rebuildWalletLivePicks(forceRebuild = false) {
-  const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "5", 10);
   const marketInfoMap = new Map();
   const marketNetPickMap = new Map(); // ✅ declare this before use
 
@@ -1130,7 +1157,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
         pnl: Number(data.totalPnl),
         score: info?.score || null,
         fetched_at: new Date(),
-        confidence: getConfidenceNumber(data.walletIds.size),
+        confidence: data.walletIds.size,
         market_type: info?.sportsMarketType || "UNKNOWN"
       });
     }
@@ -1289,9 +1316,10 @@ async function updateNotes(slug, pick, confidenceEmoji) {
   // Markdown link
   const eventLink = eventUrl ? `[${eventName}](${eventUrl})` : eventName;
 
-  const eventTime = pick.event_start_at || pick.gameStartTime
-    ? new Date(pick.event_start_at || pick.gameStartTime).toLocaleString()
-    : "N/A";
+const eventTime = pick.event_start_at
+  ? formatEventTime(pick.event_start_at, inferTimezone(pick))
+  : "TBD";
+
 
   const text = `
 ⚡️ **NEW MARKET PREDICTION**  
@@ -1336,9 +1364,10 @@ async function updateNotesWithResult(slug, pick, confidenceEmoji) {
 
   const eventLink = eventUrl ? `[${eventName}](${eventUrl})` : eventName;
 
-  const eventTime = pick.event_start_at || pick.gameStartTime
-    ? new Date(pick.event_start_at || pick.gameStartTime).toLocaleString()
-    : "N/A";
+const eventTime = pick.event_start_at
+  ? formatEventTime(pick.event_start_at, inferTimezone(pick))
+  : "TBD";
+
 
   const resultText = `
 ⚡️ **RESULT FOR MARKET PREDICTION**  
@@ -1362,10 +1391,11 @@ Outcome: ${pick.outcome} ${outcomeEmoji}
   const escapedEvent = eventName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const escapedOutcome = (pick.picked_outcome || "UNKNOWN").replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-  const regex = new RegExp(
-    `⚡️ \\*\\*NEW MARKET PREDICTION\\*\\*[\\s\\S]*?Market Event: .*${escapedEvent}.*\\s*Prediction: ${escapedOutcome}[\\s\\S]*?(?=(\\n\\n⚡️|$))`,
-    "g"
-  );
+const regex = new RegExp(
+  `⚡️ \\*\\*NEW MARKET PREDICTION\\*\\*[\\s\\S]*?Market Event: .*${escapedEvent}.*?Prediction:\\s*${escapedOutcome}[\\s\\S]*?(?=(\\n\\n⚡️|$))`,
+  "g"
+);
+
 
   if (regex.test(newContent)) {
     newContent = newContent.replace(regex, resultText);
@@ -1510,7 +1540,6 @@ async function getWalletNetPick(walletId, eventSlug) {
    Send Signals to Telegram + Notes
 =========================== */
 async function processAndSendSignals() {
-  const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "15", 10);
   const FORCE_SEND = process.env.FORCE_SEND === "true";
 
   const { data: livePicks, error } = await supabase
@@ -1528,7 +1557,7 @@ async function processAndSendSignals() {
       continue;
     }
 
-    const numericConfidence = pick.confidence || pick.vote_count;
+    const numericConfidence = resolveNumericConfidence(pick);
 
     // skip picks below 1-star confidence unless forcing
     if (numericConfidence < CONFIDENCE_THRESHOLDS["⭐"] && !FORCE_SEND) {
@@ -1552,9 +1581,10 @@ async function processAndSendSignals() {
     }
 
     // Event start time
-    const eventTime = pick.event_start_at || pick.gameStartTime
-      ? new Date(pick.event_start_at || pick.gameStartTime).toLocaleString()
-      : "N/A";
+const eventTime = pick.event_start_at
+  ? formatEventTime(pick.event_start_at, inferTimezone(pick))
+  : "TBD";
+
 
     // Telegram Markdown
     const text = `⚡️ NEW MARKET PREDICTION
@@ -1607,7 +1637,17 @@ async function processAndSendResults() {
     const resolvedOutcome = pick.resolved_outcome;
     const outcome = pick.outcome || (pick.picked_outcome === resolvedOutcome ? "WIN" : "LOSS");
 
-    const numericConfidence = pick.confidence || pick.vote_count;
+    const numericConfidence = resolveNumericConfidence(pick);
+
+     if (numericConfidence < CONFIDENCE_THRESHOLDS["⭐"] && !FORCE_SEND) {
+  console.log(
+    "Skipped: confidence gate",
+    pick.market_id,
+    { confidence: pick.confidence, vote_count: pick.vote_count }
+  );
+  continue;
+}
+
     const confidenceEmoji = getConfidenceEmoji(numericConfidence);
     const outcomeEmoji = outcome === "WIN" ? "✅" : "❌";
     const eventName = pick.market_name || pick.event_slug || "UNKNOWN";
@@ -1619,9 +1659,10 @@ async function processAndSendResults() {
     }
 
     // Event start time
-    const eventTime = pick.event_start_at || pick.gameStartTime
-      ? new Date(pick.event_start_at || pick.gameStartTime).toLocaleString()
-      : "N/A";
+const eventTime = pick.event_start_at
+  ? formatEventTime(pick.event_start_at, inferTimezone(pick))
+  : "TBD";
+
 
     // Telegram Markdown
     const text = `⚡️ RESULT FOR MARKET PREDICTION
@@ -1657,7 +1698,9 @@ async function sendDailySummaryToNotes(slug = "midas-sports") {
   const today = new Date();
   const yesterday = new Date(today);
   yesterday.setDate(today.getDate() - 1);
-  const yesterdayStr = yesterday.toLocaleDateString();
+  const yesterdayStr = yesterday.toLocaleDateString("en-US", { timeZone: TIMEZONE });
+
+
 
   // --- Fetch yesterday's picks ---
   const { data: yesterdayPicks, error: yesterdayError } = await supabase

@@ -1112,8 +1112,73 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   console.log(`✅ Rebuilt wallet picks: ${finalLive.length} live, ${finalPending.length} pending`);
 }
 
+/* ===========================
+   Batch Normalize Wallet Live Picks
+=========================== */
+async function normalizeExistingPicksBatch(batchSize = 100) {
+  const { data: picks, error } = await supabase.from("wallet_live_picks").select("*");
+  if (error) return console.error("❌ Failed fetching wallet_live_picks:", error.message);
+  if (!picks?.length) return console.log("✅ No picks to normalize");
 
+  console.log(`🔹 Normalizing ${picks.length} picks in batches of ${batchSize}...`);
 
+  // --- Process in chunks ---
+  for (let i = 0; i < picks.length; i += batchSize) {
+    const chunk = picks.slice(i, i + batchSize);
+
+    const updates = [];
+
+    for (const pick of chunk) {
+      const market = await fetchMarketSafe({ market_id: pick.market_id, event_slug: pick.event_slug });
+      if (!market) continue;
+
+      const normalized = (() => {
+        const trimmed = pick.picked_outcome?.trim() || "UNKNOWN";
+        const upper = trimmed.toUpperCase();
+        if (market?.outcomes?.length === 2 && market.sportsMarketType === "moneyline") {
+          const [team0, team1] = market.outcomes;
+          if (upper === "YES" || upper === "OVER") return team0;
+          if (upper === "NO" || upper === "UNDER") return team1;
+          if (team0.toUpperCase() === upper) return team0;
+          if (team1.toUpperCase() === upper) return team1;
+          return trimmed;
+        }
+        return Array.isArray(market?.outcomes)
+          ? market.outcomes.find(o => o.toUpperCase() === upper) || trimmed
+          : trimmed;
+      })();
+
+      const resolved = pick.resolved_outcome || market.outcome || null;
+      const outcome = resolved ? normalized === resolved ? "WIN" : "LOSS" : "PENDING";
+      const side = normalized === market.outcomes?.[0] ? "BUY" : "SELL";
+
+      updates.push({
+        id: pick.id,
+        picked_outcome: normalized,
+        outcome,
+        side
+      });
+    }
+
+    if (updates.length) {
+      // Batch upsert/update
+      const { error: updateError } = await supabase
+        .from("wallet_live_picks")
+        .upsert(updates, { onConflict: ["id"] });
+
+      if (updateError) {
+        console.error("❌ Failed batch update:", updateError);
+      } else {
+        console.log(`✅ Updated batch ${i + 1} - ${i + updates.length}`);
+      }
+    }
+  }
+
+  console.log("✅ All picks normalized in batches.");
+}
+
+// Run the batch patch
+normalizeExistingPicksBatch().catch(err => console.error(err));
 
 /* ===========================
    Fetch Wallet Activity (DATA-API, Robust)

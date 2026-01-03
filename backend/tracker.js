@@ -12,7 +12,7 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = "-4911183253";
 const TIMEZONE = process.env.TIMEZONE || "America/New_York";
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || "30000", 10);
-const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "10", 10);
+const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "11", 10);
 const FORCE_SEND = process.env.FORCE_SEND === "true";
 const RESULT_EMOJIS = { WIN: "✅", LOSS: "❌", Pending: "⚪" };
 
@@ -24,11 +24,11 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
    Confidence thresholds (Top-level)
 =========================== */
 const CONFIDENCE_THRESHOLDS = {
-  "⭐": 10,
-  "⭐⭐": 20,
-  "⭐⭐⭐": 30,
-  "⭐⭐⭐⭐": 40,
-  "⭐⭐⭐⭐⭐": 50
+  "⭐": 11,
+  "⭐⭐": 22,
+  "⭐⭐⭐": 33,
+  "⭐⭐⭐⭐": 44,
+  "⭐⭐⭐⭐⭐": 55
 };
 
 /* ===========================
@@ -1493,37 +1493,47 @@ async function getWalletNetPick(walletId, eventSlug) {
    Send Signals to Telegram + Notes
 =========================== */
 async function processAndSendSignals() {
-  const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "5", 10);
-  const FORCE_SEND = false;
+  const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "15", 10);
+  const FORCE_SEND = process.env.FORCE_SEND === "true";
 
   const { data: livePicks, error } = await supabase
     .from("wallet_live_picks")
     .select("*")
-    .is("resolved_outcome", null); // only unresolved
+    .is("resolved_outcome", null); // only unresolved picks
 
   if (error) return console.error("❌ Failed fetching wallet_live_picks:", error.message);
   if (!livePicks?.length) return;
 
   for (const pick of livePicks) {
-    if (!pick.wallets || pick.wallets.length === 0) continue;
-    if (pick.vote_count < MIN_WALLETS_FOR_SIGNAL) continue;
-    if (pick.signal_sent_at && !FORCE_SEND) continue;
+    // skip picks with no wallets
+    if (!pick.wallets?.length) continue;
+
+    // skip picks below minimum wallets
+    if (pick.vote_count < MIN_WALLETS_FOR_SIGNAL && !FORCE_SEND) continue;
 
     const numericConfidence = pick.confidence || pick.vote_count;
+
+    // skip picks below 1-star confidence unless forcing
+    if (numericConfidence < CONFIDENCE_THRESHOLDS["⭐"] && !FORCE_SEND) continue;
+
+    // skip if already sent and not forcing
+    if (pick.signal_sent_at && !FORCE_SEND) continue;
+
     const confidenceEmoji = getConfidenceEmoji(numericConfidence);
     const eventName = pick.market_name || pick.event_slug || "UNKNOWN";
 
-    // Fix link
+    // Fix event link
     let eventUrl = pick.market_url || "";
     if (eventUrl.includes("/markets/")) {
       eventUrl = eventUrl.replace("/markets/", "/event/");
     }
 
+    // Event start time
     const eventTime = pick.event_start_at || pick.gameStartTime
       ? new Date(pick.event_start_at || pick.gameStartTime).toLocaleString()
       : "N/A";
 
-    // Telegram Markdown link
+    // Telegram Markdown
     const text = `⚡️ NEW MARKET PREDICTION
 Market Event: [${eventName}](${eventUrl})
 Event Start: ${eventTime}
@@ -1554,35 +1564,43 @@ Confidence: ${confidenceEmoji}`;
    Send Results to Telegram + Notes
 =========================== */
 async function processAndSendResults() {
+  const FORCE_SEND = process.env.FORCE_SEND === "true";
+
   const { data: resolvedPicks, error } = await supabase
     .from("wallet_live_picks")
     .select("*")
-    .not("resolved_outcome", "is", null);
+    .not("resolved_outcome", "is", null); // only resolved picks
 
   if (error) return console.error("❌ Failed fetching resolved picks:", error.message);
   if (!resolvedPicks?.length) return;
 
   for (const pick of resolvedPicks) {
-    if (!pick.signal_sent_at) continue;
-    if (pick.result_sent_at) continue;
+    // Skip picks with no signal sent, unless forcing
+    if (!pick.signal_sent_at && !FORCE_SEND) continue;
+
+    // Skip picks whose result has already been sent, unless forcing
+    if (pick.result_sent_at && !FORCE_SEND) continue;
 
     const resolvedOutcome = pick.resolved_outcome;
     const outcome = pick.outcome || (pick.picked_outcome === resolvedOutcome ? "WIN" : "LOSS");
+
     const numericConfidence = pick.confidence || pick.vote_count;
     const confidenceEmoji = getConfidenceEmoji(numericConfidence);
     const outcomeEmoji = outcome === "WIN" ? "✅" : "❌";
     const eventName = pick.market_name || pick.event_slug || "UNKNOWN";
 
-    // Fix link
+    // Fix event link
     let eventUrl = pick.market_url || "";
     if (eventUrl.includes("/markets/")) {
       eventUrl = eventUrl.replace("/markets/", "/event/");
     }
 
+    // Event start time
     const eventTime = pick.event_start_at || pick.gameStartTime
       ? new Date(pick.event_start_at || pick.gameStartTime).toLocaleString()
       : "N/A";
 
+    // Telegram Markdown
     const text = `⚡️ RESULT FOR MARKET PREDICTION
 Market Event: [${eventName}](${eventUrl})
 Event Start: ${eventTime}

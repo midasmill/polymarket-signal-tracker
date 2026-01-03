@@ -1374,6 +1374,95 @@ Outcome: ${pick.outcome} ${outcomeEmoji}
 }
 
 /* ===========================
+   Notes Update Helper Daily Summary
+=========================== */
+async function sendDailySummaryToNotes(slug = "midas-sports") {
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  const yesterdayStr = yesterday.toLocaleDateString();
+
+  // --- Fetch yesterday's picks ---
+  const { data: yesterdayPicks, error: yesterdayError } = await supabase
+    .from("wallet_live_picks")
+    .select("picked_outcome, resolved_outcome, confidence")
+    .gte("resolved_at", new Date(yesterday.setHours(0, 0, 0, 0)).toISOString())
+    .lte(new Date(yesterday.setHours(23, 59, 59, 999)).toISOString());
+
+  if (yesterdayError) return console.error("❌ Failed fetching yesterday picks:", yesterdayError.message);
+
+  let winsYesterday = 0;
+  let lossesYesterday = 0;
+  let pendingYesterday = 0;
+  const confidenceCountYesterday = {};
+
+  yesterdayPicks.forEach(pick => {
+    if (pick.resolved_outcome === "WIN") winsYesterday++;
+    else if (pick.resolved_outcome === "LOSS") lossesYesterday++;
+    else pendingYesterday++;
+
+    const emoji = getConfidenceEmoji(pick.confidence || 0);
+    confidenceCountYesterday[emoji] = (confidenceCountYesterday[emoji] || 0) + 1;
+  });
+
+  // --- Fetch overall picks ---
+  const { data: allPicks, error: allError } = await supabase
+    .from("wallet_live_picks")
+    .select("picked_outcome, resolved_outcome");
+
+  if (allError) return console.error("❌ Failed fetching all picks:", allError.message);
+
+  let totalWins = 0;
+  let totalLosses = 0;
+  let totalPending = 0;
+
+  allPicks.forEach(pick => {
+    if (pick.resolved_outcome === "WIN") totalWins++;
+    else if (pick.resolved_outcome === "LOSS") totalLosses++;
+    else totalPending++;
+  });
+
+  const confidenceBreakdown = Object.entries(confidenceCountYesterday)
+    .map(([emoji, count]) => `${emoji} ${count}-${0}`) // can later track losses per star if desired
+    .join(" | ");
+
+  const summaryMessage = `📊 DAILY SUMMARY (Win-Loss-Pending)
+🗓 Yesterday (${yesterdayStr}): ✅ ${winsYesterday} - ❌ ${lossesYesterday} - ⚪ ${pendingYesterday}
+${confidenceBreakdown ? confidenceBreakdown : ""}
+📈 Overall: ✅ ${totalWins} - ❌ ${totalLosses} - ⚪ ${totalPending}
+⚡️ Signals sent yesterday: ${yesterdayPicks.length}`;
+
+  // --- Fetch current notes content ---
+  const { data: note } = await supabase
+    .from("notes")
+    .select("content")
+    .eq("slug", slug)
+    .maybeSingle();
+
+  let existingContent = note?.content || "";
+
+  // --- Replace previous summary at the top ---
+  const summaryRegex = /^📊 DAILY SUMMARY[\s\S]*?(?=\n\n|$)/;
+  if (summaryRegex.test(existingContent)) {
+    existingContent = existingContent.replace(summaryRegex, summaryMessage);
+  } else {
+    existingContent = `${summaryMessage}\n\n${existingContent}`;
+  }
+
+  // --- Update notes ---
+  await supabase
+    .from("notes")
+    .update({ content: existingContent, public: true })
+    .eq("slug", slug);
+
+  // --- Also send to Telegram ---
+  await sendTelegram(summaryMessage, false);
+
+  console.log("✅ Daily summary updated at the top of the notes page and sent to Telegram");
+}
+
+
+/* ===========================
    Wallet Metrics Update (Optimized)
    Rolling 3-day win rate
    Auto-pause / Auto-unpause
@@ -1639,6 +1728,102 @@ Outcome: ${outcome} ${outcomeEmoji}`;
 }
 
 /* ===========================
+   Send Daily Summary to Telegram + Notes (top of picks)
+=========================== */
+async function sendDailySummaryToNotes(slug = "midas-sports") {
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  const yesterdayStr = yesterday.toLocaleDateString();
+
+  // --- Fetch yesterday's picks ---
+  const { data: yesterdayPicks, error: yesterdayError } = await supabase
+    .from("wallet_live_picks")
+    .select("picked_outcome, resolved_outcome, confidence")
+    .gte("resolved_at", new Date(yesterday.setHours(0, 0, 0, 0)).toISOString())
+    .lte(new Date(yesterday.setHours(23, 59, 59, 999)).toISOString());
+
+  if (yesterdayError) return console.error("❌ Failed fetching yesterday picks:", yesterdayError.message);
+
+  let winsYesterday = 0;
+  let lossesYesterday = 0;
+  let pendingYesterday = 0;
+  const confidenceCountYesterday = {};
+
+  yesterdayPicks.forEach(pick => {
+    if (pick.resolved_outcome === "WIN") winsYesterday++;
+    else if (pick.resolved_outcome === "LOSS") lossesYesterday++;
+    else pendingYesterday++;
+
+    const emoji = getConfidenceEmoji(pick.confidence || 0);
+    confidenceCountYesterday[emoji] = (confidenceCountYesterday[emoji] || 0) + 1;
+  });
+
+  // --- Fetch overall picks ---
+  const { data: allPicks, error: allError } = await supabase
+    .from("wallet_live_picks")
+    .select("picked_outcome, resolved_outcome");
+
+  if (allError) return console.error("❌ Failed fetching all picks:", allError.message);
+
+  let totalWins = 0;
+  let totalLosses = 0;
+  let totalPending = 0;
+
+  allPicks.forEach(pick => {
+    if (pick.resolved_outcome === "WIN") totalWins++;
+    else if (pick.resolved_outcome === "LOSS") totalLosses++;
+    else totalPending++;
+  });
+
+  const confidenceBreakdown = Object.entries(confidenceCountYesterday)
+    .map(([emoji, count]) => `${emoji} ${count}-${0}`)
+    .join(" | ");
+
+  // --- Compose summary message ---
+  const summaryMessage = `📊 DAILY SUMMARY (Win-Loss-Pending)
+🗓 Yesterday (${yesterdayStr}): ✅ ${winsYesterday} - ❌ ${lossesYesterday} - ⚪ ${pendingYesterday}
+${confidenceBreakdown ? confidenceBreakdown : ""}
+📈 Overall: ✅ ${totalWins} - ❌ ${totalLosses} - ⚪ ${totalPending}
+⚡️ Signals sent yesterday: ${yesterdayPicks.length}`;
+
+  // --- Log summary for Render ---
+  console.log("📝 Daily Summary:\n", summaryMessage);
+
+  try {
+    // --- Fetch current note content ---
+    const { data: note } = await supabase
+      .from("notes")
+      .select("content")
+      .eq("slug", slug)
+      .maybeSingle();
+
+    let existingContent = note?.content || "";
+
+    // --- Replace previous summary at top ---
+    const summaryRegex = /^📊 DAILY SUMMARY[\s\S]*?(?=\n\n|$)/;
+    if (summaryRegex.test(existingContent)) {
+      existingContent = existingContent.replace(summaryRegex, summaryMessage);
+    } else {
+      existingContent = `${summaryMessage}\n\n${existingContent}`;
+    }
+
+    // --- Update notes page ---
+    await supabase
+      .from("notes")
+      .update({ content: existingContent, public: true })
+      .eq("slug", slug);
+
+    // --- Send to Telegram ---
+    await sendTelegram(summaryMessage, false);
+
+    console.log("✅ Daily summary updated at the top of notes and sent to Telegram");
+  } catch (err) {
+    console.error("❌ Failed sending daily summary:", err.message);
+  }
+}
+
+/* ===========================
    Force Resolve Pending Markets
 =========================== */
 async function forceResolvePendingMarkets() {
@@ -1798,18 +1983,23 @@ async function main() {
   // Continuous polling
   setInterval(trackerLoop, POLL_INTERVAL);
 
-  // Daily cron: leaderboard refresh + rebuild picks
-  cron.schedule("0 7 * * *", async () => {
-    console.log("📅 Daily cron running...");
-    try {
-      await fetchAndInsertLeaderboardWallets(safeInsert);
-      await trackerLoop();
-      await rebuildWalletLivePicks(true); // force rebuild preserves resolved outcomes
-    } catch (err) {
-      console.error("❌ Daily cron failed:", err);
-    }
-  }, { timezone: TIMEZONE });
+// Daily cron: leaderboard refresh + rebuild picks + daily summary
+cron.schedule("0 7 * * *", async () => {
+  console.log("📅 Daily cron running...");
+  try {
+    // --- Refresh leaderboard and wallet picks ---
+    await fetchAndInsertLeaderboardWallets(safeInsert);
+    await trackerLoop();
+    await rebuildWalletLivePicks(true); // force rebuild preserves resolved outcomes
 
+    // --- Send daily summary to top of notes + Telegram ---
+    await sendDailySummaryToNotes("midas-sports");
+
+  } catch (err) {
+    console.error("❌ Daily cron failed:", err);
+  }
+}, { timezone: TIMEZONE });
+   
   // Heartbeat
   setInterval(() => console.log(`[HEARTBEAT] Tracker alive @ ${new Date().toISOString()}`), 60_000);
 }

@@ -1262,31 +1262,31 @@ async function safeRebuildLivePicks(forceRebuild = false) {
 }
 
 /* ===========================
-   Notes Update Helper (with clickable event name + proper line breaks)
+   Notes Update Helper (Markdown version)
 =========================== */
 async function updateNotes(slug, pick, confidenceEmoji) {
   const eventName = pick.market_name || pick.event_slug || "UNKNOWN";
 
-  // Fix Polymarket URL
+  // Polymarket URL fix
   let eventUrl = pick.market_url || "";
   if (eventUrl.includes("/markets/")) {
     eventUrl = eventUrl.replace("/markets/", "/event/");
   }
 
-  // HTML hyperlink for event name
-  const eventLink = eventUrl ? `<a href="${eventUrl}" target="_blank">${eventName}</a>` : eventName;
+  // Markdown link
+  const eventLink = eventUrl ? `[${eventName}](${eventUrl})` : eventName;
 
   const eventTime = pick.event_start_at || pick.gameStartTime
     ? new Date(pick.event_start_at || pick.gameStartTime).toLocaleString()
     : "N/A";
 
-  const text = `<div>
-⚡️ NEW MARKET PREDICTION<br>
-Market Event: ${eventLink}<br>
-Event Start: ${eventTime}<br>
-Prediction: ${pick.picked_outcome || "UNKNOWN"}<br>
+  const text = `
+⚡️ **NEW MARKET PREDICTION**  
+Market Event: ${eventLink}  
+Event Start: ${eventTime}  
+Prediction: ${pick.picked_outcome || "UNKNOWN"}  
 Confidence: ${confidenceEmoji}
-</div>`;
+`.trim();
 
   // Fetch current note content
   const { data: note } = await supabase
@@ -1296,7 +1296,7 @@ Confidence: ${confidenceEmoji}
     .maybeSingle();
 
   let newContent = note?.content || "";
-  newContent += newContent ? `<br><br>${text}` : text;
+  newContent += newContent ? `\n\n${text}` : text;
 
   await supabase
     .from("notes")
@@ -1304,9 +1304,8 @@ Confidence: ${confidenceEmoji}
     .eq("slug", slug);
 }
 
-
 /* ===========================
-   Notes Update Helper (Result, replaces previous prediction)
+   Notes Update Helper with Result (Markdown)
 =========================== */
 async function updateNotesWithResult(slug, pick, confidenceEmoji) {
   const outcomeEmoji =
@@ -1316,26 +1315,26 @@ async function updateNotesWithResult(slug, pick, confidenceEmoji) {
 
   const eventName = pick.market_name || pick.event_slug || "UNKNOWN";
 
-  // Fix Polymarket URL
+  // Polymarket URL fix
   let eventUrl = pick.market_url || "";
   if (eventUrl.includes("/markets/")) {
     eventUrl = eventUrl.replace("/markets/", "/event/");
   }
 
-  const eventLink = eventUrl ? `<a href="${eventUrl}" target="_blank">${eventName}</a>` : eventName;
+  const eventLink = eventUrl ? `[${eventName}](${eventUrl})` : eventName;
 
   const eventTime = pick.event_start_at || pick.gameStartTime
     ? new Date(pick.event_start_at || pick.gameStartTime).toLocaleString()
     : "N/A";
 
-  const resultText = `<div>
-⚡️ RESULT FOR MARKET PREDICTION<br>
-Market Event: ${eventLink}<br>
-Event Start: ${eventTime}<br>
-Prediction: ${pick.picked_outcome || "UNKNOWN"}<br>
-Confidence: ${confidenceEmoji}<br>
+  const resultText = `
+⚡️ **RESULT FOR MARKET PREDICTION**  
+Market Event: ${eventLink}  
+Event Start: ${eventTime}  
+Prediction: ${pick.picked_outcome || "UNKNOWN"}  
+Confidence: ${confidenceEmoji}  
 Outcome: ${pick.outcome} ${outcomeEmoji}
-</div>`;
+`.trim();
 
   // Fetch current note content
   const { data: note } = await supabase
@@ -1346,19 +1345,19 @@ Outcome: ${pick.outcome} ${outcomeEmoji}
 
   let newContent = note?.content || "";
 
-  // Regex to find previous NEW MARKET PREDICTION block for this pick
+  // Replace previous NEW MARKET PREDICTION for this pick
   const escapedEvent = eventName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const escapedOutcome = (pick.picked_outcome || "UNKNOWN").replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
   const regex = new RegExp(
-    `⚡️ NEW MARKET PREDICTION[\\s\\S]*?Market Event: .*${escapedEvent}.*\\s*Prediction: ${escapedOutcome}[\\s\\S]*?(?=(<br><br>⚡️|$))`,
+    `⚡️ \\*\\*NEW MARKET PREDICTION\\*\\*[\\s\\S]*?Market Event: .*${escapedEvent}.*\\s*Prediction: ${escapedOutcome}[\\s\\S]*?(?=(\\n\\n⚡️|$))`,
     "g"
   );
 
   if (regex.test(newContent)) {
     newContent = newContent.replace(regex, resultText);
   } else {
-    newContent += newContent ? `<br><br>${resultText}` : resultText;
+    newContent += newContent ? `\n\n${resultText}` : resultText;
   }
 
   await supabase

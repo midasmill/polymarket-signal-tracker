@@ -2,6 +2,7 @@
    Market NO Extremes Scanner
    ADD-ON MODULE (CORRECTED)
 =========================== */
+console.log("🟢 Market NO Extremes script loaded");
 
 import fetch from "node-fetch";
 

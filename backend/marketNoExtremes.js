@@ -43,7 +43,7 @@ export async function runMarketNoExtremes(supabase, sendToNotes) {
     console.log(`🔹 Fetched ${markets.length} markets`);
 
     // ------------------------------
-    // FILTER markets: YES ≥ 90% OR NO ≤ 10%
+    // FILTER markets: YES ≥ 90% OR NO ≤ 10% AND not expired
     // ------------------------------
     const filtered = markets.filter(m => {
       if (!m.active) return false;
@@ -55,11 +55,14 @@ export async function runMarketNoExtremes(supabase, sendToNotes) {
       const yesPrice = Number(prices[0]);
       const noPrice = Number(prices[1]);
 
-      // Overhyped: already filtered by volume & liquidity in API
+      // Hours to resolution
+      const hoursLeft = m.endDate ? ((new Date(m.endDate) - now) / 1000 / 3600) : -1;
+      if (hoursLeft <= 0) return false; // skip expired markets
+
       return yesPrice >= YES_MIN || noPrice <= NO_MAX;
     });
 
-    console.log(`🔹 ${filtered.length} markets passed extremes filter`);
+    console.log(`🔹 ${filtered.length} markets passed extremes filter (active & valid)`);
 
     if (!filtered.length) return;
 
@@ -73,6 +76,8 @@ export async function runMarketNoExtremes(supabase, sendToNotes) {
       const yesPrice = Number(prices[0] || 0);
       const noPrice = Number(prices[1] || 0);
 
+      const hoursLeft = m.endDate ? ((new Date(m.endDate) - now) / 1000 / 3600) : null;
+
       const insertData = {
         polymarket_id: parseInt(m.id),
         condition_id: m.conditionId || null,
@@ -84,7 +89,7 @@ export async function runMarketNoExtremes(supabase, sendToNotes) {
         category: null,
         event_start_at: m.startDate ? new Date(m.startDate) : null,
         market_end_at: m.endDate ? new Date(m.endDate) : null,
-        hours_to_resolution: m.endDate ? ((new Date(m.endDate) - now) / 1000 / 3600).toFixed(2) : null,
+        hours_to_resolution: hoursLeft,
         yes_price: yesPrice,
         no_price: noPrice,
         volume: m.volumeNum ? Number(m.volumeNum) : null,

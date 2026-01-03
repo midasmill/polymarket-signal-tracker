@@ -1107,12 +1107,33 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     });
   }
 
-  // --- Upsert safely ---
-  await safeInsert("wallet_live_picks", finalLive, { upsertColumns: ["market_id", "picked_outcome"] });
-  await safeInsert("wallet_live_pending", finalPending);
+   // --- Upsert live picks (correct) ---
+await safeInsert(
+  "wallet_live_picks",
+  finalLive,
+  { upsertColumns: ["market_id", "picked_outcome"] }
+);
 
-  console.log(`✅ Rebuilt wallet picks: ${finalLive.length} live, ${finalPending.length} pending`);
+// --- Rebuild pending picks (DELETE → INSERT, no upsert) ---
+await supabase
+  .from("wallet_live_pending")
+  .delete()
+  .neq("id", 0);
+
+if (finalPending.length) {
+  const { error } = await supabase
+    .from("wallet_live_pending")
+    .insert(finalPending);
+
+  if (error) {
+    console.error("❌ Failed inserting wallet_live_pending:", error);
+  }
 }
+
+console.log(
+  `✅ Rebuilt wallet picks: ${finalLive.length} live, ${finalPending.length} pending`
+);
+
 
 /* ===========================
    Batch Normalize Wallet Live Picks

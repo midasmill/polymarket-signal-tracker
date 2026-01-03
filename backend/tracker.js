@@ -986,7 +986,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       marketInfoMap.set(sig.market_id, {
         market_name: market?.question || sig.market_name || "UNKNOWN",
         event_slug: market?.slug || sig.event_slug || "UNKNOWN",
-        resolved_outcome: sig.resolved_outcome || market?.outcome || null, // keep null if unresolved
+        resolved_outcome: sig.resolved_outcome || getResolvedOutcomeFromMarket(market) || null,
         polymarket_id: sig.polymarket_id ? Number(sig.polymarket_id) : null,
         market_url: market?.slug ? `https://polymarket.com/event/${market.slug}` : null,
         outcomes: market?.outcomes || [],
@@ -1107,6 +1107,18 @@ for (const [key, dominantOutcome] of walletDominantMap.entries()) {
   );
 
   console.log(`✅ Rebuilt wallet picks: ${finalLive.length} live`);
+}
+
+/* ===========================
+   Resolved Outcome from Market
+=========================== */
+function getResolvedOutcomeFromMarket(market) {
+  if (!market?.events?.length) return null;
+  const event = market.events[0];
+  if (!event.ended || !event.score) return null;
+  const [score0, score1] = event.score.split("-").map(Number);
+  if (!market.outcomes?.length === 2) return null;
+  return score0 > score1 ? market.outcomes[0] : market.outcomes[1];
 }
 
 /* ===========================

@@ -15,15 +15,13 @@ export async function runMarketNoExtremes(supabase, sendToNotes) {
 
   try {
     const NO_MAX = 0.10;       // NO ≤ 10%
-    const MIN_VOLUME = 100000; // overhyped threshold
-    const MIN_LIQUIDITY = 50000;
-
-    const now = Date.now();
+    const MIN_VOLUME = 10000;  // loosened to include smaller markets
+    const MIN_LIQUIDITY = 1000;
 
     // ------------------------------
     // FETCH markets from Polymarket Gamma API
     // ------------------------------
-    const url = `https://gamma-api.polymarket.com/markets?closed=false&volume_num_min=${MIN_VOLUME}&liquidity_num_min=${MIN_LIQUIDITY}&limit=200`;
+    const url = `https://gamma-api.polymarket.com/markets?closed=false&volume_num_min=${MIN_VOLUME}&liquidity_num_min=${MIN_LIQUIDITY}&limit=500`;
     console.log("🌐 Fetching markets from:", url);
 
     const res = await fetch(url);
@@ -41,22 +39,31 @@ export async function runMarketNoExtremes(supabase, sendToNotes) {
     console.log(`🔹 Fetched ${markets.length} markets`);
 
     // ------------------------------
+    // LOG all NO prices for debugging
+    // ------------------------------
+    markets.forEach(m => {
+      let prices = [];
+      try { prices = JSON.parse(m.outcomePrices || "[]"); } catch {}
+      console.log(m.slug, "NO:", prices[1] ? (prices[1]*100).toFixed(1)+"%" : "N/A");
+    });
+
+    // ------------------------------
     // FILTER markets (NO ≤ 10%)
     // ------------------------------
     const filtered = markets.filter(m => {
       if (!m.active) return false;
-
       let prices = [];
       try { prices = JSON.parse(m.outcomePrices || "[]"); } catch {}
-      if (!prices[1]) return false; // ensure NO exists
+      if (!prices[1]) return false;
       const noPrice = Number(prices[1]);
-
       return noPrice <= NO_MAX;
     });
 
     console.log(`🔹 ${filtered.length} markets passed NO ≤ 10% filter`);
 
     if (!filtered.length) return;
+
+    const now = Date.now();
 
     // ------------------------------
     // INSERT into Supabase

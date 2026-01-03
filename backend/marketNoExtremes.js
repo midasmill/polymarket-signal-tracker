@@ -1,6 +1,6 @@
 /* ===========================
    Market NO Extremes Scanner
-   DEBUG + PRODUCTION (NO ≤ 10%)
+   ADD-ON MODULE (SAFE)
 =========================== */
 
 import fetch from "node-fetch";
@@ -8,15 +8,12 @@ import fetch from "node-fetch";
 /**
  * Run the Market NO Extremes scanner
  * @param {import("@supabase/supabase-js").SupabaseClient} supabase
- * @param {function} sendToNotes - function to send formatted notes
+ * @param {function} sendToNotes - optional, function to send formatted notes
  */
 export async function runMarketNoExtremes(supabase, sendToNotes) {
   console.log("🟢 Market NO Extremes scanner started");
 
   try {
-    // ------------------------------
-    // SETTINGS
-    // ------------------------------
     const NO_MAX = 0.10;       // NO ≤ 10%
     const MIN_VOLUME = 100000; // overhyped threshold
     const MIN_LIQUIDITY = 50000;
@@ -44,16 +41,6 @@ export async function runMarketNoExtremes(supabase, sendToNotes) {
     console.log(`🔹 Fetched ${markets.length} markets`);
 
     // ------------------------------
-    // DEBUG: log every market's NO price
-    // ------------------------------
-    markets.forEach(m => {
-      let prices = [];
-      try { prices = JSON.parse(m.outcomePrices || "[]"); } catch {}
-      const noPrice = prices[1] ? Number(prices[1]) : null;
-      console.log(`${m.slug} → NO: ${noPrice}`);
-    });
-
-    // ------------------------------
     // FILTER markets (NO ≤ 10%)
     // ------------------------------
     const filtered = markets.filter(m => {
@@ -74,40 +61,52 @@ export async function runMarketNoExtremes(supabase, sendToNotes) {
     // ------------------------------
     // INSERT into Supabase
     // ------------------------------
-    const insertPromises = filtered.map(async (m, index) => {
-      const prices = JSON.parse(m.outcomePrices);
-      const noPrice = Number(prices[1]);
-      const yesPrice = Number(prices[0]);
+    for (let i = 0; i < filtered.length; i++) {
+      const m = filtered[i];
+      let prices = [];
+      try { prices = JSON.parse(m.outcomePrices || "[]"); } catch {}
+      const yesPrice = Number(prices[0] || 0);
+      const noPrice = Number(prices[1] || 0);
 
       const insertData = {
-        polymarket_id: m.id,
+        polymarket_id: parseInt(m.id),
+        condition_id: m.conditionId || null,
         market_id: m.id,
+        event_slug: m.slug,
         question: m.question,
         market_name: m.events?.[0]?.title || m.question,
-        no_price: noPrice,
+        market_type: null,
+        category: null,
+        event_start_at: m.startDate ? new Date(m.startDate) : null,
+        market_end_at: m.endDate ? new Date(m.endDate) : null,
+        hours_to_resolution: m.endDate ? ((new Date(m.endDate) - now) / 1000 / 3600).toFixed(2) : null,
         yes_price: yesPrice,
-        end_at: m.endDate,
+        no_price: noPrice,
+        volume: m.volumeNum ? Number(m.volumeNum) : null,
+        liquidity: m.liquidityNum ? Number(m.liquidityNum) : null,
+        open_interest: null,
+        is_active: m.active,
+        is_resolved: false
       };
 
       const { error } = await supabase
         .from("market_no_extremes")
         .insert([insertData]);
 
-      if (error) console.error("❌ Insert error for", m.slug, error);
+      if (error) console.error("❌ Insert error:", error, insertData);
       else console.log(`🟢 Inserted: ${m.slug}`);
-
-      return { index: index + 1, market: m, noPrice };
-    });
-
-    const results = await Promise.all(insertPromises);
+    }
 
     // ------------------------------
     // SEND formatted summary to Notes
     // ------------------------------
     if (sendToNotes) {
-      const summary = results.map(r => {
-        const link = `https://polymarket.com/market/${r.market.slug}`;
-        return `${r.index}. [${r.market.question}](${link})\n• NO: ${(r.noPrice * 100).toFixed(1)}%`;
+      const summary = filtered.map((m, idx) => {
+        let prices = [];
+        try { prices = JSON.parse(m.outcomePrices || "[]"); } catch {}
+        const noPrice = Number(prices[1] || 0);
+        const link = `https://polymarket.com/market/${m.slug}`;
+        return `${idx + 1}. [${m.question}](${link})\n• NO: ${(noPrice * 100).toFixed(1)}%`;
       }).join("\n\n");
 
       console.log("📝 Sending summary to Notes...");
@@ -115,6 +114,7 @@ export async function runMarketNoExtremes(supabase, sendToNotes) {
     }
 
     console.log("🔥 Market NO Extremes scanner finished");
+
   } catch (err) {
     console.error("🔥 Scanner error:", err);
   }

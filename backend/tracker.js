@@ -1548,35 +1548,40 @@ async function getWalletNetPick(walletId, eventSlug) {
 /* ===========================
    Send Signals to Telegram + Notes
 =========================== */
+/* ===========================
+   Send Signals to Telegram + Notes (Safe + No duplicates)
+=========================== */
 async function processAndSendSignals() {
   const FORCE_SEND = process.env.FORCE_SEND === "true";
 
+  // Fetch unresolved AND unsent picks
   const { data: livePicks, error } = await supabase
     .from("wallet_live_picks")
     .select("*")
-    .is("resolved_outcome", null); // only unresolved picks
+    .is("resolved_outcome", null)
+    .or(FORCE_SEND ? "" : "signal_sent_at.is.null"); // only picks not sent unless forcing
 
   if (error) return console.error("❌ Failed fetching wallet_live_picks:", error.message);
-  if (!livePicks?.length) return;
+  if (!livePicks?.length) return console.log("⚠️ No live picks to send signals for");
 
   for (const pick of livePicks) {
-    // skip picks below minimum vote_count unless forcing
+    // Skip picks below minimum vote_count unless forcing
     if (pick.vote_count < MIN_WALLETS_FOR_SIGNAL && !FORCE_SEND) {
-      console.log('Skipped: below min vote_count', pick.market_id, pick.vote_count);
+      console.log('Skipped: below min vote_count', pick.id, pick.vote_count);
       continue;
     }
 
     const numericConfidence = resolveNumericConfidence(pick);
 
-    // skip picks below 1-star confidence unless forcing
+    // Skip picks below 1-star confidence unless forcing
     if (numericConfidence < CONFIDENCE_THRESHOLDS["⭐"] && !FORCE_SEND) {
-      console.log('Skipped: below confidence', pick.market_id, numericConfidence);
+      console.log('Skipped: below confidence', pick.id, numericConfidence);
       continue;
     }
 
-    // skip if already sent and not forcing
+    // Skip if already sent and not forcing
     if (pick.signal_sent_at && !FORCE_SEND) {
-      console.log('Skipped: already sent', pick.market_id);
+      console.log('Skipped: already sent', pick.id);
       continue;
     }
 
@@ -1590,10 +1595,10 @@ async function processAndSendSignals() {
     }
 
     // Event start time
-const eventTime = formatEventTime(
-  pick.gameStartTime || pick.event_start_at,
-  inferTimezone(pick)
-);
+    const eventTime = formatEventTime(
+      pick.gameStartTime || pick.event_start_at,
+      inferTimezone(pick)
+    );
 
     // Telegram Markdown
     const text = `⚡️ NEW MARKET PREDICTION
@@ -1603,21 +1608,24 @@ Prediction: ${pick.picked_outcome || "UNKNOWN"}
 Confidence: ${confidenceEmoji}`;
 
     try {
+      // Send to Telegram
       await sendTelegram(text, false);
+
+      // Update notes
       await updateNotes("midas-sports", pick, confidenceEmoji);
 
+      // Mark as sent using unique row ID
       await supabase
         .from("wallet_live_picks")
         .update({
           last_confidence_sent: new Date(),
           signal_sent_at: pick.signal_sent_at || new Date()
         })
-        .eq("market_id", pick.market_id)
-        .eq("picked_outcome", pick.picked_outcome);
+        .eq("id", pick.id);
 
-      console.log(`🚀 Sent signal for market ${pick.market_id} (${pick.picked_outcome})`);
+      console.log(`🚀 Sent signal for market ${pick.id} (${pick.picked_outcome})`);
     } catch (err) {
-      console.error(`❌ Failed sending signal for market ${pick.market_id}:`, err.message);
+      console.error(`❌ Failed sending signal for market ${pick.id}:`, err.message);
     }
   }
 }

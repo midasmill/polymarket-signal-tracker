@@ -1692,11 +1692,9 @@ async function sendDailySummaryToNotes(slug = "midas-sports") {
     .join(" | ");
 
   // --- Compose summary message ---
-  const summaryMessage = `📊 DAILY SUMMARY (Win-Loss-Pending)
+  const summaryMessage = `📊 DAILY SUMMARY (W-L-P)
 🗓 Yesterday (${yesterdayStr}): ✅ ${winsYesterday} - ❌ ${lossesYesterday} - ⚪ ${pendingYesterday}
-${confidenceBreakdown ? confidenceBreakdown : ""}
-📈 Overall: ✅ ${totalWins} - ❌ ${totalLosses} - ⚪ ${totalPending}
-⚡️ Signals sent yesterday: ${yesterdayPicks.length}`;
+📈 Overall: ✅ ${totalWins} - ❌ ${totalLosses} - ⚪ ${totalPending}`;
 
   // --- Log summary for Render ---
   console.log("📝 Daily Summary:\n", summaryMessage);

@@ -1403,7 +1403,7 @@ Outcome: ${pick.outcome} ${outcomeEmoji}
    Auto-pause / Auto-unpause
    Single query for all wallets
 =========================== */
-async function updateWalletMetricsRolling3DOptimized() {
+async function updateWalletMetricsJS() {
   const ROLLING_DAYS = 3;
   const WIN_RATE_THRESHOLD = 50;
   const MIN_TOTAL_PICKS = 3;

@@ -918,15 +918,15 @@ if (Array.isArray(market.events) && market.events.length) {
 
 /* ===========================
    Rebuild Wallet Live Picks & Pending
-   (Patched: YES/NO normalized canonical picks + correct outcome)
+   (Resolved outcome handling fixed)
 =========================== */
 async function rebuildWalletLivePicks(forceRebuild = false) {
   const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "5", 10);
   const marketInfoMap = new Map();
 
-  // --- Outcome normalization ---
+  // --- Outcome normalization (only for actual strings) ---
   function normalizeOutcome(pickedOutcome, market) {
-    if (!pickedOutcome) return "UNKNOWN";
+    if (!pickedOutcome) return null; // keep null for unknown
     const trimmed = pickedOutcome.trim();
     const upper = trimmed.toUpperCase();
 
@@ -952,7 +952,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 
   // --- Determine outcome status ---
   function determineOutcomeStatus(pickedOutcome, resolvedOutcome) {
-    if (!resolvedOutcome) return "PENDING";
+    if (!resolvedOutcome) return "PENDING"; // null means unresolved
     return pickedOutcome === resolvedOutcome ? "WIN" : "LOSS";
   }
 
@@ -982,20 +982,21 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       marketInfoMap.set(sig.market_id, {
         market_name: market?.question || sig.market_name || "UNKNOWN",
         event_slug: market?.slug || sig.event_slug || "UNKNOWN",
-        resolved_outcome: sig.resolved_outcome || market?.outcome || null,
+        resolved_outcome: sig.resolved_outcome || market?.outcome || null, // keep null if unresolved
         polymarket_id: sig.polymarket_id ? Number(sig.polymarket_id) : null,
-        market_url: market?.slug ? `https://polymarket.com/event/${market.slug}` : null, // <- corrected link
+        market_url: market?.slug ? `https://polymarket.com/event/${market.slug}` : null,
         outcomes: market?.outcomes || [],
         sportsMarketType: market?.sportsMarketType || null,
         gameStartTime: sig.event_start_at || null,
-         score: market?.score || null // <- add this
+        score: market?.score || null
       });
     }
 
     const info = marketInfoMap.get(sig.market_id);
     const normalized = normalizeOutcome(sig.picked_outcome, info);
-    const key = `${sig.wallet_id}_${sig.market_id}`;
+    if (!normalized) continue; // skip unknown picks
 
+    const key = `${sig.wallet_id}_${sig.market_id}`;
     if (!walletMarketMap.has(key)) walletMarketMap.set(key, {});
     const walletEntry = walletMarketMap.get(key);
     walletEntry[normalized] = (walletEntry[normalized] || 0) + Number(sig.pnl || 0);
@@ -1017,7 +1018,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 
   // --- Aggregate wallet counts per market & outcome ---
   const marketNetPickMap = new Map();
-for (const [key, dominantOutcome] of walletDominantMap.entries()) {
+  for (const [key, dominantOutcome] of walletDominantMap.entries()) {
     const [wallet_id, market_id] = key.split("_");
     if (!marketNetPickMap.has(market_id)) marketNetPickMap.set(market_id, {});
     const outcomes = marketNetPickMap.get(market_id);
@@ -1026,11 +1027,11 @@ for (const [key, dominantOutcome] of walletDominantMap.entries()) {
     outcomes[dominantOutcome].walletIds.add(Number(wallet_id));
     outcomes[dominantOutcome].totalPnl += walletMarketMap.get(key)[dominantOutcome];
 
-    const info = marketInfoMap.get(market_id); // <- add this
+    const info = marketInfoMap.get(market_id);
     const side = determineSide(dominantOutcome, info);
     if (!outcomes[dominantOutcome].sideCounts) outcomes[dominantOutcome].sideCounts = {};
     outcomes[dominantOutcome].sideCounts[side] = (outcomes[dominantOutcome].sideCounts[side] || 0) + 1;
-}
+  }
 
   // --- Normalize YES/NO keys for moneyline ---
   for (const [market_id, outcomes] of marketNetPickMap.entries()) {
@@ -1060,9 +1061,11 @@ for (const [key, dominantOutcome] of walletDominantMap.entries()) {
       if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL) continue;
 
       const key = `${market_id}_${outcome}`;
-const canonicalOutcome = normalizeOutcome(outcome, info); // canonical pick
-const resolvedCanonical = normalizeOutcome(info?.resolved_outcome || (existingMap.get(key)?.resolved_outcome || null), info); // canonical resolved
-const status = determineOutcomeStatus(canonicalOutcome, resolvedCanonical);
+      const canonicalOutcome = normalizeOutcome(outcome, info);
+      const resolvedCanonical = info?.resolved_outcome
+        ? normalizeOutcome(info.resolved_outcome, info)
+        : existingMap.get(key)?.resolved_outcome || null; // keep null if unresolved
+      const status = determineOutcomeStatus(canonicalOutcome, resolvedCanonical);
 
       finalLive.push({
         market_id,
@@ -1072,119 +1075,36 @@ const status = determineOutcomeStatus(canonicalOutcome, resolvedCanonical);
         polymarket_id: info?.polymarket_id,
         market_url: info?.market_url,
         gameStartTime: info?.gameStartTime,
-        picked_outcome: canonicalOutcome, // <- store canonical
-resolved_outcome: resolvedCanonical,
-outcome: status,
+        picked_outcome: canonicalOutcome,
+        resolved_outcome: resolvedCanonical,
+        outcome: status,
         side: determineSide(canonicalOutcome, info),
         wallets: Array.from(data.walletIds),
         vote_count: data.walletIds.size,
         vote_counts: Object.fromEntries(Array.from(data.walletIds).map(id => [id, 1])),
-           side_counts: data.sideCounts || {}, // <-- add this
+        side_counts: data.sideCounts || {},
         pnl: Number(data.totalPnl),
-           score: info?.score || null, // <- add this
+        score: info?.score || null,
         fetched_at: new Date(),
         confidence: getConfidenceNumber(data.walletIds.size),
-        market_type: info?.sportsMarketType || "UNKNOWN" // <- added
+        market_type: info?.sportsMarketType || "UNKNOWN"
       });
     }
   }
 
-  // --- Build pending picks (deduplicated) ---
-  const finalPending = [];
-  const seenKeys = new Set();
-  for (const sig of signals.filter(s => s.wallet_id && s.market_id && !s.resolved_outcome)) {
-    const info = marketInfoMap.get(sig.market_id);
-    const normalized = normalizeOutcome(sig.picked_outcome, info);
-    const key = `${sig.market_id}_${sig.wallet_id}_${normalized}`;
-    if (seenKeys.has(key)) continue;
-    seenKeys.add(key);
+  // --- Upsert live picks ---
+  await safeInsert(
+    "wallet_live_picks",
+    finalLive,
+    { upsertColumns: ["market_id", "picked_outcome"] }
+  );
 
-    finalPending.push({
-      market_id: sig.market_id,
-      wallet_id: sig.wallet_id,
-      market_name: info?.market_name || "UNKNOWN",
-      event_slug: info?.event_slug || "UNKNOWN",
-      polymarket_id: sig.polymarket_id,
-      market_url: info?.market_url,
-      gameStartTime: info?.gameStartTime,
-      picked_outcome: normalized, // <- canonical
-      side: determineSide(normalized, info),
-      wallets: [sig.wallet_id],
-      vote_count: 1,
-      vote_counts: { [sig.wallet_id]: 1 },
-      pnl: Number(sig.pnl || 0),
-      outcome: "PENDING",
-      resolved_outcome: null,
-      fetched_at: new Date(),
-      confidence: getConfidenceNumber(1),
-      market_type: info?.sportsMarketType || "UNKNOWN" // <- added
-    });
-  }
-
-   // --- Upsert live picks (correct) ---
-await safeInsert(
-  "wallet_live_picks",
-  finalLive,
-  { upsertColumns: ["market_id", "picked_outcome"] }
-);
-
-// --- Rebuild pending picks safely ---
-await supabase
-  .from("wallet_live_pending")
-  .delete()
-  .neq("id", 0); // clear old pending picks
-
-// Deduplicate pending picks by the actual table constraint: market_id + picked_outcome
-const uniquePending = [];
-const pendingKeys = new Set();
-
-for (const sig of signals.filter(s => s.wallet_id && s.market_id && !s.resolved_outcome)) {
-  const info = marketInfoMap.get(sig.market_id);
-  const normalized = normalizeOutcome(sig.picked_outcome, info);
-  const key = `${sig.market_id}_${normalized}`; // match unique constraint
-
-  if (pendingKeys.has(key)) continue; // skip duplicates
-  pendingKeys.add(key);
-
-  uniquePending.push({
-    market_id: sig.market_id,
-    wallet_id: sig.wallet_id,
-    market_name: info?.market_name || "UNKNOWN",
-    event_slug: info?.event_slug || "UNKNOWN",
-    polymarket_id: sig.polymarket_id,
-    market_url: info?.market_url,
-    gameStartTime: info?.gameStartTime,
-    picked_outcome: normalized,
-    side: determineSide(normalized, info),
-    wallets: [sig.wallet_id],
-    vote_count: 1,
-    vote_counts: { [sig.wallet_id]: 1 },
-    pnl: Number(sig.pnl || 0),
-    outcome: "PENDING",
-    resolved_outcome: null,
-    fetched_at: new Date(),
-    confidence: getConfidenceNumber(1),
-    market_type: info?.sportsMarketType || "UNKNOWN"
-  });
+  console.log(`✅ Rebuilt wallet picks: ${finalLive.length} live`);
 }
-
-// Insert deduplicated pending picks using safeInsert (avoids Postgres conflicts)
-if (uniquePending.length) {
-await safeInsert(
-  "wallet_live_pending",
-  uniquePending,
-  { upsertColumns: ["market_id", "picked_outcome"] } // matches table constraint
-);
-}
-
-console.log(
-  `✅ Rebuilt wallet picks: ${finalLive.length} live, ${uniquePending.length} pending`
-);
-} 
 
 /* ===========================
    Batch Normalize Wallet Live Picks
-   (UPDATE-based, constraint-safe)
+   (Constraint-safe, resolved outcome fixed)
 =========================== */
 async function normalizeExistingPicksBatch(batchSize = 100) {
   const { data: picks, error } = await supabase
@@ -1203,6 +1123,31 @@ async function normalizeExistingPicksBatch(batchSize = 100) {
 
   console.log(`🔹 Normalizing ${picks.length} picks in batches of ${batchSize}...`);
 
+  // --- Outcome normalization helper ---
+  function normalizeOutcome(pickedOutcome, market) {
+    if (!pickedOutcome) return null; // keep unresolved as null
+    const trimmed = pickedOutcome.trim();
+    const upper = trimmed.toUpperCase();
+
+    if (market?.outcomes?.length === 2 && market.sportsMarketType === "moneyline") {
+      const [team0, team1] = market.outcomes;
+      if (upper === "YES" || upper === "OVER") return team0;
+      if (upper === "NO" || upper === "UNDER") return team1;
+      if (team0.toUpperCase() === upper) return team0;
+      if (team1.toUpperCase() === upper) return team1;
+    }
+
+    return Array.isArray(market?.outcomes)
+      ? market.outcomes.find(o => o.toUpperCase() === upper) || trimmed
+      : trimmed;
+  }
+
+  // --- Determine outcome status ---
+  function determineOutcomeStatus(pickedOutcome, resolvedOutcome) {
+    if (!resolvedOutcome) return "PENDING";
+    return pickedOutcome === resolvedOutcome ? "WIN" : "LOSS";
+  }
+
   for (let i = 0; i < picks.length; i += batchSize) {
     const chunk = picks.slice(i, i + batchSize);
 
@@ -1215,43 +1160,31 @@ async function normalizeExistingPicksBatch(batchSize = 100) {
       if (!market) continue;
 
       // --- Normalize picked outcome ---
-      const normalized = (() => {
-        const trimmed = pick.picked_outcome?.trim() || "UNKNOWN";
-        const upper = trimmed.toUpperCase();
-
-        if (market?.outcomes?.length === 2 && market.sportsMarketType === "moneyline") {
-          const [team0, team1] = market.outcomes;
-          if (upper === "YES" || upper === "OVER") return team0;
-          if (upper === "NO" || upper === "UNDER") return team1;
-          if (team0.toUpperCase() === upper) return team0;
-          if (team1.toUpperCase() === upper) return team1;
-        }
-
-        return Array.isArray(market?.outcomes)
-          ? market.outcomes.find(o => o.toUpperCase() === upper) || trimmed
-          : trimmed;
-      })();
+      const normalized = normalizeOutcome(pick.picked_outcome, market);
+      if (!normalized) continue; // skip unknown
 
       // --- Resolve outcome ---
-      const resolved = pick.resolved_outcome || market.outcome || null;
-      const outcome = resolved
-        ? normalized === resolved ? "WIN" : "LOSS"
-        : "PENDING";
+      const resolvedCanonical = pick.resolved_outcome
+        ? normalizeOutcome(pick.resolved_outcome, market)
+        : market.outcome || null; // keep null if unresolved
+
+      const status = determineOutcomeStatus(normalized, resolvedCanonical);
 
       const side =
         market?.outcomes?.length === 2
           ? normalized === market.outcomes[0] ? "BUY" : "SELL"
           : null;
 
-      // --- UPDATE (not upsert) ---
+      // --- UPDATE pick (constraint-safe) ---
       const { error: updateError } = await supabase
         .from("wallet_live_picks")
         .update({
           picked_outcome: normalized,
-          outcome,
+          outcome: status,
           side,
+          resolved_outcome: resolvedCanonical,
           market_type: market?.sportsMarketType || "UNKNOWN",
-          score: market?.score || null // added score
+          score: market?.score || null
         })
         .eq("id", pick.id);
 

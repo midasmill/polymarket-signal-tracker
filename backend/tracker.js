@@ -2,11 +2,6 @@ import { createClient } from "@supabase/supabase-js";
 import fetch from "node-fetch";
 import cron from "node-cron";
 import http from "http";
-import { runMarketNoExtremes } from "./marketNoExtremes.js";
-
-// ADD-ON FEATURE (non-blocking)
-runMarketNoExtremes(supabase);
-
 
 /* ===========================
    ENV & CONFIG
@@ -71,6 +66,14 @@ http.createServer((req, res) => {
 =========================== */
 process.on("unhandledRejection", err => console.error("🔥 Unhandled rejection:", err));
 process.on("uncaughtException", err => console.error("🔥 Uncaught exception:", err));
+
+/* ===========================
+   ADD-ON FEATURE (SAFE)
+=========================== */
+import { runMarketNoExtremes } from "./marketNoExtremes.js";
+
+// Now supabase exists — call the function
+runMarketNoExtremes(supabase);
 
 /* ===========================
    Returns total $ amount picked per outcome for a wallet on a specific event

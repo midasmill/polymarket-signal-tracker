@@ -1679,7 +1679,6 @@ async function trackerLoop() {
   isTrackerRunning = true;
 
   try {
-    // 0️⃣ Check if signals table is empty → full rebuild if needed
     let forceRebuildSignals = true;
     try {
       const { data: allSignals, error: sigError } = await supabase.from("signals").select("id").limit(1);
@@ -1689,7 +1688,6 @@ async function trackerLoop() {
       forceRebuildSignals = true;
     }
 
-    // 1️⃣ Fetch all active wallets
     let wallets = [];
     try {
       const { data, error } = await supabase.from("wallets").select("*");
@@ -1700,53 +1698,16 @@ async function trackerLoop() {
       return;
     }
 
-    // 2️⃣ Track each wallet
     await Promise.allSettled(wallets.map(wallet =>
-      trackWallet(wallet, forceRebuildSignals)
-        .catch(err => console.error(`❌ Failed tracking wallet ${wallet.id}:`, err))
+      trackWallet(wallet, forceRebuildSignals).catch(err => console.error(`❌ Failed tracking wallet ${wallet.id}:`, err))
     ));
 
-    // 3️⃣ Force resolve pending markets **before rebuilding picks**
-    try {
-      await forceResolvePendingMarkets();
-    } catch (err) {
-      console.error("❌ Failed in forceResolvePendingMarkets:", err);
-    }
-
-    // 4️⃣ Rebuild wallet live picks and pending (preserves resolved)
-    try {
-      await rebuildWalletLivePicks(forceRebuildSignals);
-    } catch (err) {
-      console.error("❌ Failed rebuilding wallet live picks:", err);
-    }
-
-    // 5️⃣ Resolve markets
-    try {
-      await resolveMarkets();
-    } catch (err) {
-      console.error("❌ Failed in resolveMarkets:", err);
-    }
-
-    // 6️⃣ Process and send results
-    try {
-      await processAndSendResults();
-    } catch (err) {
-      console.error("❌ Failed in processAndSendResults:", err);
-    }
-
-    // 7️⃣ Process and send signals
-    try {
-      await processAndSendSignals();
-    } catch (err) {
-      console.error("❌ Failed in processAndSendSignals:", err);
-    }
-
-    // 8️⃣ Update wallet metrics
-    try {
-      await updateWalletMetricsJS();
-    } catch (err) {
-      console.error("❌ Failed in updateWalletMetricsJS:", err);
-    }
+    try { await forceResolvePendingMarkets(); } catch (err) { console.error("❌ Failed in forceResolvePendingMarkets:", err); }
+    try { await rebuildWalletLivePicks(forceRebuildSignals); } catch (err) { console.error("❌ Failed rebuilding wallet live picks:", err); }
+    try { await resolveMarkets(); } catch (err) { console.error("❌ Failed in resolveMarkets:", err); }
+    try { await processAndSendResults(); } catch (err) { console.error("❌ Failed in processAndSendResults:", err); }
+    try { await processAndSendSignals(); } catch (err) { console.error("❌ Failed in processAndSendSignals:", err); }
+    try { await updateWalletMetricsJS(); } catch (err) { console.error("❌ Failed in updateWalletMetricsJS:", err); }
 
   } catch (err) {
     console.error("❌ Tracker loop failed:", err);
@@ -1761,31 +1722,22 @@ async function trackerLoop() {
 async function main() {
   console.log("🚀 POLYMARKET TRACKER LIVE 🚀");
 
-  try {
-    await fetchAndInsertLeaderboardWallets(safeInsert);
-  } catch (err) {
-    console.error("❌ Failed initial leaderboard fetch:", err);
-  }
+  try { await fetchAndInsertLeaderboardWallets(safeInsert); } catch (err) { console.error("❌ Failed initial leaderboard fetch:", err); }
 
   await trackerLoop();
 
-  // Continuous polling
   setInterval(trackerLoop, POLL_INTERVAL);
 
-  // Daily cron: leaderboard refresh + rebuild picks
   cron.schedule("0 7 * * *", async () => {
     console.log("📅 Daily cron running...");
     try {
       await fetchAndInsertLeaderboardWallets(safeInsert);
       await trackerLoop();
-      await rebuildWalletLivePicks(true); // force rebuild preserves resolved outcomes
-    } catch (err) {
-      console.error("❌ Daily cron failed:", err);
-    }
+      await rebuildWalletLivePicks(true);
+    } catch (err) { console.error("❌ Daily cron failed:", err); }
   }, { timezone: TIMEZONE });
 
-  // Heartbeat
   setInterval(() => console.log(`[HEARTBEAT] Tracker alive @ ${new Date().toISOString()}`), 60_000);
 }
 
-main();
+main().catch(console.error);

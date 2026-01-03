@@ -1122,14 +1122,15 @@ await supabase
   .delete()
   .neq("id", 0); // clear old pending picks
 
-// Deduplicate pending picks by unique constraint: wallet_id + market_id + picked_outcome
+// Deduplicate pending picks by the actual table constraint: market_id + picked_outcome
 const uniquePending = [];
 const pendingKeys = new Set();
 
 for (const sig of signals.filter(s => s.wallet_id && s.market_id && !s.resolved_outcome)) {
   const info = marketInfoMap.get(sig.market_id);
   const normalized = normalizeOutcome(sig.picked_outcome, info);
-  const key = `${sig.wallet_id}_${sig.market_id}_${normalized}`; // matches unique constraint
+  const key = `${sig.market_id}_${normalized}`; // match unique constraint
+
   if (pendingKeys.has(key)) continue; // skip duplicates
   pendingKeys.add(key);
 
@@ -1157,11 +1158,11 @@ for (const sig of signals.filter(s => s.wallet_id && s.market_id && !s.resolved_
 
 // Insert deduplicated pending picks using safeInsert (avoids Postgres conflicts)
 if (uniquePending.length) {
-  await safeInsert(
-    "wallet_live_pending",
-    uniquePending,
-    { upsertColumns: ["wallet_id", "market_id", "picked_outcome"] } // <- must match your table's unique constraint
-  );
+await safeInsert(
+  "wallet_live_pending",
+  uniquePending,
+  { upsertColumns: ["market_id", "picked_outcome"] } // matches table constraint
+);
 }
 
 console.log(

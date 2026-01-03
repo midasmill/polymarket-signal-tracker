@@ -1135,6 +1135,7 @@ if (finalPending.length) {
 console.log(
   `✅ Rebuilt wallet picks: ${finalLive.length} live, ${finalPending.length} pending`
 );
+} 
 
 /* ===========================
    Batch Normalize Wallet Live Picks
@@ -1789,4 +1790,3 @@ async function main() {
 }
 
 main();
-;

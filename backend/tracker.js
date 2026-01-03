@@ -932,10 +932,26 @@ async function fetchMarketSafe({ event_slug, polymarket_id, market_id }, bypassC
 
     const market = await res.json();
 
-    // --- Normalize gameStartTime ---
-    // Many APIs use eventTime, startTime, or similar
-    market.gameStartTime =
-      market.gameStartTime || market.eventTime || market.startTime || null;
+// --- Normalize gameStartTime on fetch ---
+if (market.gameStartTime) {
+  // convert "2026-01-04 00:30:00+00" → "2026-01-04T00:30:00Z"
+  market.gameStartTime = market.gameStartTime
+    .replace(" ", "T")
+    .replace(/\+00$/, "Z"); // handle +00 at end
+} else if (market.events?.[0]?.startTime) {
+  market.gameStartTime = market.events[0].startTime
+    .replace(" ", "T")
+    .replace(/\+00$/, "Z");
+} else {
+  market.gameStartTime = null;
+}
+
+// --- Use it later safely ---
+const eventTime = formatEventTime(
+  market.gameStartTime,
+  inferTimezone(market)
+);
+
 
 // --- Extract score if available ---
 if (Array.isArray(market.events) && market.events.length) {

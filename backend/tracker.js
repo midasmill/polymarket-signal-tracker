@@ -1069,7 +1069,8 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
         outcome: status,
         resolved_outcome: resolvedOutcome,
         fetched_at: new Date(),
-        confidence: getConfidenceNumber(data.walletIds.size)
+        confidence: getConfidenceNumber(data.walletIds.size),
+        market_type: info?.sportsMarketType || "UNKNOWN" // <- added
       });
     }
   }
@@ -1101,7 +1102,8 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
       outcome: "PENDING",
       resolved_outcome: null,
       fetched_at: new Date(),
-      confidence: getConfidenceNumber(1)
+      confidence: getConfidenceNumber(1),
+      market_type: info?.sportsMarketType || "UNKNOWN" // <- added
     });
   }
 
@@ -1156,7 +1158,8 @@ async function normalizeExistingPicksBatch(batchSize = 100) {
         id: pick.id,
         picked_outcome: normalized,
         outcome,
-        side
+        side,
+        market_type: market?.sportsMarketType || "UNKNOWN" // <- added
       });
     }
 

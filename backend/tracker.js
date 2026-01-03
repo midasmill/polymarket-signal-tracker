@@ -1849,123 +1849,84 @@ async function forceResolvePendingMarkets() {
 =========================== */
 let isTrackerRunning = false;
 
+async function safeStep(stepName, fn) {
+  try { await fn(); } catch (err) { console.error(`❌ Failed in ${stepName}:`, err); }
+}
+
 async function trackerLoop() {
-  if (isTrackerRunning) return;
+  if (isTrackerRunning) return console.log("⏳ Tracker already running, skipping");
   isTrackerRunning = true;
 
   try {
-    // 0️⃣ Check if signals table is empty → full rebuild if needed
     let forceRebuildSignals = true;
     try {
       const { data: allSignals, error: sigError } = await supabase.from("signals").select("id").limit(1);
       if (!sigError) forceRebuildSignals = !allSignals?.length;
-    } catch (err) {
-      console.error("❌ Error checking signals:", err);
-      forceRebuildSignals = true;
-    }
+    } catch { forceRebuildSignals = true; }
 
-    // 1️⃣ Fetch all active wallets
     let wallets = [];
     try {
       const { data, error } = await supabase.from("wallets").select("*");
       if (!error && data?.length) wallets = data;
-      if (!wallets.length) return;
-    } catch (err) {
-      console.error("❌ Failed fetching wallets:", err);
-      return;
-    }
+      if (!wallets.length) return console.log("⚠️ No wallets found");
+    } catch { return; }
 
-    // 2️⃣ Track each wallet
     await Promise.allSettled(wallets.map(wallet =>
-      trackWallet(wallet, forceRebuildSignals)
-        .catch(err => console.error(`❌ Failed tracking wallet ${wallet.id}:`, err))
+      trackWallet(wallet, forceRebuildSignals).catch(err => console.error(`❌ Failed tracking wallet ${wallet.id}:`, err))
     ));
 
-    // 3️⃣ Force resolve pending markets **before rebuilding picks**
-    try {
-      await forceResolvePendingMarkets();
-    } catch (err) {
-      console.error("❌ Failed in forceResolvePendingMarkets:", err);
-    }
-
-    // 4️⃣ Rebuild wallet live picks and pending (preserves resolved)
-    try {
-      await rebuildWalletLivePicks(forceRebuildSignals);
-    } catch (err) {
-      console.error("❌ Failed rebuilding wallet live picks:", err);
-    }
-
-    // 5️⃣ Resolve markets
-    try {
-      await resolveMarkets();
-    } catch (err) {
-      console.error("❌ Failed in resolveMarkets:", err);
-    }
-
-    // 6️⃣ Process and send results
-    try {
-      await processAndSendResults();
-    } catch (err) {
-      console.error("❌ Failed in processAndSendResults:", err);
-    }
-
-    // 7️⃣ Process and send signals
-    try {
-      await processAndSendSignals();
-    } catch (err) {
-      console.error("❌ Failed in processAndSendSignals:", err);
-    }
-
-    // 8️⃣ Update wallet metrics
-    try {
-      await updateWalletMetricsRolling3DOptimized();
-    } catch (err) {
-      console.error("❌ Failed in updateWalletMetricsRolling3DOptimized:", err);
-    }
+    await safeStep("forceResolvePendingMarkets", forceResolvePendingMarkets);
+    await safeStep("rebuildWalletLivePicks", () => rebuildWalletLivePicks(forceRebuildSignals));
+    await safeStep("resolveMarkets", resolveMarkets);
+    await safeStep("processAndSendResults", processAndSendResults);
+    await safeStep("processAndSendSignals", processAndSendSignals);
+    await safeStep("updateWalletMetricsRolling3DOptimized", updateWalletMetricsRolling3DOptimized);
 
   } catch (err) {
     console.error("❌ Tracker loop failed:", err);
-  } finally {
-    isTrackerRunning = false;
-  }
+  } finally { isTrackerRunning = false; }
 }
 
 /* ===========================
-   Main Entry
+   Self-Polling
+=========================== */
+function startTracker() {
+  console.log(`🚀 Starting tracker loop, polling every ${POLL_INTERVAL / 1000}s`);
+  trackerLoop();
+  setInterval(trackerLoop, POLL_INTERVAL);
+
+  setInterval(() => console.log(`[HEARTBEAT] Tracker alive @ ${new Date().toISOString()}`), 60_000);
+}
+
+/* ===========================
+   Main Entry + Daily Cron
 =========================== */
 async function main() {
   console.log("🚀 POLYMARKET TRACKER LIVE 🚀");
 
-  try {
-    await fetchAndInsertLeaderboardWallets(safeInsert);
-  } catch (err) {
-    console.error("❌ Failed initial leaderboard fetch:", err);
-  }
+  try { await fetchAndInsertLeaderboardWallets(safeInsert); } 
+  catch (err) { console.error("❌ Failed initial leaderboard fetch:", err); }
 
-  await trackerLoop();
+  startTracker();
 
-  // Continuous polling
-  setInterval(trackerLoop, POLL_INTERVAL);
+  // Daily cron @ 7AM TZ
+  cron.schedule("0 7 * * *", async () => {
+    console.log("📅 Daily cron running...");
+    try {
+      await fetchAndInsertLeaderboardWallets(safeInsert);
+      await rebuildWalletLivePicks(true);
+      await trackerLoop();
+      await sendDailySummaryToNotes("midas-sports");
+    } catch (err) { console.error("❌ Daily cron failed:", err); }
+  }, { timezone: TIMEZONE });
 
-// Daily cron: leaderboard refresh + rebuild picks + daily summary
-cron.schedule("0 7 * * *", async () => {
-  console.log("📅 Daily cron running...");
-  try {
-    // --- Refresh leaderboard and wallet picks ---
-    await fetchAndInsertLeaderboardWallets(safeInsert);
-    await trackerLoop();
-    await rebuildWalletLivePicks(true); // force rebuild preserves resolved outcomes
-
-    // --- Send daily summary to top of notes + Telegram ---
-    await sendDailySummaryToNotes("midas-sports");
-
-  } catch (err) {
-    console.error("❌ Daily cron failed:", err);
-  }
-}, { timezone: TIMEZONE });
-   
-  // Heartbeat
-  setInterval(() => console.log(`[HEARTBEAT] Tracker alive @ ${new Date().toISOString()}`), 60_000);
+  // HTTP heartbeat for Render / uptime monitoring
+  http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("Polymarket tracker running\n");
+  }).listen(process.env.PORT || 3000, "0.0.0.0", () =>
+    console.log(`✅ HTTP server listening on port ${process.env.PORT || 3000}`)
+  );
 }
 
 main();

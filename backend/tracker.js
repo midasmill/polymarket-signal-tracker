@@ -928,49 +928,6 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "5", 10);
   const marketInfoMap = new Map();
 
-  // --- Helper: get resolved outcome from finished market ---
-  function getResolvedOutcomeFromMarket(market) {
-    if (!market?.events?.length) return null;
-    const event = market.events[0];
-    if (!event.ended || !event.score) return null;
-    const [score0, score1] = event.score.split("-").map(Number);
-    if (!market.outcomes?.length || market.outcomes.length !== 2) return null;
-    return score0 > score1 ? String(market.outcomes[0]) : String(market.outcomes[1]);
-  }
-
-  // --- Helper: ensure resolved outcome is string ---
-  function cleanResolvedOutcome(raw) {
-    if (!raw) return null;
-    let outcome = raw;
-    if (typeof raw === "string" && raw.trim().startsWith("[")) {
-      try {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) outcome = parsed[0];
-      } catch (e) {}
-    }
-    return String(outcome).trim();
-  }
-
-  // --- Outcome normalization ---
-  function normalizeOutcome(pickedOutcome, market) {
-    if (!pickedOutcome) return null;
-    const trimmed = String(pickedOutcome).trim();
-    const upper = trimmed.toUpperCase();
-
-    if (market?.outcomes?.length === 2 && market.sportsMarketType === "moneyline") {
-      const [team0, team1] = market.outcomes;
-      if (upper === "YES" || upper === "OVER") return team0;
-      if (upper === "NO" || upper === "UNDER") return team1;
-      if (team0.toUpperCase() === upper) return team0;
-      if (team1.toUpperCase() === upper) return team1;
-      return trimmed;
-    }
-
-    return Array.isArray(market?.outcomes)
-      ? market.outcomes.find(o => o.toUpperCase() === upper) || trimmed
-      : trimmed;
-  }
-
   // --- Determine BUY / SELL side ---
   function determineSide(outcome, market) {
     if (!market?.outcomes?.length) return "BUY";

@@ -1522,19 +1522,25 @@ async function processAndSendSignals() {
   if (!livePicks?.length) return;
 
   for (const pick of livePicks) {
-    // skip picks with no wallets
-    if (!pick.wallets?.length) continue;
-
-    // skip picks below minimum wallets
-    if (pick.vote_count < MIN_WALLETS_FOR_SIGNAL && !FORCE_SEND) continue;
+    // skip picks below minimum vote_count unless forcing
+    if (pick.vote_count < MIN_WALLETS_FOR_SIGNAL && !FORCE_SEND) {
+      console.log('Skipped: below min vote_count', pick.market_id, pick.vote_count);
+      continue;
+    }
 
     const numericConfidence = pick.confidence || pick.vote_count;
 
     // skip picks below 1-star confidence unless forcing
-    if (numericConfidence < CONFIDENCE_THRESHOLDS["⭐"] && !FORCE_SEND) continue;
+    if (numericConfidence < CONFIDENCE_THRESHOLDS["⭐"] && !FORCE_SEND) {
+      console.log('Skipped: below confidence', pick.market_id, numericConfidence);
+      continue;
+    }
 
     // skip if already sent and not forcing
-    if (pick.signal_sent_at && !FORCE_SEND) continue;
+    if (pick.signal_sent_at && !FORCE_SEND) {
+      console.log('Skipped: already sent', pick.market_id);
+      continue;
+    }
 
     const confidenceEmoji = getConfidenceEmoji(numericConfidence);
     const eventName = pick.market_name || pick.event_slug || "UNKNOWN";

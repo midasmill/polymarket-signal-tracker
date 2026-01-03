@@ -16,8 +16,8 @@ export async function runMarketNoExtremes(supabase, sendToNotes, sendToTelegram)
 
   try {
     const NO_MAX = 0.10;       // NO ≤ 10%
-    const MIN_VOLUME = 50000;  // Overhyped filter: minimum volume
-    const MIN_LIQUIDITY = 10000;
+    const MIN_VOLUME = 5000;  // Overhyped filter: minimum volume
+    const MIN_LIQUIDITY = 1000;
     const LIMIT = 500;
 
     const now = Date.now();

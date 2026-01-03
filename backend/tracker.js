@@ -624,10 +624,14 @@ async function trackWallet(wallet, forceRebuild = false) {
       }
     }
 
-    // Over / Under fallback
-    else if (/Over|Under/i.test(pos.title)) {
-      pickedOutcome = /Over/i.test(pos.title) ? "OVER" : "UNDER";
-    }
+// Over / Under fallback — ONLY for totals markets
+else if (
+  marketInfo.market.sportsMarketType === "total" &&
+  /Over|Under/i.test(pos.title)
+) {
+  pickedOutcome = /Over/i.test(pos.title) ? "OVER" : "UNDER";
+}
+
 
     // ❌ NO YES / NO fallback
     if (!pickedOutcome) {

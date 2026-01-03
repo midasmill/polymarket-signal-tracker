@@ -88,6 +88,14 @@ function inferTimezone(pick) {
 }
 
 /* ===========================
+   Helper: Normalize Event Time
+=========================== */
+function normalizeEventTime(timeStr) {
+  if (!timeStr) return null;
+  return timeStr.replace(" ", "T").replace(/\+00$/, "Z");
+}
+
+/* ===========================
    🔥 START HTTP SERVER IMMEDIATELY
 =========================== */
 const PORT = process.env.PORT || 3000;
@@ -1558,24 +1566,20 @@ async function getWalletNetPick(walletId, eventSlug) {
 /* ===========================
    Send Signals to Telegram + Notes
 =========================== */
-/* ===========================
-   Send Signals to Telegram + Notes (Safe + No duplicates)
-=========================== */
 async function processAndSendSignals() {
   const FORCE_SEND = process.env.FORCE_SEND === "true";
 
-  // Fetch unresolved AND unsent picks
+  // Fetch unresolved picks
   const { data: livePicks, error } = await supabase
     .from("wallet_live_picks")
     .select("*")
-    .is("resolved_outcome", null)
-    .or(FORCE_SEND ? "" : "signal_sent_at.is.null"); // only picks not sent unless forcing
+    .is("resolved_outcome", null);
 
-  if (error) return console.error("❌ Failed fetching wallet_live_picks:", error.message);
-  if (!livePicks?.length) return console.log("⚠️ No live picks to send signals for");
+  if (error) return console.error("❌ Failed fetching live picks:", error.message);
+  if (!livePicks?.length) return console.log("⚠️ No live picks to send");
 
   for (const pick of livePicks) {
-    // Skip picks below minimum vote_count unless forcing
+    // Skip below min vote_count unless forcing
     if (pick.vote_count < MIN_WALLETS_FOR_SIGNAL && !FORCE_SEND) {
       console.log('Skipped: below min vote_count', pick.id, pick.vote_count);
       continue;
@@ -1583,13 +1587,13 @@ async function processAndSendSignals() {
 
     const numericConfidence = resolveNumericConfidence(pick);
 
-    // Skip picks below 1-star confidence unless forcing
+    // Skip below 1-star confidence unless forcing
     if (numericConfidence < CONFIDENCE_THRESHOLDS["⭐"] && !FORCE_SEND) {
       console.log('Skipped: below confidence', pick.id, numericConfidence);
       continue;
     }
 
-    // Skip if already sent and not forcing
+    // Skip if already sent
     if (pick.signal_sent_at && !FORCE_SEND) {
       console.log('Skipped: already sent', pick.id);
       continue;
@@ -1600,15 +1604,11 @@ async function processAndSendSignals() {
 
     // Fix event link
     let eventUrl = pick.market_url || "";
-    if (eventUrl.includes("/markets/")) {
-      eventUrl = eventUrl.replace("/markets/", "/event/");
-    }
+    if (eventUrl.includes("/markets/")) eventUrl = eventUrl.replace("/markets/", "/event/");
 
-    // Event start time
-const eventTime = formatEventTime(
-  market.gameStartTime,
-  inferTimezone(market)
-);
+    // Normalize event start time
+    const normalizedTime = normalizeEventTime(pick.gameStartTime || pick.event_start_at);
+    const eventTime = formatEventTime(normalizedTime, inferTimezone(pick));
 
     // Telegram Markdown
     const text = `⚡️ NEW MARKET PREDICTION
@@ -1618,13 +1618,10 @@ Prediction: ${pick.picked_outcome || "UNKNOWN"}
 Confidence: ${confidenceEmoji}`;
 
     try {
-      // Send to Telegram
       await sendTelegram(text, false);
-
-      // Update notes
       await updateNotes("midas-sports", pick, confidenceEmoji);
 
-      // Mark as sent using unique row ID
+      // Mark as sent
       await supabase
         .from("wallet_live_picks")
         .update({
@@ -1649,31 +1646,26 @@ async function processAndSendResults() {
   const { data: resolvedPicks, error } = await supabase
     .from("wallet_live_picks")
     .select("*")
-    .not("resolved_outcome", "is", null); // only resolved picks
+    .not("resolved_outcome", "is", null);
 
   if (error) return console.error("❌ Failed fetching resolved picks:", error.message);
   if (!resolvedPicks?.length) return;
 
   for (const pick of resolvedPicks) {
-    // Skip picks with no signal sent, unless forcing
+    // Skip picks with no signal sent unless forcing
     if (!pick.signal_sent_at && !FORCE_SEND) continue;
 
-    // Skip picks whose result has already been sent, unless forcing
+    // Skip if result already sent
     if (pick.result_sent_at && !FORCE_SEND) continue;
 
     const resolvedOutcome = pick.resolved_outcome;
     const outcome = pick.outcome || (pick.picked_outcome === resolvedOutcome ? "WIN" : "LOSS");
 
     const numericConfidence = resolveNumericConfidence(pick);
-
-     if (numericConfidence < CONFIDENCE_THRESHOLDS["⭐"] && !FORCE_SEND) {
-  console.log(
-    "Skipped: confidence gate",
-    pick.market_id,
-    { confidence: pick.confidence, vote_count: pick.vote_count }
-  );
-  continue;
-}
+    if (numericConfidence < CONFIDENCE_THRESHOLDS["⭐"] && !FORCE_SEND) {
+      console.log("Skipped: confidence gate", pick.id);
+      continue;
+    }
 
     const confidenceEmoji = getConfidenceEmoji(numericConfidence);
     const outcomeEmoji = outcome === "WIN" ? "✅" : "❌";
@@ -1681,15 +1673,11 @@ async function processAndSendResults() {
 
     // Fix event link
     let eventUrl = pick.market_url || "";
-    if (eventUrl.includes("/markets/")) {
-      eventUrl = eventUrl.replace("/markets/", "/event/");
-    }
+    if (eventUrl.includes("/markets/")) eventUrl = eventUrl.replace("/markets/", "/event/");
 
-    // Event start time
-const eventTime = formatEventTime(
-  market.gameStartTime,
-  inferTimezone(market)
-);
+    // Normalize event start time
+    const normalizedTime = normalizeEventTime(pick.gameStartTime || pick.event_start_at);
+    const eventTime = formatEventTime(normalizedTime, inferTimezone(pick));
 
     // Telegram Markdown
     const text = `⚡️ RESULT FOR MARKET PREDICTION
@@ -1703,6 +1691,7 @@ Outcome: ${outcome} ${outcomeEmoji}`;
       await sendTelegram(text, false);
       await updateNotesWithResult("midas-sports", pick, confidenceEmoji);
 
+      // Mark result sent
       await supabase
         .from("wallet_live_picks")
         .update({
@@ -1711,9 +1700,9 @@ Outcome: ${outcome} ${outcomeEmoji}`;
         })
         .eq("id", pick.id);
 
-      console.log(`✅ Sent RESULT for market ${pick.market_id} (${pick.picked_outcome})`);
+      console.log(`✅ Sent RESULT for market ${pick.id} (${pick.picked_outcome})`);
     } catch (err) {
-      console.error(`❌ Failed sending RESULT for market ${pick.market_id}:`, err.message);
+      console.error(`❌ Failed sending RESULT for market ${pick.id}:`, err.message);
     }
   }
 }

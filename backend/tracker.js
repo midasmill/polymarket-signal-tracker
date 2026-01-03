@@ -1100,38 +1100,6 @@ function getResolvedOutcomeFromMarket(market) {
   if (!market?.events?.length) return null;
   const event = market.events[0];
   if (!event.ended || !event.score) return null;
-  const [score0, score1] = event.score.split("-").map(Number);
-  if (!market.outcomes?.length || market.outcomes.length !== 2) return null;
-  return score0 > score1 ? String(market.outcomes[0]) : String(market.outcomes[1]);
-}
-
-/* ===========================
-   Helper: clean resolved outcome
-=========================== */
-function cleanResolvedOutcome(raw) {
-  if (!raw) return null;
-  let outcome = raw;
-
-  // parse JSON arrays like ["Team A"] or '["Team A"]'
-  if (typeof raw === "string" && raw.trim().startsWith("[")) {
-    try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) outcome = parsed[0];
-    } catch (e) {
-      // fallback: keep raw string
-    }
-  }
-
-  return String(outcome).trim();
-}
-
-/* ===========================
-   Resolved Outcome from Market
-=========================== */
-function getResolvedOutcomeFromMarket(market) {
-  if (!market?.events?.length) return null;
-  const event = market.events[0];
-  if (!event.ended || !event.score) return null;
 
   const [score0, score1] = event.score.split("-").map(Number);
   if (!market.outcomes?.length || market.outcomes.length !== 2) return null;

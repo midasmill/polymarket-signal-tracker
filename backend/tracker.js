@@ -1339,7 +1339,7 @@ async function safeRebuildLivePicks(forceRebuild = false) {
 }
 
 /* ===========================
-   Notes Update Helper (with link + event start)
+   Notes Update Helper (with clickable event name + proper line breaks)
 =========================== */
 async function updateNotes(slug, pick, confidenceEmoji) {
   const eventName = pick.market_name || pick.event_slug || "UNKNOWN";
@@ -1350,18 +1350,20 @@ async function updateNotes(slug, pick, confidenceEmoji) {
     eventUrl = eventUrl.replace("/markets/", "/event/");
   }
 
-  // HTML hyperlink for notes page
+  // HTML hyperlink for event name
   const eventLink = eventUrl ? `<a href="${eventUrl}" target="_blank">${eventName}</a>` : eventName;
 
   const eventTime = pick.event_start_at || pick.gameStartTime
     ? new Date(pick.event_start_at || pick.gameStartTime).toLocaleString()
     : "N/A";
 
-  const text = `⚡️ NEW MARKET PREDICTION<br>
+  const text = `<div>
+⚡️ NEW MARKET PREDICTION<br>
 Market Event: ${eventLink}<br>
 Event Start: ${eventTime}<br>
 Prediction: ${pick.picked_outcome || "UNKNOWN"}<br>
-Confidence: ${confidenceEmoji}`;
+Confidence: ${confidenceEmoji}
+</div>`;
 
   // Fetch current note content
   const { data: note } = await supabase
@@ -1379,8 +1381,9 @@ Confidence: ${confidenceEmoji}`;
     .eq("slug", slug);
 }
 
+
 /* ===========================
-   Notes Update Helper (Result, replace previous prediction)
+   Notes Update Helper (Result, replaces previous prediction)
 =========================== */
 async function updateNotesWithResult(slug, pick, confidenceEmoji) {
   const outcomeEmoji =
@@ -1402,12 +1405,14 @@ async function updateNotesWithResult(slug, pick, confidenceEmoji) {
     ? new Date(pick.event_start_at || pick.gameStartTime).toLocaleString()
     : "N/A";
 
-  const resultText = `⚡️ RESULT FOR MARKET PREDICTION<br>
+  const resultText = `<div>
+⚡️ RESULT FOR MARKET PREDICTION<br>
 Market Event: ${eventLink}<br>
 Event Start: ${eventTime}<br>
 Prediction: ${pick.picked_outcome || "UNKNOWN"}<br>
 Confidence: ${confidenceEmoji}<br>
-Outcome: ${pick.outcome} ${outcomeEmoji}`;
+Outcome: ${pick.outcome} ${outcomeEmoji}
+</div>`;
 
   // Fetch current note content
   const { data: note } = await supabase

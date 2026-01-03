@@ -1,21 +1,20 @@
 /* ===========================
-   Market Extremes Scanner
+   Market NO Extremes Scanner
    ADD-ON MODULE (SAFE)
 =========================== */
 
 import fetch from "node-fetch";
 
 /**
- * Run the Market Extremes scanner
+ * Run the Market NO Extremes scanner
  * @param {import("@supabase/supabase-js").SupabaseClient} supabase
  * @param {function} sendToNotes - optional, function to send formatted notes
  */
 export async function runMarketNoExtremes(supabase, sendToNotes) {
-  console.log("🟢 Market Extremes scanner started");
+  console.log("🟢 Market NO Extremes scanner started");
 
   try {
     const NO_MAX = 0.10;       // NO ≤ 10%
-    const YES_MIN = 0.90;      // YES ≥ 90%
     const MIN_VOLUME = 50000;  // Overhyped filter: minimum volume
     const MIN_LIQUIDITY = 10000; // Overhyped filter: minimum liquidity
     const LIMIT = 500;
@@ -43,26 +42,25 @@ export async function runMarketNoExtremes(supabase, sendToNotes) {
     console.log(`🔹 Fetched ${markets.length} markets`);
 
     // ------------------------------
-    // FILTER markets: YES ≥ 90% OR NO ≤ 10% AND not expired
+    // FILTER markets: NO ≤ 10% AND not expired
     // ------------------------------
     const filtered = markets.filter(m => {
       if (!m.active) return false;
 
       let prices = [];
       try { prices = JSON.parse(m.outcomePrices || "[]"); } catch {}
-      if (!prices[0] || !prices[1]) return false;
+      if (!prices[1]) return false;
 
-      const yesPrice = Number(prices[0]);
       const noPrice = Number(prices[1]);
 
       // Hours to resolution
       const hoursLeft = m.endDate ? ((new Date(m.endDate) - now) / 1000 / 3600) : -1;
       if (hoursLeft <= 0) return false; // skip expired markets
 
-      return yesPrice >= YES_MIN || noPrice <= NO_MAX;
+      return noPrice <= NO_MAX;
     });
 
-    console.log(`🔹 ${filtered.length} markets passed extremes filter (active & valid)`);
+    console.log(`🔹 ${filtered.length} markets passed NO ≤ 10% filter`);
 
     if (!filtered.length) return;
 
@@ -130,7 +128,7 @@ export async function runMarketNoExtremes(supabase, sendToNotes) {
       await sendToNotes(summary, "polymarket-millionaires");
     }
 
-    console.log("🔥 Market Extremes scanner finished");
+    console.log("🔥 Market NO Extremes scanner finished");
 
   } catch (err) {
     console.error("🔥 Scanner error:", err);

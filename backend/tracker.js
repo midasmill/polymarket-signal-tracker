@@ -1136,7 +1136,6 @@ console.log(
   `✅ Rebuilt wallet picks: ${finalLive.length} live, ${finalPending.length} pending`
 );
 
-
 /* ===========================
    Batch Normalize Wallet Live Picks
    (UPDATE-based, constraint-safe)
@@ -1206,7 +1205,7 @@ async function normalizeExistingPicksBatch(batchSize = 100) {
           outcome,
           side,
           market_type: market?.sportsMarketType || "UNKNOWN",
-               score: market?.score || null // <- add this
+          score: market?.score || null // added score
         })
         .eq("id", pick.id);
 
@@ -1221,7 +1220,7 @@ async function normalizeExistingPicksBatch(batchSize = 100) {
   console.log("✅ All wallet_live_picks normalized successfully.");
 }
 
-// Run once
+// Run the batch normalization once
 normalizeExistingPicksBatch().catch(console.error);
 
 /* ===========================

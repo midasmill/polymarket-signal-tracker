@@ -1418,6 +1418,10 @@ async function updateWalletMetricsRolling3DOptimized() {
     eventsMap.get(sig.event_slug).push(sig);
   }
 
+  // --- Counters for summary ---
+  let totalPaused = 0;
+  let totalActive = 0;
+
   // --- Process each wallet ---
   for (const wallet of wallets) {
     const eventsMap = walletEventsMap.get(wallet.id);
@@ -1451,6 +1455,10 @@ async function updateWalletMetricsRolling3DOptimized() {
       paused = wallet.paused; // no change
     }
 
+    // --- Update counters ---
+    if (paused) totalPaused++;
+    else totalActive++;
+
     // --- Update wallet ---
     await supabase
       .from("wallets")
@@ -1461,6 +1469,9 @@ async function updateWalletMetricsRolling3DOptimized() {
       })
       .eq("id", wallet.id);
   }
+
+  // --- Summary log ---
+  console.log(`📊 Wallet Metrics Summary: ${totalActive} active wallets, ${totalPaused} paused wallets`);
 }
 
 /* ===========================

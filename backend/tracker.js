@@ -12,7 +12,7 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = "-4911183253";
 const TIMEZONE = process.env.TIMEZONE || "America/New_York";
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || "30000", 10);
-const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "11", 10);
+const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "15", 10);
 const FORCE_SEND = process.env.FORCE_SEND === "true";
 const RESULT_EMOJIS = { WIN: "✅", LOSS: "❌", Pending: "⚪" };
 
@@ -24,10 +24,10 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
    Confidence thresholds (Top-level)
 =========================== */
 const CONFIDENCE_THRESHOLDS = {
-  "⭐": 11,
-  "⭐⭐": 22,
-  "⭐⭐⭐": 33,
-  "⭐⭐⭐⭐": 44,
+  "⭐": 15,
+  "⭐⭐": 25,
+  "⭐⭐⭐": 35,
+  "⭐⭐⭐⭐": 45,
   "⭐⭐⭐⭐⭐": 55
 };
 

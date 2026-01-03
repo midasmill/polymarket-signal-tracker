@@ -982,7 +982,8 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
         market_url: market?.slug ? `https://polymarket.com/event/${market.slug}` : null, // <- corrected link
         outcomes: market?.outcomes || [],
         sportsMarketType: market?.sportsMarketType || null,
-        gameStartTime: sig.event_start_at || null
+        gameStartTime: sig.event_start_at || null,
+         score: market?.score || null // <- add this
       });
     }
 
@@ -1068,6 +1069,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
         pnl: Number(data.totalPnl),
         outcome: status,
         resolved_outcome: resolvedOutcome,
+           score: info?.score || null, // <- add this
         fetched_at: new Date(),
         confidence: getConfidenceNumber(data.walletIds.size),
         market_type: info?.sportsMarketType || "UNKNOWN" // <- added
@@ -1203,7 +1205,8 @@ async function normalizeExistingPicksBatch(batchSize = 100) {
           picked_outcome: normalized,
           outcome,
           side,
-          market_type: market?.sportsMarketType || "UNKNOWN"
+          market_type: market?.sportsMarketType || "UNKNOWN",
+               score: market?.score || null // <- add this
         })
         .eq("id", pick.id);
 

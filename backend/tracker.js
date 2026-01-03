@@ -1258,7 +1258,7 @@ async function safeRebuildLivePicks(forceRebuild = false) {
   rebuildLock = true;
 
   try {
-    console.log("🔄 Rebuilding wallet_live_picks and wallet_live_pending...");
+    console.log("🔄 Rebuilding wallet_live_picks...");
     await rebuildWalletLivePicks(forceRebuild);
     console.log("✅ Rebuild complete.");
   } catch (err) {

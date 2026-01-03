@@ -599,23 +599,37 @@ async function trackWallet(wallet, forceRebuild = false) {
     if (!forceRebuild && effectivePnl < 1000 && !pos.resolvedOutcome) continue;
 
     // Determine picked outcome
-    let pickedOutcome;
-    const sideValue = (pos.side || "BUY").toUpperCase();
-    if (pos.title?.includes(" vs. ")) {
-      const [teamA, teamB] = pos.title.split(" vs. ").map(s => s.trim());
-      pickedOutcome = sideValue === "BUY" ? teamA : teamB;
-    } else if (/Over|Under/i.test(pos.title)) {
-      pickedOutcome = sideValue === "BUY" ? "OVER" : "UNDER";
-    } else if (pos.resolvedOutcome) {
-      pickedOutcome = pos.resolvedOutcome;
-    } else {
-      pickedOutcome = sideValue === "BUY" ? "YES" : "NO";
-    }
+let pickedOutcome = null;
 
-    if (!pickedOutcome) {
-      console.warn(`Skipping position with undefined outcome: wallet=${wallet.id}, pos=${JSON.stringify(pos)}`);
-      continue;
-    }
+// ✅ Prefer resolved outcome if available
+if (pos.resolvedOutcome) {
+  pickedOutcome = pos.resolvedOutcome;
+}
+
+// ✅ Otherwise resolve via market outcomes (moneyline-safe)
+else if (marketInfo?.market?.outcomes && pos.clobTokenId) {
+  const outcomes = marketInfo.market.outcomes;
+  const tokenIds = marketInfo.market.clobTokenIds || [];
+
+  const outcomeIndex = tokenIds.indexOf(pos.clobTokenId);
+  if (outcomeIndex !== -1) {
+    pickedOutcome = outcomes[outcomeIndex];
+  }
+}
+
+// ✅ Over / Under fallback
+else if (/Over|Under/i.test(pos.title)) {
+  pickedOutcome = /Over/i.test(pos.title) ? "OVER" : "UNDER";
+}
+
+// ❌ DO NOT FALL BACK TO YES / NO
+if (!pickedOutcome) {
+  console.warn(
+    `⚠️ Skipping position (cannot resolve outcome): wallet=${wallet.id}, title=${pos.title}`
+  );
+  continue;
+}
+
 
     // Make tx_hash unique with timestamp
     const syntheticTx = [proxyWallet, pos.asset || "", pos.timestamp || "", effectivePnl, Date.now()].join("-");
@@ -953,22 +967,30 @@ function cleanResolvedOutcome(raw) {
    Outcome normalization helper
 =========================== */
 function normalizeOutcome(pickedOutcome, market) {
-  if (!pickedOutcome) return null;
+  if (!pickedOutcome || !market?.outcomes) return null;
+
   const raw = Array.isArray(pickedOutcome) ? pickedOutcome[0] : pickedOutcome;
   const trimmed = String(raw).trim();
   const upper = trimmed.toUpperCase();
 
-  if (market?.outcomes?.length === 2 && market.sportsMarketType === "moneyline") {
-    const [team0, team1] = market.outcomes;
-    if (upper === "YES" || upper === "OVER") return team0;
-    if (upper === "NO" || upper === "UNDER") return team1;
-    if (team0.toUpperCase() === upper) return team0;
-    if (team1.toUpperCase() === upper) return team1;
+  // ✅ Moneyline markets: ONLY team names are valid
+  if (market.sportsMarketType === "moneyline") {
+    const match = market.outcomes.find(
+      o => o.toUpperCase() === upper
+    );
+    return match || null; // ❌ reject YES/NO completely
   }
 
-  return Array.isArray(market?.outcomes)
-    ? market.outcomes.find(o => o.toUpperCase() === upper) || trimmed
-    : trimmed;
+  // ✅ Totals markets
+  if (/OVER|UNDER/i.test(upper)) {
+    return upper;
+  }
+
+  // ✅ Generic fallback
+  const match = market.outcomes.find(
+    o => o.toUpperCase() === upper
+  );
+  return match || trimmed;
 }
 
 /* ===========================
@@ -983,8 +1005,7 @@ function determineOutcomeStatus(pickedOutcome, resolvedOutcome) {
    Determine BUY / SELL side
 =========================== */
 function determineSide(outcome, market) {
-  if (!market?.outcomes?.length) return "BUY";
-  return outcome === market.outcomes[0] ? "BUY" : "SELL";
+  return "BUY";
 }
 
 /* ===========================
@@ -1033,7 +1054,13 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     }
 
     const info = marketInfoMap.get(sig.market_id);
-    const normalized = normalizeOutcome(sig.picked_outcome, info);
+    const normalized = normalizeOutcome(
+  sig.picked_outcome,
+  {
+    outcomes: info.outcomes,
+    sportsMarketType: info.sportsMarketType
+  }
+);
     if (!normalized) continue;
 
     const key = `${sig.wallet_id}_${sig.market_id}`;
@@ -1063,24 +1090,22 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     }
   }
 
-  // --- Normalize YES/NO keys for moneyline ---
-  for (const [market_id, outcomes] of marketNetPickMap.entries()) {
-    const info = marketInfoMap.get(market_id);
-    if (info?.outcomes?.length === 2) {
-      for (const key of Object.keys(outcomes)) {
-        const normalizedKey = normalizeOutcome(key, { outcomes: info.outcomes, sportsMarketType: "moneyline" });
-        if (normalizedKey !== key) {
-          if (!outcomes[normalizedKey]) outcomes[normalizedKey] = { walletIds: new Set(), totalPnl: 0, sideCounts: {} };
-          outcomes[key].walletIds.forEach(w => outcomes[normalizedKey].walletIds.add(w));
-          outcomes[normalizedKey].totalPnl += outcomes[key].totalPnl;
-          Object.entries(outcomes[key].sideCounts).forEach(([side, count]) => {
-            outcomes[normalizedKey].sideCounts[side] = (outcomes[normalizedKey].sideCounts[side] || 0) + count;
-          });
-          delete outcomes[key];
-        }
+// --- Reject invalid YES/NO for moneyline ---
+for (const [market_id, outcomes] of marketNetPickMap.entries()) {
+  const info = marketInfoMap.get(market_id);
+  if (info?.sportsMarketType === "moneyline") {
+    for (const key of Object.keys(outcomes)) {
+      if (/^YES$|^NO$/i.test(key)) {
+        console.error(
+          `❌ Invalid YES/NO detected for moneyline market ${market_id}:`,
+          key
+        );
+        delete outcomes[key]; // or throw if you prefer
       }
     }
   }
+}
+
 
   // --- Fetch existing picks to preserve resolved outcomes ---
   const { data: existingPicks } = await supabase.from("wallet_live_picks").select("*");
@@ -1094,7 +1119,14 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     for (const [outcome, data] of Object.entries(outcomes)) {
       if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL) continue;
 
-      const canonicalOutcome = normalizeOutcome(outcome, info);
+      const canonicalOutcome = normalizeOutcome(
+  outcome,
+  {
+    outcomes: info.outcomes,
+    sportsMarketType: info.sportsMarketType
+  }
+);
+
       const resolvedCanonical =
         normalizeOutcome(
           cleanResolvedOutcome(info?.resolved_outcome) ||
@@ -1116,7 +1148,12 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
         picked_outcome: canonicalOutcome,
         resolved_outcome: resolvedCanonical,
         outcome: status,
-        side: determineSide(canonicalOutcome, info),
+         
+        side:
+  info?.sportsMarketType === "moneyline"
+    ? "BUY"
+    : determineSide(canonicalOutcome, info),
+
         wallets: Array.from(data.walletIds),
         vote_count: data.walletIds.size,
         vote_counts: Object.fromEntries(Array.from(data.walletIds).map(id => [id, 1])),
@@ -1166,9 +1203,11 @@ async function normalizeExistingPicksBatch(batchSize = 100) {
 
       const status = determineOutcomeStatus(normalized, resolvedCanonical);
 
-      const side = market?.outcomes?.length === 2
-        ? normalized === market.outcomes[0] ? "BUY" : "SELL"
-        : null;
+const side =
+  market?.sportsMarketType === "moneyline"
+    ? "BUY"
+    : null;
+
 
       try {
         const { error: updateError } = await supabase

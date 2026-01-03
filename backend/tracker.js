@@ -1041,18 +1041,22 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     walletEntry[normalized] = (walletEntry[normalized] || 0) + Number(sig.pnl || 0);
   }
 
-  // --- Aggregate wallet counts per market & outcome ---
-  const marketNetPickMap = new Map();
-  for (const [key, outcomeMap] of walletMarketMap.entries()) {
-    const [wallet_id, market_id] = key.split("_");
-    if (!marketNetPickMap.has(market_id)) marketNetPickMap.set(market_id, {});
-    const outcomes = marketNetPickMap.get(market_id);
+// --- Aggregate wallet counts per outcome for side_counts ---
+for (const [wallet_id, outcomeMap] of walletMarketMap.entries()) {
+  const [wallet, market_id] = wallet_id.split("_");
+  if (!marketNetPickMap.has(market_id)) marketNetPickMap.set(market_id, {});
+  const outcomes = marketNetPickMap.get(market_id);
 
-    for (const [outcome, pnl] of Object.entries(outcomeMap)) {
-      if (!outcomes[outcome]) outcomes[outcome] = { walletIds: new Set(), totalPnl: 0, sideCounts: {} };
-      outcomes[outcome].walletIds.add(Number(wallet_id));
-      outcomes[outcome].totalPnl += pnl;
-      outcomes[outcome].sideCounts[outcome] = (outcomes[outcome].sideCounts[outcome] || 0) + 1;
+  for (const [outcome, pnl] of Object.entries(outcomeMap)) {
+    if (!outcomes[outcome]) {
+      outcomes[outcome] = { walletIds: new Set(), totalPnl: 0, sideCounts: {} };
+    }
+    outcomes[outcome].walletIds.add(Number(wallet));
+    outcomes[outcome].totalPnl += pnl;
+
+    // **New:** count all picks per side
+    for (const [pickSide] of Object.entries(outcomeMap)) {
+      outcomes[outcome].sideCounts[pickSide] = (outcomes[outcome].sideCounts[pickSide] || 0) + 1;
     }
   }
 

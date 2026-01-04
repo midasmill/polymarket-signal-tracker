@@ -16,7 +16,6 @@ const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || "30000", 10);
 const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "8", 10);
 const FORCE_SEND = process.env.FORCE_SEND === "true";
 const RESULT_EMOJIS = { WIN: "✅", LOSS: "❌", Pending: "⚪" };
-const MIN_PNL_FOR_NET_VOTE = 1000;
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) throw new Error("Supabase keys required");
 

@@ -1355,10 +1355,10 @@ async function updateNotes(slug, pick, confidenceEmoji) {
   const eventLink = eventUrl ? `[${eventName}](${eventUrl})` : eventName;
 
   // --- Fix Event Time ---
-const eventTime = formatEventTime(
-  normalizeEventTime(pick.gameStartTime || pick.event_start_at),
-  inferTimezone(pick)
-);
+  const eventTime = formatEventTime(
+    normalizeEventTime(pick.gameStartTime || pick.event_start_at),
+    inferTimezone(pick)
+  );
 
   const text = `
 ⚡️ **NEW MARKET PREDICTION**  
@@ -1378,6 +1378,7 @@ Confidence: ${confidenceEmoji}
   let newContent = note?.content || "";
   newContent += newContent ? `\n\n${text}` : text;
 
+  // Update notes page
   await supabase
     .from("notes")
     .update({ content: newContent, public: true })
@@ -1404,10 +1405,10 @@ async function updateNotesWithResult(slug, pick, confidenceEmoji) {
   const eventLink = eventUrl ? `[${eventName}](${eventUrl})` : eventName;
 
   // --- Fix Event Time ---
-const eventTime = formatEventTime(
-  normalizeEventTime(pick.gameStartTime || pick.event_start_at),
-  inferTimezone(pick)
-);
+  const eventTime = formatEventTime(
+    normalizeEventTime(pick.gameStartTime || pick.event_start_at),
+    inferTimezone(pick)
+  );
 
   const resultText = `
 ⚡️ **RESULT FOR MARKET PREDICTION**  
@@ -1427,10 +1428,11 @@ Outcome: ${pick.outcome} ${outcomeEmoji}
 
   let newContent = note?.content || "";
 
-  // Replace previous NEW MARKET PREDICTION for this pick
+  // Escape for regex
   const escapedEvent = eventName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const escapedOutcome = (pick.picked_outcome || "UNKNOWN").replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+  // Replace previous NEW MARKET PREDICTION for this pick
   const regex = new RegExp(
     `⚡️ \\*\\*NEW MARKET PREDICTION\\*\\*[\\s\\S]*?Market Event: .*${escapedEvent}.*?Prediction:\\s*${escapedOutcome}[\\s\\S]*?(?=(\\n\\n⚡️|$))`,
     "g"
@@ -1442,6 +1444,7 @@ Outcome: ${pick.outcome} ${outcomeEmoji}
     newContent += newContent ? `\n\n${resultText}` : resultText;
   }
 
+  // Update notes page
   await supabase
     .from("notes")
     .update({ content: newContent, public: true })
@@ -1605,7 +1608,7 @@ async function processAndSendSignals() {
       continue;
     }
 
-    // Skip if already sent
+    // Skip if already sent and not forcing
     if (pick.signal_sent_at && !FORCE_SEND) {
       console.log('Skipped: already sent', pick.id);
       continue;
@@ -1619,10 +1622,10 @@ async function processAndSendSignals() {
     if (eventUrl.includes("/markets/")) eventUrl = eventUrl.replace("/markets/", "/event/");
 
     // Normalize event start time
-const eventTime = formatEventTime(
-  normalizeEventTime(pick.gameStartTime || pick.event_start_at),
-  inferTimezone(pick)
-);
+    const eventTime = formatEventTime(
+      normalizeEventTime(pick.gameStartTime || pick.event_start_at),
+      inferTimezone(pick)
+    );
 
     // Telegram Markdown
     const text = `⚡️ NEW MARKET PREDICTION
@@ -1632,15 +1635,16 @@ Prediction: ${pick.picked_outcome || "UNKNOWN"}
 Confidence: ${confidenceEmoji}`;
 
     try {
+      // Send Telegram + update Notes
       await sendTelegram(text, false);
       await updateNotes("midas-sports", pick, confidenceEmoji);
 
-      // Mark as sent
+      // ✅ Mark as sent (always set current timestamp)
       await supabase
         .from("wallet_live_picks")
         .update({
           last_confidence_sent: new Date(),
-          signal_sent_at: pick.signal_sent_at || new Date()
+          signal_sent_at: new Date()
         })
         .eq("id", pick.id);
 
@@ -1657,19 +1661,20 @@ Confidence: ${confidenceEmoji}`;
 async function processAndSendResults() {
   const FORCE_SEND = process.env.FORCE_SEND === "true";
 
+  // Fetch picks that are resolved
   const { data: resolvedPicks, error } = await supabase
     .from("wallet_live_picks")
     .select("*")
     .not("resolved_outcome", "is", null);
 
   if (error) return console.error("❌ Failed fetching resolved picks:", error.message);
-  if (!resolvedPicks?.length) return;
+  if (!resolvedPicks?.length) return console.log("⚠️ No resolved picks to send results for");
 
   for (const pick of resolvedPicks) {
     // Skip picks with no signal sent unless forcing
     if (!pick.signal_sent_at && !FORCE_SEND) continue;
 
-    // Skip if result already sent
+    // Skip if result already sent unless forcing
     if (pick.result_sent_at && !FORCE_SEND) continue;
 
     const resolvedOutcome = pick.resolved_outcome;
@@ -1690,10 +1695,10 @@ async function processAndSendResults() {
     if (eventUrl.includes("/markets/")) eventUrl = eventUrl.replace("/markets/", "/event/");
 
     // Normalize event start time
-const eventTime = formatEventTime(
-  normalizeEventTime(pick.gameStartTime || pick.event_start_at),
-  inferTimezone(pick)
-);
+    const eventTime = formatEventTime(
+      normalizeEventTime(pick.gameStartTime || pick.event_start_at),
+      inferTimezone(pick)
+    );
 
     // Telegram Markdown
     const text = `⚡️ RESULT FOR MARKET PREDICTION
@@ -1704,10 +1709,11 @@ Confidence: ${confidenceEmoji}
 Outcome: ${outcome} ${outcomeEmoji}`;
 
     try {
+      // Send Telegram + update Notes
       await sendTelegram(text, false);
       await updateNotesWithResult("midas-sports", pick, confidenceEmoji);
 
-      // Mark result sent
+      // ✅ Mark result sent
       await supabase
         .from("wallet_live_picks")
         .update({
@@ -1723,101 +1729,113 @@ Outcome: ${outcome} ${outcomeEmoji}`;
   }
 }
 
+
 /* ===========================
-   Send Daily Summary to Telegram + Notes (top of picks)
+   Send Daily Summary to Telegram + Notes (Once per day)
 =========================== */
 async function sendDailySummaryToNotes(slug = "midas-sports") {
   const today = new Date();
-  const yesterday = new Date(today);
-  yesterday.setDate(today.getDate() - 1);
-  const yesterdayStr = yesterday.toLocaleDateString("en-US", { timeZone: TIMEZONE });
-
-
-
-  // --- Fetch yesterday's picks ---
-  const { data: yesterdayPicks, error: yesterdayError } = await supabase
-    .from("wallet_live_picks")
-    .select("picked_outcome, resolved_outcome, confidence")
-    .gte("resolved_at", new Date(yesterday.setHours(0, 0, 0, 0)).toISOString())
-    .lte(new Date(yesterday.setHours(23, 59, 59, 999)).toISOString());
-
-  if (yesterdayError) return console.error("❌ Failed fetching yesterday picks:", yesterdayError.message);
-
-  let winsYesterday = 0;
-  let lossesYesterday = 0;
-  let pendingYesterday = 0;
-  const confidenceCountYesterday = {};
-
-  yesterdayPicks.forEach(pick => {
-    if (pick.resolved_outcome === "WIN") winsYesterday++;
-    else if (pick.resolved_outcome === "LOSS") lossesYesterday++;
-    else pendingYesterday++;
-
-    const emoji = getConfidenceEmoji(pick.confidence || 0);
-    confidenceCountYesterday[emoji] = (confidenceCountYesterday[emoji] || 0) + 1;
-  });
-
-  // --- Fetch overall picks ---
-  const { data: allPicks, error: allError } = await supabase
-    .from("wallet_live_picks")
-    .select("picked_outcome, resolved_outcome");
-
-  if (allError) return console.error("❌ Failed fetching all picks:", allError.message);
-
-  let totalWins = 0;
-  let totalLosses = 0;
-  let totalPending = 0;
-
-  allPicks.forEach(pick => {
-    if (pick.resolved_outcome === "WIN") totalWins++;
-    else if (pick.resolved_outcome === "LOSS") totalLosses++;
-    else totalPending++;
-  });
-
-  const confidenceBreakdown = Object.entries(confidenceCountYesterday)
-    .map(([emoji, count]) => `${emoji} ${count}-${0}`)
-    .join(" | ");
-
-  // --- Compose summary message ---
-  const summaryMessage = `📊 DAILY SUMMARY (W-L-P)
-🗓 Yesterday (${yesterdayStr}): ✅ ${winsYesterday} - ❌ ${lossesYesterday} - ⚪ ${pendingYesterday}
-📈 Overall: ✅ ${totalWins} - ❌ ${totalLosses} - ⚪ ${totalPending}`;
-
-  // --- Log summary for Render ---
-  console.log("📝 Daily Summary:\n", summaryMessage);
+  const todayStr = today.toISOString().slice(0, 10); // YYYY-MM-DD
 
   try {
     // --- Fetch current note content ---
     const { data: note } = await supabase
       .from("notes")
-      .select("content")
+      .select("content, daily_summary_sent_at")
       .eq("slug", slug)
       .maybeSingle();
 
-    let existingContent = note?.content || "";
+    const lastSent = note?.daily_summary_sent_at
+      ? new Date(note.daily_summary_sent_at).toISOString().slice(0, 10)
+      : null;
 
-    // --- Replace previous summary at top ---
-    const summaryRegex = /^📊 DAILY SUMMARY[\s\S]*?(?=\n\n|$)/;
-    if (summaryRegex.test(existingContent)) {
-      existingContent = existingContent.replace(summaryRegex, summaryMessage);
-    } else {
-      existingContent = `${summaryMessage}\n\n${existingContent}`;
+    // Skip if already sent today
+    if (lastSent === todayStr) {
+      console.log("⚠️ Daily summary already sent today, skipping.");
+      return;
     }
 
-    // --- Update notes page ---
+    // --- Calculate yesterday and overall stats ---
+    const yesterday = new Date(today);
+    yesterday.setDate(today.getDate() - 1);
+    const yesterdayStr = yesterday.toLocaleDateString("en-US", { timeZone: TIMEZONE });
+
+    const startOfYesterday = new Date(yesterday);
+    startOfYesterday.setHours(0, 0, 0, 0);
+    const endOfYesterday = new Date(yesterday);
+    endOfYesterday.setHours(23, 59, 59, 999);
+
+    // Fetch yesterday's picks
+    const { data: yesterdayPicks, error: yesterdayError } = await supabase
+      .from("wallet_live_picks")
+      .select("picked_outcome, resolved_outcome, confidence")
+      .gte("resolved_at", startOfYesterday.toISOString())
+      .lte("resolved_at", endOfYesterday.toISOString());
+
+    if (yesterdayError) return console.error("❌ Failed fetching yesterday picks:", yesterdayError.message);
+
+    let winsYesterday = 0, lossesYesterday = 0, pendingYesterday = 0;
+    const confidenceCountYesterday = {};
+
+    yesterdayPicks.forEach(pick => {
+      if (pick.resolved_outcome === "WIN") winsYesterday++;
+      else if (pick.resolved_outcome === "LOSS") lossesYesterday++;
+      else pendingYesterday++;
+
+      const emoji = getConfidenceEmoji(pick.confidence || 0);
+      confidenceCountYesterday[emoji] = (confidenceCountYesterday[emoji] || 0) + 1;
+    });
+
+    // Fetch overall picks
+    const { data: allPicks, error: allError } = await supabase
+      .from("wallet_live_picks")
+      .select("picked_outcome, resolved_outcome");
+
+    if (allError) return console.error("❌ Failed fetching all picks:", allError.message);
+
+    let totalWins = 0, totalLosses = 0, totalPending = 0;
+    allPicks.forEach(pick => {
+      if (pick.resolved_outcome === "WIN") totalWins++;
+      else if (pick.resolved_outcome === "LOSS") totalLosses++;
+      else totalPending++;
+    });
+
+    const confidenceBreakdown = Object.entries(confidenceCountYesterday)
+      .map(([emoji, count]) => `${emoji} ${count}`)
+      .join(" | ");
+
+    // --- Compose summary ---
+    const summaryMessage = `📊 DAILY SUMMARY (W-L-P)
+🗓 Yesterday (${yesterdayStr}): ✅ ${winsYesterday} - ❌ ${lossesYesterday} - ⚪ ${pendingYesterday} 
+Confidence: ${confidenceBreakdown}
+📈 Overall: ✅ ${totalWins} - ❌ ${totalLosses} - ⚪ ${totalPending}`;
+
+    console.log("📝 Daily Summary:\n", summaryMessage);
+
+    // --- Update notes and mark summary as sent today ---
+    let newContent = note?.content || "";
+    const summaryRegex = /^📊 DAILY SUMMARY[\s\S]*?(?=\n\n|$)/;
+    if (summaryRegex.test(newContent)) {
+      newContent = newContent.replace(summaryRegex, summaryMessage);
+    } else {
+      newContent = `${summaryMessage}\n\n${newContent}`;
+    }
+
     await supabase
       .from("notes")
-      .update({ content: existingContent, public: true })
+      .update({ content: newContent, public: true, daily_summary_sent_at: new Date() })
       .eq("slug", slug);
 
     // --- Send to Telegram ---
     await sendTelegram(summaryMessage, false);
 
-    console.log("✅ Daily summary updated at the top of notes and sent to Telegram");
+    console.log("✅ Daily summary updated and sent to Telegram (once per day).");
+
   } catch (err) {
     console.error("❌ Failed sending daily summary:", err.message);
   }
 }
+
 
 /* ===========================
    Force Resolve Pending Markets

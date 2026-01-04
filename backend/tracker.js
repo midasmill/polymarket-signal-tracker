@@ -897,15 +897,32 @@ await safeRebuildLivePicks();
 }
 
 /* ===========================
-   Safe Insert / Upsert Helper (Verbose + Robust)
+   Safe Insert / Upsert Helper (Verbose + Robust + Type Guard)
 =========================== */
 async function safeInsert(table, rows, options = {}) {
   if (!rows || !rows.length) return;
 
   const { upsertColumns = [] } = options;
-
-  // default conflict column for "signals" table
   const defaultConflict = table === "signals" ? ["tx_hash"] : [];
+
+  // --- Step 0: Validate rows for numeric columns ---
+  for (const row of rows) {
+    // Example: prevent emoji in numeric fields
+    if (row.confidence && typeof row.confidence !== "number") {
+      console.warn(
+        `⚠️ Correcting non-numeric confidence for table ${table}:`,
+        row.confidence
+      );
+      row.confidence = null;
+    }
+    if (row.net_strength && typeof row.net_strength !== "number") {
+      console.warn(
+        `⚠️ Correcting non-numeric net_strength for table ${table}:`,
+        row.net_strength
+      );
+      row.net_strength = null;
+    }
+  }
 
   try {
     const { error } = await supabase
@@ -925,7 +942,6 @@ async function safeInsert(table, rows, options = {}) {
     console.error(`❌ Exception in safeInsert for table ${table}:`, err.message);
   }
 }
-
 
 /* ===========================
    Universal Market Cache & Fetch (Includes Closed + Resolved)
@@ -1297,12 +1313,11 @@ finalLive.push({
   score: info?.score || null,
   fetched_at: new Date(),
 
-  // ✅ FIX HERE
-  confidence: netStrength,          // INTEGER (safe)
-  confidence_emoji: confidence,     // TEXT (⭐⭐⭐)
+  confidence: netStrength, // ✅ NUMBER ONLY
 
   market_type: info?.sportsMarketType || "UNKNOWN"
 });
+
 
     }
   }

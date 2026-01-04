@@ -13,22 +13,23 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = "-4911183253";
 const TIMEZONE = process.env.TIMEZONE || "America/New_York";
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || "30000", 10);
-const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "3", 10);
+const MIN_WALLETS_FOR_SIGNAL = parseInt(process.env.MIN_WALLETS_FOR_SIGNAL || "8", 10);
 const FORCE_SEND = process.env.FORCE_SEND === "true";
 const RESULT_EMOJIS = { WIN: "✅", LOSS: "❌", Pending: "⚪" };
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) throw new Error("Supabase keys required");
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 /* ===========================
    Confidence thresholds (Top-level)
 =========================== */
 const CONFIDENCE_THRESHOLDS = {
-  "⭐": 3,
-  "⭐⭐": 8,
-  "⭐⭐⭐": 15,
-  "⭐⭐⭐⭐": 25,
-  "⭐⭐⭐⭐⭐": 35
+  "⭐": 8,
+  "⭐⭐": 15,
+  "⭐⭐⭐": 25,
+  "⭐⭐⭐⭐": 35,
+  "⭐⭐⭐⭐⭐": 45
 };
 
 function getConfidenceEmoji(confidence) {
@@ -303,6 +304,9 @@ async function autoResolvePendingSignals() {
 
 /* ===========================
    Resolve Markets (FINAL — Safe & Deterministic)
+   - Updates signals outcomes
+   - Updates wallet_live_picks outcomes ONLY if row already exists
+   - NEVER creates or mutates votes/wallets
 =========================== */
 async function resolveMarkets() {
   // 1️⃣ Fetch unresolved signals with a valid event_slug
@@ -893,32 +897,15 @@ await safeRebuildLivePicks();
 }
 
 /* ===========================
-   Safe Insert / Upsert Helper
+   Safe Insert / Upsert Helper (Verbose + Robust)
 =========================== */
 async function safeInsert(table, rows, options = {}) {
   if (!rows || !rows.length) return;
 
   const { upsertColumns = [] } = options;
-  const defaultConflict = table === "signals" ? ["tx_hash"] : [];
 
-  // --- Step 0: Validate rows for numeric columns ---
-  for (const row of rows) {
-    // Example: prevent emoji in numeric fields
-    if (row.confidence && typeof row.confidence !== "number") {
-      console.warn(
-        `⚠️ Correcting non-numeric confidence for table ${table}:`,
-        row.confidence
-      );
-      row.confidence = null;
-    }
-    if (row.net_strength && typeof row.net_strength !== "number") {
-      console.warn(
-        `⚠️ Correcting non-numeric net_strength for table ${table}:`,
-        row.net_strength
-      );
-      row.net_strength = null;
-    }
-  }
+  // default conflict column for "signals" table
+  const defaultConflict = table === "signals" ? ["tx_hash"] : [];
 
   try {
     const { error } = await supabase
@@ -938,6 +925,7 @@ async function safeInsert(table, rows, options = {}) {
     console.error(`❌ Exception in safeInsert for table ${table}:`, err.message);
   }
 }
+
 
 /* ===========================
    Universal Market Cache & Fetch (Includes Closed + Resolved)
@@ -1072,25 +1060,20 @@ function determineSide(outcome, market) {
 }
 
 /* ===========================
-   Rebuild Wallet Live Picks (Dominant PnL + Net Vote + Confidence from Net Vote)
+   Rebuild Wallet Live Picks
 =========================== */
-const MIN_PNL_FOR_NET_VOTE = 1000;
-
 async function rebuildWalletLivePicks(forceRebuild = false) {
   const marketInfoMap = new Map();
-  const marketNetPickMap = new Map();
-  const walletMarketMap = new Map();
+  const marketNetPickMap = new Map(); // ✅ declare this before use
 
-  /* ===========================
-     Fetch all signals
-  =========================== */
+  // --- Fetch all signals ---
   const { data: signals, error } = await supabase.from("signals").select("*");
   if (error) return console.error("❌ Failed fetching signals:", error.message);
   if (!signals?.length) return console.log("✅ No signals found");
 
-  /* ===========================
-     Step 1: Aggregate PnL per wallet per market
-  =========================== */
+  const walletMarketMap = new Map();
+
+  // --- Aggregate PnL per wallet per market ---
   for (const sig of signals) {
     if (!sig.wallet_id || !sig.market_id) continue;
 
@@ -1130,19 +1113,7 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     walletEntry[normalized] = (walletEntry[normalized] || 0) + Number(sig.pnl || 0);
   }
 
-  /* ===========================
-     Step 2: Keep DOMINANT PnL side per wallet
-  =========================== */
-  for (const [walletKey, outcomeMap] of walletMarketMap.entries()) {
-    const entries = Object.entries(outcomeMap);
-    if (!entries.length) continue;
-    const [dominantOutcome, dominantPnl] = entries.reduce((a, b) => (b[1] > a[1] ? b : a));
-    walletMarketMap.set(walletKey, { [dominantOutcome]: dominantPnl });
-  }
-
-  /* ===========================
-     Step 3: Aggregate wallets per market & outcome
-  =========================== */
+  // --- Aggregate wallet counts per market & outcome (side_counts for all sides) ---
   for (const [walletKey, outcomeMap] of walletMarketMap.entries()) {
     const [wallet_id, market_id] = walletKey.split("_");
     if (!marketNetPickMap.has(market_id)) marketNetPickMap.set(market_id, {});
@@ -1150,22 +1121,12 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
 
     for (const [outcome, pnl] of Object.entries(outcomeMap)) {
       if (!outcomes[outcome]) {
-        outcomes[outcome] = {
-          walletIds: new Set(),
-          netVoteWalletIds: new Set(),
-          totalPnl: 0,
-          sideCounts: {}
-        };
+        outcomes[outcome] = { walletIds: new Set(), totalPnl: 0, sideCounts: {} };
       }
-
-      const walletIdNum = Number(wallet_id);
-      outcomes[outcome].walletIds.add(walletIdNum);
+      outcomes[outcome].walletIds.add(Number(wallet_id));
       outcomes[outcome].totalPnl += pnl;
 
-      // ✅ Include in net vote only if wallet PnL >= MIN_PNL_FOR_NET_VOTE
-      if (pnl >= MIN_PNL_FOR_NET_VOTE) outcomes[outcome].netVoteWalletIds.add(walletIdNum);
-
-      // side_counts reference
+      // Count all picks per side (so side_counts shows both teams)
       for (const sideOutcome of Object.keys(outcomeMap)) {
         outcomes[outcome].sideCounts[sideOutcome] =
           (outcomes[outcome].sideCounts[sideOutcome] || 0) + 1;
@@ -1173,110 +1134,74 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
     }
   }
 
-  /* ===========================
-     Step 4: Normalize YES / NO for moneyline
-  =========================== */
+  // --- Normalize YES/NO keys for moneyline ---
   for (const [market_id, outcomes] of marketNetPickMap.entries()) {
     const info = marketInfoMap.get(market_id);
     if (info?.outcomes?.length === 2) {
       for (const key of Object.keys(outcomes)) {
         const normalizedKey = normalizeOutcome(key, { outcomes: info.outcomes, sportsMarketType: "moneyline" });
         if (normalizedKey !== key) {
-          if (!outcomes[normalizedKey]) outcomes[normalizedKey] = {
-            walletIds: new Set(),
-            netVoteWalletIds: new Set(),
-            totalPnl: 0,
-            sideCounts: {}
-          };
-
+          if (!outcomes[normalizedKey]) outcomes[normalizedKey] = { walletIds: new Set(), totalPnl: 0, sideCounts: {} };
           outcomes[key].walletIds.forEach(w => outcomes[normalizedKey].walletIds.add(w));
-          outcomes[key].netVoteWalletIds.forEach(w => outcomes[normalizedKey].netVoteWalletIds.add(w));
           outcomes[normalizedKey].totalPnl += outcomes[key].totalPnl;
-
           Object.entries(outcomes[key].sideCounts).forEach(([side, count]) => {
-            outcomes[normalizedKey].sideCounts[side] =
-              (outcomes[normalizedKey].sideCounts[side] || 0) + count;
+            outcomes[normalizedKey].sideCounts[side] = (outcomes[normalizedKey].sideCounts[side] || 0) + count;
           });
-
           delete outcomes[key];
         }
       }
     }
   }
 
-  /* ===========================
-     Step 5: Fetch existing picks to preserve resolved outcomes
-  =========================== */
+  // --- Fetch existing picks to preserve resolved outcomes ---
   const { data: existingPicks } = await supabase.from("wallet_live_picks").select("*");
   const existingMap = new Map((existingPicks || []).map(p => [`${p.market_id}_${p.picked_outcome}`, p]));
 
-/* ===========================
-   Step 6: Build final live picks
-=========================== */
-const finalLive = [];
+  // --- Build final live picks ---
+  const finalLive = [];
+  for (const [market_id, outcomes] of marketNetPickMap.entries()) {
+    const info = marketInfoMap.get(market_id);
 
-for (const [market_id, outcomes] of marketNetPickMap.entries()) {
-  const info = marketInfoMap.get(market_id);
+    for (const [outcome, data] of Object.entries(outcomes)) {
+      if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL) continue;
 
-  const yesNet = outcomes["YES"]?.netVoteWalletIds.size || 0;
-  const noNet  = outcomes["NO"]?.netVoteWalletIds.size || 0;
+      const canonicalOutcome = normalizeOutcome(outcome, info);
+      const resolvedCanonical =
+        normalizeOutcome(
+          cleanResolvedOutcome(info?.resolved_outcome) ||
+          existingMap.get(`${market_id}_${canonicalOutcome}`)?.resolved_outcome ||
+          getResolvedOutcomeFromMarket(info),
+          info
+        );
 
-  for (const [outcome, data] of Object.entries(outcomes)) {
-    // skip if not enough wallets total
-    if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL) continue;
+      const status = determineOutcomeStatus(canonicalOutcome, resolvedCanonical);
 
-    const canonicalOutcome = normalizeOutcome(outcome, info);
-    const resolvedCanonical = normalizeOutcome(
-      cleanResolvedOutcome(info?.resolved_outcome) ||
-      existingMap.get(`${market_id}_${canonicalOutcome}`)?.resolved_outcome ||
-      getResolvedOutcomeFromMarket(info),
-      info
-    );
-
-    const status = determineOutcomeStatus(canonicalOutcome, resolvedCanonical);
-
-    // NET VOTE (strong wallets only)
-    let netVote = 0;
-    if (canonicalOutcome === "YES") netVote = yesNet - noNet;
-    else if (canonicalOutcome === "NO") netVote = noNet - yesNet;
-
-    const netStrength = Math.abs(netVote);
-
-    // Only include pick if net vote meets min wallet threshold
-    if (netStrength < MIN_WALLETS_FOR_SIGNAL) continue;
-
-    finalLive.push({
-      market_id,
-      wallet_id: null,
-      market_name: info?.market_name || "UNKNOWN",
-      event_slug: info?.event_slug || "UNKNOWN",
-      polymarket_id: info?.polymarket_id,
-      market_url: info?.market_url,
-      gameStartTime: info?.gameStartTime,
-      picked_outcome: canonicalOutcome,
-      resolved_outcome: resolvedCanonical,
-      outcome: status,
-      side: determineSide(canonicalOutcome, info),
-
-      wallets: Array.from(data.walletIds),
-      vote_count: data.walletIds.size,
-      vote_counts: Object.fromEntries(Array.from(data.walletIds).map(id => [id, 1])),
-
-      net_vote: netVote,
-      net_strength: netStrength,
-      side_counts: data.sideCounts || {},
-      pnl: Number(data.totalPnl),
-      score: info?.score || null,
-      fetched_at: new Date(),
-      confidence: netStrength, // numeric only
-      market_type: info?.sportsMarketType || "UNKNOWN"
-    });
+      finalLive.push({
+        market_id,
+        wallet_id: null,
+        market_name: info?.market_name || "UNKNOWN",
+        event_slug: info?.event_slug || "UNKNOWN",
+        polymarket_id: info?.polymarket_id,
+        market_url: info?.market_url,
+        gameStartTime: info?.gameStartTime,
+        picked_outcome: canonicalOutcome,
+        resolved_outcome: resolvedCanonical,
+        outcome: status,
+        side: determineSide(canonicalOutcome, info),
+        wallets: Array.from(data.walletIds),
+        vote_count: data.walletIds.size,
+        vote_counts: Object.fromEntries(Array.from(data.walletIds).map(id => [id, 1])),
+        side_counts: data.sideCounts || {},
+        pnl: Number(data.totalPnl),
+        score: info?.score || null,
+        fetched_at: new Date(),
+        confidence: data.walletIds.size,
+        market_type: info?.sportsMarketType || "UNKNOWN"
+      });
+    }
   }
-}
 
-  /* ===========================
-     Step 7: Upsert into Supabase
-  =========================== */
+  // --- Upsert live picks safely ---
   await safeInsert(
     "wallet_live_picks",
     finalLive,
@@ -1342,6 +1267,7 @@ async function normalizeExistingPicksBatch(batchSize = 100) {
 
 // Run batch normalization
 normalizeExistingPicksBatch().catch(console.error);
+
 
 /* ===========================
    Fetch Wallet Activity (DATA-API, Robust)
@@ -1526,12 +1452,15 @@ Outcome: ${pick.outcome} ${outcomeEmoji}
 }
 
 /* ===========================
-   Wallet Metrics Update 
+   Wallet Metrics Update (Optimized)
+   Rolling 3-day win rate
+   Auto-pause / Auto-unpause
+   Single query for all wallets
 =========================== */
 async function updateWalletMetricsRolling3DOptimized() {
-  const ROLLING_DAYS = 2;
+  const ROLLING_DAYS = 1;
   const WIN_RATE_THRESHOLD = 50;
-  const MIN_TOTAL_PICKS = 2;
+  const MIN_TOTAL_PICKS = 1;
 
   // --- Compute rolling window dates ---
   const now = new Date();
@@ -1624,7 +1553,8 @@ async function updateWalletMetricsRolling3DOptimized() {
 }
 
 /* ===========================
-   Returns the wallet's NET picked_outcome for an event based on total $ amount per side.
+   Returns the wallet's NET picked_outcome for an event
+   based on total $ amount per side.
    Hedged events (<5% difference) return null safely.
 =========================== */
 async function getWalletNetPick(walletId, eventSlug) {
@@ -1799,6 +1729,7 @@ Outcome: ${outcome} ${outcomeEmoji}`;
   }
 }
 
+
 /* ===========================
    Send Daily Summary to Telegram + Notes (Once per day)
 =========================== */
@@ -1904,6 +1835,7 @@ Confidence: ${confidenceBreakdown}
     console.error("❌ Failed sending daily summary:", err.message);
   }
 }
+
 
 /* ===========================
    Force Resolve Pending Markets

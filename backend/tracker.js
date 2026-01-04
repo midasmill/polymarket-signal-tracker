@@ -1271,35 +1271,40 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
         }
       }
 
-      finalLive.push({
-        market_id,
-        wallet_id: null,
-        market_name: info?.market_name || "UNKNOWN",
-        event_slug: info?.event_slug || "UNKNOWN",
-        polymarket_id: info?.polymarket_id,
-        market_url: info?.market_url,
-        gameStartTime: info?.gameStartTime,
-        picked_outcome: canonicalOutcome,
-        resolved_outcome: resolvedCanonical,
-        outcome: status,
-        side: determineSide(canonicalOutcome, info),
+finalLive.push({
+  market_id,
+  wallet_id: null,
+  market_name: info?.market_name || "UNKNOWN",
+  event_slug: info?.event_slug || "UNKNOWN",
+  polymarket_id: info?.polymarket_id,
+  market_url: info?.market_url,
+  gameStartTime: info?.gameStartTime,
+  picked_outcome: canonicalOutcome,
+  resolved_outcome: resolvedCanonical,
+  outcome: status,
+  side: determineSide(canonicalOutcome, info),
 
-        wallets: Array.from(data.walletIds),
-        vote_count: data.walletIds.size,
-        vote_counts: Object.fromEntries(
-          Array.from(data.walletIds).map(id => [id, 1])
-        ),
+  wallets: Array.from(data.walletIds),
+  vote_count: data.walletIds.size,
+  vote_counts: Object.fromEntries(
+    Array.from(data.walletIds).map(id => [id, 1])
+  ),
 
-        net_vote: netVote,
-        net_strength: netStrength,
+  net_vote: netVote,
+  net_strength: netStrength,
 
-        side_counts: data.sideCounts || {},
-        pnl: Number(data.totalPnl),
-        score: info?.score || null,
-        fetched_at: new Date(),
-        confidence,
-        market_type: info?.sportsMarketType || "UNKNOWN"
-      });
+  side_counts: data.sideCounts || {},
+  pnl: Number(data.totalPnl),
+  score: info?.score || null,
+  fetched_at: new Date(),
+
+  // ✅ FIX HERE
+  confidence: netStrength,          // INTEGER (safe)
+  confidence_emoji: confidence,     // TEXT (⭐⭐⭐)
+
+  market_type: info?.sportsMarketType || "UNKNOWN"
+});
+
     }
   }
 

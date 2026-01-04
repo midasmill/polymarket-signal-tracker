@@ -1458,9 +1458,9 @@ Outcome: ${pick.outcome} ${outcomeEmoji}
    Single query for all wallets
 =========================== */
 async function updateWalletMetricsRolling3DOptimized() {
-  const ROLLING_DAYS = 3;
+  const ROLLING_DAYS = 1;
   const WIN_RATE_THRESHOLD = 50;
-  const MIN_TOTAL_PICKS = 3;
+  const MIN_TOTAL_PICKS = 1;
 
   // --- Compute rolling window dates ---
   const now = new Date();

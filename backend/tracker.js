@@ -18,7 +18,6 @@ const FORCE_SEND = process.env.FORCE_SEND === "true";
 const RESULT_EMOJIS = { WIN: "✅", LOSS: "❌", Pending: "⚪" };
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) throw new Error("Supabase keys required");
-
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 /* ===========================
@@ -304,9 +303,6 @@ async function autoResolvePendingSignals() {
 
 /* ===========================
    Resolve Markets (FINAL — Safe & Deterministic)
-   - Updates signals outcomes
-   - Updates wallet_live_picks outcomes ONLY if row already exists
-   - NEVER creates or mutates votes/wallets
 =========================== */
 async function resolveMarkets() {
   // 1️⃣ Fetch unresolved signals with a valid event_slug
@@ -897,7 +893,7 @@ await safeRebuildLivePicks();
 }
 
 /* ===========================
-   Safe Insert / Upsert Helper (Verbose + Robust + Type Guard)
+   Safe Insert / Upsert Helper
 =========================== */
 async function safeInsert(table, rows, options = {}) {
   if (!rows || !rows.length) return;
@@ -1076,10 +1072,8 @@ function determineSide(outcome, market) {
 }
 
 /* ===========================
-   Rebuild Wallet Live Picks
-   (Dominant PnL + Net Vote + Confidence from Net Vote)
+   Rebuild Wallet Live Picks (Dominant PnL + Net Vote + Confidence from Net Vote)
 =========================== */
-
 const MIN_PNL_FOR_NET_VOTE = 1000;
 
 async function rebuildWalletLivePicks(forceRebuild = false) {
@@ -1349,7 +1343,6 @@ async function normalizeExistingPicksBatch(batchSize = 100) {
 // Run batch normalization
 normalizeExistingPicksBatch().catch(console.error);
 
-
 /* ===========================
    Fetch Wallet Activity (DATA-API, Robust)
 =========================== */
@@ -1533,10 +1526,7 @@ Outcome: ${pick.outcome} ${outcomeEmoji}
 }
 
 /* ===========================
-   Wallet Metrics Update (Optimized)
-   Rolling 2-day win rate
-   Auto-pause / Auto-unpause
-   Single query for all wallets
+   Wallet Metrics Update 
 =========================== */
 async function updateWalletMetricsRolling3DOptimized() {
   const ROLLING_DAYS = 2;
@@ -1634,8 +1624,7 @@ async function updateWalletMetricsRolling3DOptimized() {
 }
 
 /* ===========================
-   Returns the wallet's NET picked_outcome for an event
-   based on total $ amount per side.
+   Returns the wallet's NET picked_outcome for an event based on total $ amount per side.
    Hedged events (<5% difference) return null safely.
 =========================== */
 async function getWalletNetPick(walletId, eventSlug) {
@@ -1810,7 +1799,6 @@ Outcome: ${outcome} ${outcomeEmoji}`;
   }
 }
 
-
 /* ===========================
    Send Daily Summary to Telegram + Notes (Once per day)
 =========================== */
@@ -1916,7 +1904,6 @@ Confidence: ${confidenceBreakdown}
     console.error("❌ Failed sending daily summary:", err.message);
   }
 }
-
 
 /* ===========================
    Force Resolve Pending Markets

@@ -88,11 +88,22 @@ function inferTimezone(pick) {
 }
 
 /* ===========================
-   Helper: Normalize Event Time
+   Normalize Event Time Helper
 =========================== */
 function normalizeEventTime(timeStr) {
   if (!timeStr) return null;
-  return timeStr.replace(" ", "T").replace(/\+00$/, "Z");
+
+  // Convert "2026-01-04 00:30:00+00" or "2026-01-04 00:30:00+00:00" to ISO
+  let iso = timeStr.replace(" ", "T");
+
+  // Ensure it ends with 'Z' for UTC
+  if (iso.endsWith("+00") || iso.endsWith("+00:00")) {
+    iso = iso.replace(/\+00(:00)?$/, "Z");
+  }
+
+  // Safety check: return valid ISO or null
+  const date = new Date(iso);
+  return isNaN(date) ? null : iso;
 }
 
 /* ===========================
@@ -1344,10 +1355,10 @@ async function updateNotes(slug, pick, confidenceEmoji) {
   const eventLink = eventUrl ? `[${eventName}](${eventUrl})` : eventName;
 
   // --- Fix Event Time ---
-  const normalizedTime = (pick.gameStartTime || pick.event_start_at || null)
-    ? (pick.gameStartTime || pick.event_start_at).replace(" ", "T").replace(/\+00$/, "Z")
-    : null;
-  const eventTime = formatEventTime(normalizedTime, inferTimezone(pick));
+const eventTime = formatEventTime(
+  normalizeEventTime(pick.gameStartTime || pick.event_start_at),
+  inferTimezone(pick)
+);
 
   const text = `
 ⚡️ **NEW MARKET PREDICTION**  
@@ -1393,10 +1404,10 @@ async function updateNotesWithResult(slug, pick, confidenceEmoji) {
   const eventLink = eventUrl ? `[${eventName}](${eventUrl})` : eventName;
 
   // --- Fix Event Time ---
-  const normalizedTime = (pick.gameStartTime || pick.event_start_at || null)
-    ? (pick.gameStartTime || pick.event_start_at).replace(" ", "T").replace(/\+00$/, "Z")
-    : null;
-  const eventTime = formatEventTime(normalizedTime, inferTimezone(pick));
+const eventTime = formatEventTime(
+  normalizeEventTime(pick.gameStartTime || pick.event_start_at),
+  inferTimezone(pick)
+);
 
   const resultText = `
 ⚡️ **RESULT FOR MARKET PREDICTION**  
@@ -1608,8 +1619,10 @@ async function processAndSendSignals() {
     if (eventUrl.includes("/markets/")) eventUrl = eventUrl.replace("/markets/", "/event/");
 
     // Normalize event start time
-    const normalizedTime = normalizeEventTime(pick.gameStartTime || pick.event_start_at);
-    const eventTime = formatEventTime(normalizedTime, inferTimezone(pick));
+const eventTime = formatEventTime(
+  normalizeEventTime(pick.gameStartTime || pick.event_start_at),
+  inferTimezone(pick)
+);
 
     // Telegram Markdown
     const text = `⚡️ NEW MARKET PREDICTION
@@ -1677,8 +1690,10 @@ async function processAndSendResults() {
     if (eventUrl.includes("/markets/")) eventUrl = eventUrl.replace("/markets/", "/event/");
 
     // Normalize event start time
-    const normalizedTime = normalizeEventTime(pick.gameStartTime || pick.event_start_at);
-    const eventTime = formatEventTime(normalizedTime, inferTimezone(pick));
+const eventTime = formatEventTime(
+  normalizeEventTime(pick.gameStartTime || pick.event_start_at),
+  inferTimezone(pick)
+);
 
     // Telegram Markdown
     const text = `⚡️ RESULT FOR MARKET PREDICTION

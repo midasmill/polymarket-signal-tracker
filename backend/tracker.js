@@ -1216,68 +1216,69 @@ async function rebuildWalletLivePicks(forceRebuild = false) {
   const { data: existingPicks } = await supabase.from("wallet_live_picks").select("*");
   const existingMap = new Map((existingPicks || []).map(p => [`${p.market_id}_${p.picked_outcome}`, p]));
 
-  /* ===========================
-     Step 6: Build final live picks
-  =========================== */
-  const finalLive = [];
+/* ===========================
+   Step 6: Build final live picks
+=========================== */
+const finalLive = [];
 
-  for (const [market_id, outcomes] of marketNetPickMap.entries()) {
-    const info = marketInfoMap.get(market_id);
+for (const [market_id, outcomes] of marketNetPickMap.entries()) {
+  const info = marketInfoMap.get(market_id);
 
-    const yesNet = outcomes["YES"]?.netVoteWalletIds.size || 0;
-    const noNet  = outcomes["NO"]?.netVoteWalletIds.size || 0;
+  const yesNet = outcomes["YES"]?.netVoteWalletIds.size || 0;
+  const noNet  = outcomes["NO"]?.netVoteWalletIds.size || 0;
 
-    for (const [outcome, data] of Object.entries(outcomes)) {
-      if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL) continue;
+  for (const [outcome, data] of Object.entries(outcomes)) {
+    // skip if not enough wallets total
+    if (data.walletIds.size < MIN_WALLETS_FOR_SIGNAL) continue;
 
-      const canonicalOutcome = normalizeOutcome(outcome, info);
-      const resolvedCanonical = normalizeOutcome(
-        cleanResolvedOutcome(info?.resolved_outcome) ||
-        existingMap.get(`${market_id}_${canonicalOutcome}`)?.resolved_outcome ||
-        getResolvedOutcomeFromMarket(info),
-        info
-      );
+    const canonicalOutcome = normalizeOutcome(outcome, info);
+    const resolvedCanonical = normalizeOutcome(
+      cleanResolvedOutcome(info?.resolved_outcome) ||
+      existingMap.get(`${market_id}_${canonicalOutcome}`)?.resolved_outcome ||
+      getResolvedOutcomeFromMarket(info),
+      info
+    );
 
-      const status = determineOutcomeStatus(canonicalOutcome, resolvedCanonical);
+    const status = determineOutcomeStatus(canonicalOutcome, resolvedCanonical);
 
-      // ✅ NET VOTE (strong wallets only)
-      let netVote = 0;
-      if (canonicalOutcome === "YES") netVote = yesNet - noNet;
-      else if (canonicalOutcome === "NO") netVote = noNet - yesNet;
+    // NET VOTE (strong wallets only)
+    let netVote = 0;
+    if (canonicalOutcome === "YES") netVote = yesNet - noNet;
+    else if (canonicalOutcome === "NO") netVote = noNet - yesNet;
 
-      const netStrength = Math.abs(netVote);
+    const netStrength = Math.abs(netVote);
 
-      finalLive.push({
-        market_id,
-        wallet_id: null,
-        market_name: info?.market_name || "UNKNOWN",
-        event_slug: info?.event_slug || "UNKNOWN",
-        polymarket_id: info?.polymarket_id,
-        market_url: info?.market_url,
-        gameStartTime: info?.gameStartTime,
-        picked_outcome: canonicalOutcome,
-        resolved_outcome: resolvedCanonical,
-        outcome: status,
-        side: determineSide(canonicalOutcome, info),
+    // Only include pick if net vote meets min wallet threshold
+    if (netStrength < MIN_WALLETS_FOR_SIGNAL) continue;
 
-        wallets: Array.from(data.walletIds),
-        vote_count: data.walletIds.size,
-        vote_counts: Object.fromEntries(Array.from(data.walletIds).map(id => [id, 1])),
+    finalLive.push({
+      market_id,
+      wallet_id: null,
+      market_name: info?.market_name || "UNKNOWN",
+      event_slug: info?.event_slug || "UNKNOWN",
+      polymarket_id: info?.polymarket_id,
+      market_url: info?.market_url,
+      gameStartTime: info?.gameStartTime,
+      picked_outcome: canonicalOutcome,
+      resolved_outcome: resolvedCanonical,
+      outcome: status,
+      side: determineSide(canonicalOutcome, info),
 
-        net_vote: netVote,
-        net_strength: netStrength,
+      wallets: Array.from(data.walletIds),
+      vote_count: data.walletIds.size,
+      vote_counts: Object.fromEntries(Array.from(data.walletIds).map(id => [id, 1])),
 
-        side_counts: data.sideCounts || {},
-        pnl: Number(data.totalPnl),
-        score: info?.score || null,
-        fetched_at: new Date(),
-
-        confidence: netStrength, // numeric only for DB
-
-        market_type: info?.sportsMarketType || "UNKNOWN"
-      });
-    }
+      net_vote: netVote,
+      net_strength: netStrength,
+      side_counts: data.sideCounts || {},
+      pnl: Number(data.totalPnl),
+      score: info?.score || null,
+      fetched_at: new Date(),
+      confidence: netStrength, // numeric only
+      market_type: info?.sportsMarketType || "UNKNOWN"
+    });
   }
+}
 
   /* ===========================
      Step 7: Upsert into Supabase
